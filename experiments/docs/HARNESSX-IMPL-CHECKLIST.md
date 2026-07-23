@@ -1,61 +1,214 @@
-# HarnessX 变体池自建施工清单(Jul-22,实施级)
+# HarnessX 变体池施工清单 v2 —— 论文优先版
 
-> 来源:researcher 两轮全库精读(clone = `%LOCALAPPDATA%\Temp\claude\D--PycharmProj-MAS-Directions\8d4fb152-586f-49b7-9d92-83d5b63d60ab\scratchpad\HarnessX`)+ 论文 PDF p.8-11/17-18 亲读。主循环抽查锚点:`run.py:633/672/683/1174`、`task.py:76`、`validate_workflow.py:688-694` 全部属实。
-> 前提(L4 已验):repo 里论文 §4.5 变体池机制**零实现**;repo 真实现 = MetaHarness 单谱系爬山环 ≈ Table 5 Global 对照组(49.5)。自建 = 在其上建 Ensemble 臂(87.4)。
-> 深度标注:全文 L4(代码逐行亲验 + PDF 亲读),除 LOC/人时估计(工程判断)。
+> **设计原则(用户裁定 Jul-23):一切按论文来。凡我方设计与论文冲突,一律采用论文的方法。**
+> 依据:PDF 逐字精读(正文 §4–§6 + 附录 A/B.1/B.3/C)+ 本地仓 `D:\PycharmProj\HarnessX` 逐文件核验。所有判断带 `文件:行号` 或 `PDF 页码`。
+> 前置事实:论文变体池机制在官方 repo **零实现**;repo 真实现 = 单谱系 best-so-far 爬山环 ≈ 论文 Table 5 的 **Global 对照臂**。
+> v1(Jul-22 缩水自选版)已作废,差异见 §10。
 
-## Part A — 基础设施深挖结论(五块)
+---
 
-1. **任务加载**:GAIA recipe 走 `load_gaia_tasks_from_json`(`benchmarks/gaia/task.py:286`),103 任务 = Table 5 同集。`GAIATask.level`(`task.py:76`,1/2/3)= **现成三桶 cluster key,零解析成本**;`annotator_metadata`(`task.py:80`)是自由文本勿当域标签。
-2. **并发模型**:每任务独立 `model_config.agentic(round_config)` 新建 runtime(`run.py:731`;`harness.py:999`),config 仅按引用共享,已验证安全。改多变体 = 逐任务换 `variant_configs[route(task)]`,**不引入新共享态风险**。⚠️ tracer 是每轮单一 journal(`run.py:697`),多变体须每变体独立 tracer/session 子目录。
-3. **成本记账**:per-task cost/tokens 已在 records(`run.py:208-215`),per-variant 只是换 group key,琐碎。
-4. **EvolveValidator 链**(`validate_workflow.py:857-870`):build 阶段(canonicalize/replay/contract)与 evidence 门变体无关可复用;**⚠️ novelty 阶段主动敌对**——`check_novelty`(`:694`)按全局 journal 的 `(levers, predicted_affected)` 签名拦 `reverted_signature_reused`(签名 `:688-691`),会误伤 fork 兄弟变体对同 cluster 同 lever 的合法重试。逃生口 `retry_rationale`(`:755`);干净修法 = 每变体独立 journal(W9)。
-5. **meta-agent brief**:`MetaAgent` 绑单一 `memo_path`(`run.py:655-664`);brief 的 Pareto 全局约束段(`agent.py:765-773`)要求保护所有 already-passing clusters,变体隔离下须收窄为只保护本变体路由到的 cluster(W11),否则回到 Global 语义。
+## 0. 论文优先带来的范围变化(先读这一节)
 
-## Part B — 主施工表
+采纳论文优先后,**三块此前被判为"可选/降级"的内容重新成为必做**:
 
-| # | 工作项 | 类型 | 接入点 | 可复用符号 | 需自己发明的设计决策 | LOC | 依赖 | 里程碑 |
+| 项 | v1 判定 | v2 判定 | 依据 |
+|---|---|---|---|
+| 多候选 Evolver(每轮 4 个候选) | M2 可选 | **必做** | Algorithm 1 L15(p.9);Table 8 `K_t=4`(p.29) |
+| Critic 阶段 + ship_ranking | 省略(曾引 Table 6 为据) | **必做** | §4.3(p.10);Algorithm 1 L19–24 |
+| pass@2 双 rollout | 省略(repo 无 pass@k) | **必做** | §6.1(p.15);A.3 公式 6(p.29) |
+
+⚠️ **成本与工期含义**:这三项把 M1 从约 1000 行扩到约 1900 行,API 成本因 pass@2 翻倍。其中 **Critic + 多候选 ≈ AEGIS 重建**,而论文 Table 6 自证四阶段相对单 agent evolver 仅差 1.0pp(落在一个标准误 ~3.3pp 内),贡献是约 12% token 效率而非准确率。**已按指令纳入,单列为 W12/W16 便于随时取舍。**
+
+---
+
+## 1. 与论文对齐的实验参数(Table 8 p.29 + A.2/A.3 p.28-29)
+
+以下全部照抄论文,不再自选:
+
+| 参数 | 论文值 | repo 现状 | 动作 |
+|---|---|---|---|
+| 每轮候选数 `K_t` | **4** | 1(`agent.py:646` 每轮只写一个 config) | 改造(W12) |
+| 随机种子 / 谱系数 | **3** | — | 编排层设定 |
+| 评测 rollout | **pass@2**(2 次独立) | 1 次(无 pass@k 参数) | 新建(W17) |
+| 噪声阈值 | **±5%** 单轮 pass 数波动 | `pass_count_noise_threshold` 概念一致 | 对齐取值 |
+| GAIA max-steps | **20** | 默认 15;GPT-5 预设 40 | 传参对齐 |
+| 任务并发 | **10** | `--concurrency` | 传参对齐 |
+| 元 agent 并发 / 步上限 | **4 / 200** | `--evolve-steps` | 传参对齐 |
+| 轮数 T / 早停 P | **15 / 3** | 有 `--num-rounds`,**无早停** | 新建(W15) |
+| `H_0` | 手工 competent harness + 床专属工具注册表 | `make_gaia_builder_gpt5` | ✅ 已吻合 |
+| GAIA 任务集 | **103 题 text-only,难度 39/52/12** | 我方脚本按 task_id 取前 N | 改**分层抽样**(W18) |
+| 基础设施故障 rollout | **计为失败**,不剔除(A.3) | — | 评测脚本须遵守 |
+| 变体池容量 `K` | **全文未给** ⚠️ | — | 我方定义并报告(见 §11) |
+
+---
+
+## 2. 主施工表 v2
+
+图例:🆕 = v2 新增(论文优先所致);⬆️ = v1 已有但范围扩大。
+
+| # | 工作项 | 类型 | 接入点 | 论文依据 | 需自己定的决策 | LOC | 依赖 | 里程碑 |
 |---|---|---|---|---|---|---|---|---|
-| W0 | oracle 天花板离线聚合(K 条 Global 谱系事后取并集) | 新建脚本 | 新 `recipe/gaia_evolver/oracle_ceiling.py` | `comparison.json`(`run.py:978`)、各轮 `config.yaml`(`run.py:707-708`) | 变体来源(K seed / 轮 checkpoint);oracle=真值 argmax | 30-80 | 无 | M0 |
-| W1 | 变体池状态容器(替换单 `current_config`/`best_so_far`) | 新建模块 | 新 `variant_pool.py`;接 `run.py:633,672` | `HarnessConfig.copy`(`harness.py:929`,浅拷贝独立)、`to_yaml_file` | Variant 结构;K 值 | 120-220 | 无 | M1 |
-| W2 | 路由表 + router(argmax success) | 新建模块 | 新 `router.py`;接 `run.py:723` | records `task_id`+`passed`(`run.py:198-215`) | 冷启动路由;cluster 定义(`level`?) | 100-180 | W1 | M1 |
-| W3 | success-rate 估计器(per (variant,task/cluster) 跨轮) | 新建 | `router.py`/`estimator.py` | `compute_attribution`(`journal.py:605`)、per-round passed 集(`run.py:779,837`) | 估计口径(裸率/平滑/窗口);陈旧条目处理 | 80-150 | W1 | M1 |
-| W4 | 评测环 per-variant scoping(逐任务选变体;候选只跑路由子集) | 改造 | `run.py:723-774` | sem+gather 骨架、`agentic`、`_run_task` | 路由子集 vs 全量刷新的预算权衡 | 100-180 | W1,W2 | M1 |
-| W5 | 冲突检测 + fork 触发(聚合门→逐任务分支) | 改造+新建 | 替换 `_score_and_gate`(`run.py:1174-1257`);接 `run.py:802-820` | `flipped`/`regressed`(`journal.py:628-666`) | fork 继承规则;net-worse 判据 | 100-160 | W1,W3 | M1 |
-| W6 | 变体退役(池满退最差) | 新建(小) | `variant_pool.py` | 变体聚合 success(W3) | "lowest-performing"口径 | 30-50 | W1,W3 | M1(可设大 K 暂缓) |
-| W7 | 聚类器 | 复用/薄新建 | `router.py`;`GAIATask.level`(`task.py:76`) | `level` 现成 | per-task / per-level / 学习聚类 | 0-150 | W2 | M1=0;M2 |
-| W8 | 编排重写(抽引擎 + 多变体报表/tracer) | 改造 | 抽 `run.py:683-974`;重写 `print_multiround_comparison`(`run.py:255`);tracer(`run.py:697`) | 循环骨架、`comparison.json` writer | 引擎 API 边界 | 120-220 | W1,W4,W5 | M1 部分;M2 完整 |
-| W9 | 按变体隔离 journal/novelty(修 Part A-4 误伤) | 改造 | `run.py:655-664`;`agent.py:511,692`;`check_novelty`(`validate_workflow.py:694`) | 每变体 `learnings_{vid}.md`;`retry_rationale`(`:755`) | novelty 作用域=变体 or 变体+cluster | 50-100 | W1 | M1 |
-| W10 | per-variant 成本记账(重桶) | 改造(小) | `run.py:780,1160` | per-task cost(`run.py:208-215`) | 无 | 30-60 | W8 | M1 |
-| W11 | brief Pareto 约束收窄到本变体 cluster | 改造(小) | `agent.py:765-773` | brief 其余段 | 隔离下的约束措辞 | 20-40 | W9 | M1 |
-| W12 | 多候选 evolver(evolve 一轮吐 {H_t^k},per-candidate fork) | 大改造 | `MetaAgent.evolve`(`agent.py:538-678`);validator 逐候选 | 现单 config 产出路径、build 阶段 validator | 候选枚举协议;Critic 排序 | 300-500 | W5,W8 | M2 |
+| W0 | oracle 天花板离线聚合 | 新建 | `recipe/gaia_evolver/oracle_ceiling.py` ✅ **已完成** `6a84dd7` | — | 变体来源 | 30-80 | — | M0 |
+| W1 | 变体池状态容器 | 新建 | 新 `variant_pool.py`;替换 `run.py:633,672` | §4.5 p.11 `V_t ≤ K` | **K 取值** | 120-220 | — | M1 |
+| W2 | 路由器 argmax | 新建 | 新 `router.py`;接 `run.py:723` | §4.5 p.11 | **冷启动** | 100-180 | W1 | M1 |
+| W3 | 成功率账本 | 新建 | `estimator.py` | §4.5 p.11 | **估计口径/窗口** | 80-150 | W1 | M1 |
+| W4 | 逐变体范围收窄评测 | 改造 | `run.py:723-774` | §4.5 p.11;§6.3 p.18 | 与全集测量的分工(§4) | 100-180 | W1,W2 | M1 |
+| W5 ⬆️ | 三路 fork 门 | 改造+新建 | 替换 `_score_and_gate`(`run.py:1174`) | §4.5 p.11 | fork 继承规则 | 120-200 | W1,W3,W17 | M1 |
+| W6 | 变体退役 | 新建 | `variant_pool.py` | §4.5 p.11 | **退役指标** | 30-50 | W1,W3 | M1 |
+| W7 ⬆️ | 簇定义 | 视选型 | `router.py` | §4.5/§6.3 **三读法并存** | **须裁决+消融**(§3) | 0-200 | W2 | M1 |
+| W8 | 编排引擎抽取 + 多变体报表/tracer | 改造 | 抽 `run.py:683-974` | — | 引擎边界 | 120-220 | W1,W4,W5 | M1 |
+| W9 | 逐变体 journal 隔离 | 改造 | `run.py:655-664`;`check_novelty`(`validate_workflow.py:694`) | —(repo 自有约束) | novelty 作用域 | 50-100 | W1 | M1 |
+| W10 | per-variant **token** 记账 | 改造 | `run.py:780,1160` | — | 无(用 token 不用 cost,§5) | 30-60 | W8 | M1 |
+| W11 | brief 的 Pareto 约束收窄 | 改造 | `agent.py:765-773` | §4.5 收窄语义 | 措辞 | 20-40 | W9 | M1 |
+| **W12** ⬆️ | **多候选 Evolver `{H̃^k}_{k=1..4}`** | 大改造 | `MetaAgent.evolve`(`agent.py:538-678`) | **Alg.1 L15;Table 8** | 候选↔目标变体配对 | 300-500 | W5,W8 | **M1** |
+| **W13** 🆕 | **change manifest 结构** | 新建 | 新 `manifest.py` + evolve 产物契约 | **B.3 Table 9 + YAML schema p.35-36** | 无(照抄)+ 目标变体字段 | 80-150 | W12 | M1 |
+| **W14** 🆕 | **目标变体选择策略** | 新建 | `router.py` / 编排 | §4.5 "targeting variant k"(**机制未给**) | **全部**:轮转/最差优先/失败密度加权 | 60-120 | W1,W3 | M1 |
+| **W15** 🆕 | **早停 idle ≥ P** | 新建(小) | 编排引擎 | Alg.1 L29;§6.1 P=3 | **计数作用域:全局 or 逐变体** | 30-60 | W8 | M1 |
+| **W16** 🆕 | **Critic 阶段 + ship_ranking** | 新建 | 新 `critic.py`,接 evolve 与门之间 | §4.3 p.10;Alg.1 L19-24 | 排序判据具体化 | 200-350 | W12,W13 | M1 |
+| **W17** 🆕 | **pass@2 双 rollout** | 改造 | `run.py:723-774` `_run_one` | §6.1 p.15;A.3 公式 6 | 无(照抄无偏估计量) | 60-120 | — | **M0+M1** |
+| **W18** 🆕 | **GAIA 子集分层抽样 39/52/12** | 改造 | `experiments/build_gaia_subset.py` | A.2 p.28 | 无 | 20-40 | — | M0 |
+| **W19** 🆕 | **attribution_signature 核对** | 新建 | `critic.py` + 轨迹扫描 | **B.3 p.36**;p.35 "falsifiable" | 无(schema 已给) | 80-150 | W13,W16 | M1 |
+| **W20** 🆕 | **预测外回退台账** | 新建 | 编排 + journal | **Planner prompt p.30**(k-aware 回退清单) | 无 | 60-120 | W5 | M1 |
+| **W21** 🆕 | **seesaw 基准改全历史已解集** | 改造 | W3 账本 + W5 门 | **§4.1 p.8 逐字** "any previously solved task recorded in `T_t`" | 无 | 40-80 | W3,W5 | M1 |
+| W22 🟡 | bucket 声誉/命中率台账 | 新建 | 编排 | Planner prompt p.30 | 窗口大小 | 60-120 | W20 | M1 可选 |
+| **W23** 🆕 | **slot 复制(K 份 tool registry/workspace/sandbox)** | 新建 | `variant_pool.py`(W1 内) | §3.1 p.6 slot=配置级单例;D2/D4 最高频编辑(§3.3) | 变体分叉时哪些 slot 需独立、哪些可共享 | 60-120 | W1 | M1 |
+| **W24** 🆕 | **Evolver Level-2 往返验证** | 新建 | `manifest.py`/evolve 产物契约 | prompt p.32;C-R10-02 实例 p.37 | 无(照抄 "_prepare_messages 内容存活" 检查) | 60-120 | W13 | M1 |
+| **W25** 🆕🔴 | **Digester + 持久证据链** | 新建 | `evidence.py` | §4.3 p.10;§E.1 p.43 | Digester 压缩指令(prompt 未公开) | 150-300 | — | M1 |
+| **W26** 🆕🔴 | **实验元数据 lock + H0 冻结** | 新建 | `experiment_lock.py` | Codex 7;A.4 competent H0 | 无 | 60-120 | — | **M0** |
+| **W27** 🆕🔴 | **完整确定性门五关**(非仅 seesaw) | 改造+新建 | `gate.py`(§2.4 修正) | §4.3 p.10 逐字五关 | 无 | 120-200 | W13 | M1 |
+| **W28** 🆕 | **主动反奖励黑客** | 新建 | 评测层+`critic.py` | §6.6;附录 C R10 | 交叉验证是否启用 | 80-150 | W19 | M1 |
+| **W29** 🆕🔴 | **评测输出契约**(final/peak/曲线/pass@1/分层) | 新建 | 报表层 | §6.1/§6.3/§7.7 | 无 | 60-120 | — | **M0** |
+| **W30** 🆕🔴 | **成本校准分账 + Level 分层** | 改造 | 校准脚本 | §4.3;Codex 10 | 样本量 | 40-80 | — | **M0** |
+| **—** 🔴 | **routing freeze**(本轮前冻结,禁反向路由) | 契约 | `router.py`(§2.3/§6.2) | Codex 5:正确性核心 | 无 | 入 W2 | W2 | M1 |
 
-## Part C — 里程碑分层(熟练 MSc + Claude 辅助,不含算力等待/调参反复)
+---
 
-| 里程碑 | 内容 | 累计 LOC | 累计人时 | 判据/备注 |
-|---|---|---|---|---|
-| **M0** oracle 天花板 | W0 + 复用单谱系环跑 K 条 baseline(零新代码) | ~30-80 | **4-8h** | headroom = oracle 并集 − 最优单谱系轮。贴近→止损;远大→进 M1 |
-| **M1** 最小在线变体池 | W1-W6,W7=0(cluster=task),W8 部分,W9-W11;round-level fork、裸率估计 | ~900-1200 | **~60-100h** | = E0 之后第一个真在线系统 |
-| **M2** 忠实复现 | + W7(level/学习聚类)、W12、W5 升级、W6/W8 完整 | ~1700-2100 | **~180-320h** | 能否复现 87.4 仍受欠定件+GAIA 联网噪声制约 |
+## 3. 必须由我方裁决的一项:簇的定义(W7)
 
-## Part D — 对首轮评估(Jul-22 上午)的修正
+论文对 cluster **从未正式定义**,证据支持三种读法:
 
-- 🔧 修正1(C7 降本):cluster 非从零发明——`GAIATask.level` 现成三桶,C7 从"发明"降"接线"。
-- 🔧 修正2(C8 降本):per-variant 成本记账 = 换 group key,非从零。
-- 🔧 修正3(**新增风险**):"EvolveValidator 可直接复用"仅对 build 阶段成立;novelty 阶段与全局 journal 强耦合,对 fork 变体**主动敌对**,必须 W9 隔离。
-- 🔧 修正4(C1 降本):`HarnessConfig.copy`(`harness.py:929-942`)对 processors/plugins/_rt_procs 各建独立 list,变体拷贝廉价。
-- ✅ 维持:估计口径/冷启动/退役仍欠定且是 87.4 vs 49.5 科学承重件;评测预算×K 与 GAIA 噪声仍是主风险;忠实 fork 需 W12 重构 evolver(repo 每轮只吐一个 config,`agent.py:646`)。
+| 读法 | 证据 | 工作量 |
+|---|---|---|
+| **(a) 路由诱导的任务划分** | §4.5 "a candidate targeting variant k is tested only against **tasks routed to k**";§6.3 p.18 "its target cluster" | W7 = 0 |
+| (b) 元 agent 生成的失败模式分组 | Planner prompt p.30 "recurring failure modes … **your own grouping**";"name the neglected bucket and **the cluster it would target**";C.1 p.36 "grouped the 23 failed tasks **by failure mode**";附录 D 全部图表 "Failure clusters" | 150-200,需 meta-agent 输出可复用簇 id |
+| (c) 语义/难度分层(如 `GAIATask.level`) | §4.5 字面 | 低,但**≈ 论文的 "Domain-aware clustering"**,p.18 明列为**另一种** pilot 策略 |
 
-## 科学欠定件(必须自己发明、且 headline 吊在其上)
+**论文优先无法裁决自身歧义。** 裁定:**主臂采 (a)**——它是 §4.5 同段的字面机制且零额外成本;**(b) 与 (c) 作为消融臂**。
+⚠️ v1 曾写"`GAIATask.level` 是现成 cluster key,W7 可归零"——**该结论作废**:level 属读法 (c),是论文自己列为待探索的另一策略,不能当主臂。
 
-router 估计口径 / 冷启动 / fork 继承 / 退役指标 / cluster 粒度——论文 §4.5 与 6.3 措辞自相矛盾(cluster 一词在 6.3 消失)。**含义:M2 复现数字无法干净对表;反面 = estimator/router 设计空间可做成带消融的一等贡献(接"修评估洞"立论)。**
+---
 
-## 关键文件索引(clone 内相对路径)
+## 4. 论文自身的矛盾:评测范围(影响 W4 与预算)
 
-- `recipe/gaia_evolver/run.py` — 演化外环(683)/单 config·best(633,672)/评测环(721-774)/门(1174)/accept-revert(802-820)/evolve 调用(940-965)/comparison.json(978)
-- `harnessx/meta_harness/agent.py` — evolve(538-678)/brief(719-812)/compute_changeset(439-485)
-- `harnessx/meta_harness/validate_workflow.py` — check_novelty(694)/签名(688-691)/EvolveValidator(857)
-- `harnessx/meta_harness/journal.py` — compute_attribution(605)/build_context(366)/per-task 矩阵(559-576)
-- `harnessx/meta_harness/replay.py` — 合成任务冒烟门(64-151)
-- `harnessx/core/harness.py` — HarnessConfig.copy(929)/canonicalize(944)/Harness.__init__(978-999)
-- `benchmarks/gaia/task.py` — GAIATask(60-122)/level(76)/loader(286)
+- §6.1 p.15:"The full task set is evaluated every round (**no subsampling**)"
+- A.2 p.28:"The same evaluation set for each benchmark is **re-scored at every round**"
+- §6.3 p.18:"each edit evaluated **only against its target cluster** rather than the full task set"
+
+**调和读法(采纳)**:**轮次测量**用全任务集(A.2 明证),**候选门控**用目标簇(p.18 明证)。
+**预算含义**:W4 的 token 节省**不来自减少轮次评测**,而来自"候选门控只测子集"+"减少无效提议"(p.18 原话 "avoiding the wasted proposals")。**预算按全集每轮重测计算。**
+
+---
+
+## 5. 成本核算的硬约束
+
+`_estimate_cost`(`runloop.py:947-949`)**硬编码 Claude Sonnet 价格**($3/M 入、$15/M 出),`:452` 无条件调用,无 provider 真实成本分支。DeepSeek V4 flash 下报告值约为真实的 **27 倍**。
+
+| 受影响处 | 结论 |
+|---|---|
+| `cost_usd` / `round_cost` | ❌ 失真,**一律改用 `total_tokens` 自行计价**(W10) |
+| CostGuardProcessor | ⚠️ 实为伪装成美元上限的 token 上限($2 ≈ 476k tokens) |
+| 门的 `cost_weight` | ✅ 不受影响——用相对比值 `(round_cost−best_cost)/best_cost`(`run.py:1219`),常数倍率约掉 |
+
+---
+
+## 6. 里程碑与预算(论文优先重算)
+
+锚点:论文 143.7M tokens(Global,GAIA-103,15 轮,**pass@2**)⇒ **46.5k tokens/单次尝试**。采纳 pass@2 后按论文 token 量级直接对齐。
+DeepSeek V4(litellm 已收录定价,无零成本注册风险):flash $0.14/$0.28,pro $0.435/$0.87。
+
+| 里程碑 | 内容 | 规模 | 预算 |
+|---|---|---|---|
+| **M0** | W0 ✅ + W17 + W18;3 谱系 Global 基线 → oracle 天花板 | 3 × 103 题 × 15 轮 × **pass@2** | **$130–310**(见下修正) |
+| **M1** | W1–W24 全部(见 §2 主表) | 同上 + 变体池 | **约 $200–400** |
+| M2 | 簇消融 (b)/(c) 臂 + 其余消融 | — | 视消融数 |
+
+**⚠️ M0 预算修正(第三轮精读后)**:此前 $95 基于"143.7M = 内环计费 token"的错误口径。实际 143.7M 是**轨迹体量/元 agent 消耗**(§7.5 反推:单次任务计费 ≈332K,内环真实总量 ≈1,026M,是 143.7M 的 7 倍)。抵消因素:DeepSeek V4 缓存读比未命中便宜 50–120 倍、缓存写免费,agent 循环前缀稳定命中率高。两者相抵,**M0 真实区间 $130–310,由缓存命中率主导**。
+
+**6 题校准的三个目的**(必须先跑,再定 M0 最终预算):
+1. 实测缓存命中率(唯一大杠杆);
+2. 实测单次尝试计费 token;
+3. **实测 DeepSeek V4-flash 在 GAIA 上的通过率是否显著高于能力地板**(附录 D.5:Qwen3.5-9B 在 SWE 上 hit-rate 塌到 0.05,"演化无法累积";内环模型太弱 → 变体无互补性 → M0 假阴性)。
+
+---
+
+## 7. 为什么 pass@2 不能省(W17 的正当性)
+
+§6.1 p.15 逐字:pass@2 的目的是 "reducing sampling noise **while preserving a binary per-task signal for the seesaw constraint**"。
+
+fork 的触发条件是"改善一批、**同时**弄坏另一批"。单次评测下,**纯随机波动就会持续制造这种混合结果**,后果:变体池被噪声撑爆 → K 迅速耗尽 → 退役频繁触发 → 机制退化为随机漂移。
+即:**省掉 pass@2 会让变体池机制在噪声上空转**,这是正确性问题而非精度问题。
+
+**补充防线(我方设计,须报告)**:fork 触发的最小规模门槛,如 `|改善集| ≥ 2 且 |回退集| ≥ 2`。
+
+---
+
+## 8. 可直接复用的既有件
+
+| 论文概念 | repo 对应 | 位置 |
+|---|---|---|
+| 逐题 delta(fork 判据原料) | `compute_attribution` flipped/regressed | `journal.py:605` |
+| 冒烟测试(新 processor 必附) | `run_synthetic_task_smoke_gate` | `replay.py:64` |
+| 配置规范化 | `canonicalize` | `harness.py:944` |
+| manifest 的"预期影响"雏形 | `predicted_affected` / `regressed_unpredicted` | `journal.py` / `run.py:827-904` |
+| 门按序检查、首个失败中止 | `EvolveValidator` | `validate_workflow.py:857` |
+| 变体 config 拷贝(廉价且独立) | `HarnessConfig.copy` | `harness.py:929` |
+| 逐题 pass/fail 落盘 | `comparison.json` | `run.py:978` |
+| 并发安全(每任务独立 runtime) | `_instantiate_runtime` | `harness.py:999` |
+
+---
+
+## 9. 架构摩擦点
+
+| 摩擦 | 位置 | 冲击 |
+|---|---|---|
+| 演化环内联 `main()`,**4 份带漂移副本** | `run.py`;同 recipe 内 `run_meta.py:403` 第二份门;tau2 用 4 元组+reward;tb2 无门 | W8;但**只改 gaia 一条线即可** |
+| 单 config / 单 best 元组 | `run.py:633,672` | W1 |
+| 门以聚合通过率判定 | `run.py:1174` | W5 |
+| **novelty 门读全局 journal,误杀 fork 兄弟变体** | `check_novelty`(`validate_workflow.py:694`),签名 `:688-691` | **W9 必做** |
+| evolver 每轮只产一个 config | `agent.py:646` | W12 |
+| tracer 每轮单例 | `run.py:697` | W4/W8 |
+| `_rt_procs` 不可序列化 | `harness.py:591-593` | W1:变体持久化必须走 `_target_` 路径 |
+
+---
+
+## 10. v1 → v2 变更表
+
+| 变更 | 原因 |
+|---|---|
+| W12 多候选 Evolver:M2 可选 → **M1 必做** | Alg.1 L15;Table 8 `K_t=4` |
+| 新增 W16 Critic | §4.3;论文优先(尽管 Table 6 自证其对准确率无显著贡献) |
+| 新增 W17 pass@2 | §6.1;且为 fork 正确性前提 |
+| 新增 W13 manifest / W19 attribution_signature | B.3 Table 9 + YAML schema |
+| 新增 W14 / W15 / W20 / W21 | Alg.1 L15,L29;§4.1 seesaw 定义;Planner prompt |
+| 新增 W18 分层抽样 | A.2 的 39/52/12 |
+| W7 簇:判"可归零" → **三读法并存,须裁决+消融** | 附录 Planner prompt 与 Failure clusters 证据 |
+| `GAIATask.level` 当 cluster key 的结论 **作废** | level 属读法 (c),即论文另列的 Domain-aware clustering pilot 策略 |
+| 预算 M0:$53 → **$95** | pass@2 使内环翻倍 |
+| 成本口径:`cost_usd` → **`total_tokens`** | `_estimate_cost` 硬编码 Sonnet 价 |
+| 移除"AEGIS 缺失是效度威胁" | Table 6 自证单 agent evolver 与 AEGIS 差在一个标准误内;且 v2 已纳入 Critic/多候选 |
+
+---
+
+## 11. 仍开放的信息缺口(论文未给,我方须定义并作为贡献报告)
+
+1. 变体池容量 **K**;
+2. 成功率估计 `Ŝ` 的口径(平滑 / 窗口 / 陈旧格子处理);
+3. 路由器冷启动与探索策略;
+4. fork 时新变体的任务与历史继承规则;
+5. 退役的 "lowest-performing" 度量;
+6. 候选的目标变体选择机制(W14);
+7. idle 计数在变体隔离下的作用域(W15);
+8. 簇的正式定义(§3,已裁定主臂 + 消融臂)。
+
+**这八项即 M1 的科研贡献面**:不是复现既有机制,而是补完论文留白的设计并给出带消融的方案。
+（补读 researcher 若在剩余章节找到其中任一项,须回填本节并相应下调贡献主张。）
