@@ -340,3 +340,50 @@ Critic = Part 1 逐候选 + Part 2 组合审计,二者皆须实现(prompt p.33-3
 | W30 | 成本校准分账 + Level 分层 | **M0**(先于跑批) | Codex 10 |
 
 **阶段划分修正**:W26/W29/W30 提前到 **M0 前置**(基线可解释性 + 输出规范 + 校准),W25/W27/W28 在 M1。routing freeze 已入 router 契约。
+
+---
+
+# 7. SPEC 裁决记录(阶段 A 第二批 review 后,Jul-23)
+
+实现过程中暴露的 5 处 SPEC 歧义,逐条裁决如下。**裁决即契约**,阶段 C 依此实现。
+
+## 7.1 Level-2 证据的归属:两处都要,职责不同
+
+论文两处都有,不是二选一:
+- **Evolver 侧必须实跑**(prompt p.32 逐字):"Verify by actually running it -- **not by reasoning about it**";证据贴进 `capability_evidence`;
+- **Critic/gate 侧检查声明**(p.37 逐字):"the Critic **verified Level-2 evidence** ... before accepting any tools-bucket candidate"。
+
+**裁决**:保留实现的两强度设计。阶段 C 追加一条——**gate 的 stage 4 对 `tools` / `processor` bucket 应在可行时实时重跑**,而非只信 manifest 声明。理由:Evolver 可能声称验证过而实际没跑,这正是 §6.4 反奖励黑客要防的"声明与事实脱节"。`run_gate` 签名届时需把 probe 接进来。
+
+## 7.2 Level-2 证据缺机器可读标记 → 加我方扩展类型
+
+论文用 `type: other` + 自由文本 claim 承载 Level-2,检测只能靠匹配 "Level 2" 字样,脆弱且易被措辞绕过。
+**裁决:采纳建议**,新增 `type: level2_roundtrip` 作为**我方扩展**(与 `target_variant` 并列,同样记入 §6.6)。序列化时保留论文原字段以兼容,但门按类型判定而非字符串匹配。
+
+## 7.3 §6.5 规则 1 的双时间尺度:按论文字面保留
+
+论文 prompt p.33 逐字:"For any lever item shipped in **>=2 of the last 3 rounds** with **cumulative** hit_rate < 0.4"。递归窗口(最近 3 轮)与比率口径(累计)确实不同尺度,后果是"早期很差、近期很好"的 lever 仍会被禁。
+**裁决:论文优先,保持字面实现。** 但把"cumulative 是否应加窗口"记入 §6.6 作为可消融项(默认 cumulative,消融 {cumulative, 最近5轮}) —— 这是论文自身的设计,不是我方 bug。
+
+## 7.4 ship outcome 的 schema:确认从 C-R10-02 反推的字段
+
+§6.1 只给了 `ship_outcomes()` 读接口,未定义内容。论文 p.37 的 realization 段给了要素:predicted vs realized flips、hit rate(5/7=0.71)、attribution 是否满足。
+**裁决:确认实现的推导**,ship outcome 至少含:`candidate_id` / `buckets` / `round` / `predicted_flips` / `realized_flips` / `regressions` / `attribution_satisfied`。阶段 C 的 Critic portfolio 审计与 Planner 的 `ship_outcomes.json` 依此消费。
+
+## 7.5 多 bucket ship 的 lever 归因:论文空白,记入留白表
+
+复合 ship(如 C-R10-02 的 `[tools, prompt, config]`)的成败该记到哪个 lever 名下,**论文与 SPEC 均未定义**。实现选择"计入全部 bucket",副作用是搭便车的 lever 也承担 ban 风险。
+**裁决:默认保留"计入全部"**(更保守 → 更早触发 ban → 更早强制探索新 lever),并记入 §6.6:
+
+| 留白 | 默认 | 消融范围 | 模块 |
+|---|---|---|---|
+| **多 bucket ship 的 lever 归因** | 计入全部 bucket | {全部, 仅主 bucket, 按 file_changes 加权} | evidence |
+| **hit_rate 比率口径**(§7.3) | cumulative(论文字面) | {cumulative, 最近5轮} | evidence |
+| **Level-2 证据类型**(§7.2) | `level2_roundtrip`(我方扩展) | — | manifest |
+
+## 7.6 实现中确立、值得保留的三条设计原则
+
+review 中确认的判断,记录以免后续被改坏:
+1. **宽松解析,严格门控**:`ChangeManifest` 所有字段带默认值,不完整的 manifest 仍能解析,由 `validate_complete()` 判定 —— 否则是 pydantic 而非确定性门在决定什么能 ship,违背 §4.3 "only deterministic checks govern shipping"。唯一例外是 `extra="forbid"`(未知键 = 臆造 schema,属解析错误)。
+2. **hit-rate 池化而非平均**:`sum(hits)/sum(predicted)` 跨 ship 汇总;平均会让一个走运的 1 任务 ship 抵消一个失败的 5 任务 ship。分母为 0 返回 `None` 而非 0.0,禁用规则拒绝在未定义比率上触发。
+3. **pass@2 语义忠实**:2/2 掉到 1/2 **不算回退**(仍 solved),这正是论文 §7.1 所述 pass@2 掩盖亚阈值退化的机制;实现不得"顺手修好"它——那会偏离论文并使 Global 臂的崩塌不可复现。
