@@ -10,10 +10,14 @@ and for which defaults are ours rather than the paper's.
 
 from __future__ import annotations
 
+from .ledger import DEFAULT_STALE_PRIOR, CellStats, SuccessLedger
 from .pool import DEFAULT_K, Variant, VariantPool
 
 __all__ = [
     "DEFAULT_K",
+    "DEFAULT_STALE_PRIOR",
+    "CellStats",
+    "SuccessLedger",
     "Variant",
     "VariantPool",
 ]
