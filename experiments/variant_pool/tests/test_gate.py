@@ -69,7 +69,7 @@ class _Spy:
 
 
 def test_apply_when_something_improves_and_nothing_regresses() -> None:
-    """"improves some tasks without regressing any" -> applied to its variant."""
+    """Verbatim: improves some tasks without regressing any -> applied to its variant."""
     ledger = _ledger("kept")
     tk = [
         TaskEval("unlocked", before=(0, 2), after=(2, 2)),

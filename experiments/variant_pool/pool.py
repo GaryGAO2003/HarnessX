@@ -48,7 +48,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
     from .ledger import SuccessLedger
@@ -231,7 +231,7 @@ class VariantPool:
     def reassign(
         self,
         orphan_tasks: Iterable[str],
-        router: Any,
+        router: Router,
         ledger: SuccessLedger | None = None,
         *,
         before_round: int | None = None,
