@@ -10,6 +10,16 @@ and for which defaults are ours rather than the paper's.
 
 from __future__ import annotations
 
+from .evidence import (
+    LEVER_BAN_HIT_RATE,
+    LEVER_BAN_MIN_SHIPS,
+    LEVER_BAN_WINDOW,
+    EvidenceStore,
+    RejectedCandidate,
+    ShipOutcome,
+    TaskDigest,
+    ship_outcome_from_manifest,
+)
 from .gate import (
     DEFAULT_MIN_FORK,
     GATE_SEQUENCE,
@@ -43,20 +53,27 @@ __all__ = [
     "DEFAULT_STALE_PRIOR",
     "GATE_SEQUENCE",
     "LEVEL2_CLAIM",
+    "LEVER_BAN_HIT_RATE",
+    "LEVER_BAN_MIN_SHIPS",
+    "LEVER_BAN_WINDOW",
     "STRATEGIES",
     "TIE_BREAKS",
     "AttributionSignature",
     "CellStats",
     "ChangeManifest",
     "Decision",
+    "EvidenceStore",
     "GateResult",
     "GateStage",
     "ImpactCategory",
     "Level2Evidence",
     "PredictedImpact",
+    "RejectedCandidate",
     "Router",
     "RoutingFreezeError",
+    "ShipOutcome",
     "SuccessLedger",
+    "TaskDigest",
     "TaskEval",
     "Variant",
     "VariantPool",
@@ -64,4 +81,5 @@ __all__ = [
     "impact_category",
     "run_gate",
     "select_target_variant",
+    "ship_outcome_from_manifest",
 ]
