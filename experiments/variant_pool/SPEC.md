@@ -28,13 +28,15 @@ experiments/variant_pool/
 ├── gate.py                  # W5 三路 fork 门 + fork 最小规模门槛
 ├── target.py                # W14 目标变体选择
 ├── manifest.py              # W13 change manifest + W24 Level-2 契约
+├── evidence.py              # W25 Digester 数据结构 + 持久证据链(契约见 §6.1)
 └── tests/
     ├── test_pool.py
     ├── test_ledger.py
     ├── test_router.py
     ├── test_gate.py
     ├── test_target.py
-    └── test_manifest.py
+    ├── test_manifest.py
+    └── test_evidence.py
 ```
 
 ## 2. 数据模型与契约(逐模块)

@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: MIT
 """Offline unit tests for ``variant_pool.gate`` (W5 + W21 + W27).
 
-Stages 1-4 are exercised with injected stubs (stage A wires no real checks);
-stage 5, the three-way seesaw, is tested in full.
+Stages 2 and 3 are exercised with injected stubs (batch A wires no repo
+checks); stages 1 and 4 are tested both as stubs and against their real
+:mod:`variant_pool.manifest` implementations; stage 5, the three-way seesaw, is
+tested in full.
 """
 
 from __future__ import annotations
@@ -18,9 +20,11 @@ from variant_pool.gate import (
     TaskEval,
     _classify,
     _seesaw_three_way,
+    level2_roundtrip_check,
     run_gate,
 )
 from variant_pool.ledger import SuccessLedger
+from variant_pool.manifest import ChangeManifest, check_level2_roundtrip
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +380,118 @@ def test_a_below_threshold_rejection_says_so() -> None:
     assert result.decision is Decision.REJECT
     assert "below fork threshold" in result.archive_reason
     assert "min_fork=(2, 2)" in result.archive_reason
+
+
+# ===========================================================================
+# Stages 1 and 4 wired to the real manifest contract (W13 + W24)
+# ===========================================================================
+
+
+def _manifest(**overrides) -> ChangeManifest:
+    """A complete tools-bucket manifest, Level-2 evidence included."""
+    data = {
+        "candidate_id": "C-R10-02",
+        "bucket": ["tools"],
+        "capability_evidence": [
+            check_level2_roundtrip("x" * 10_529, lambda content: content).as_capability_evidence()
+        ],
+        "file_changes": [
+            {"path": "wiki_text_fetch.py", "action": "create", "diff_summary": "WikiTextFetch via MediaWiki API"}
+        ],
+        "predicted_impact": {"tasks_will_unlock": ["db4fd70a"]},
+        "attribution_signature": {"type": "tool_call", "tool_name": "WikiTextFetch", "expected_min_calls": 1},
+        "target_variant": "V0",
+    }
+    data.update(overrides)
+    return ChangeManifest.model_validate(data)
+
+
+def test_a_complete_manifest_passes_stage_one_without_a_stub() -> None:
+    ledger = _ledger()
+    tk = [TaskEval("db4fd70a", before=(0, 2), after=(2, 2))]
+
+    result = run_gate(_manifest(), "parent", ledger, tk)
+
+    assert result.passed is True
+    assert result.decision is Decision.APPLY
+
+
+def test_an_incomplete_manifest_fails_stage_one_for_real() -> None:
+    """Gate stage 1 is ``validate_complete`` — here, our target_variant field."""
+    result = run_gate(_manifest(target_variant=""), "parent", _ledger(), [])
+
+    assert result.passed is False
+    assert result.failed_stage is GateStage.MANIFEST_COMPLETE
+    assert result.decision is None
+    assert "target_variant" in result.archive_reason
+
+
+def test_an_injected_manifest_check_still_wins() -> None:
+    """Batch C may substitute its own completeness check; injection takes precedence."""
+    log: list[str] = []
+    checks = _passing_checks(log)
+    result = run_gate(_manifest(target_variant=""), "parent", _ledger(), [], **checks)
+
+    assert result.failed_stage is not GateStage.MANIFEST_COMPLETE
+    assert log == ["manifest", "canonicalize", "smoke", "roundtrip"]
+
+
+def test_a_tools_candidate_without_level2_evidence_fails_stage_four() -> None:
+    """p.37: the Critic verified Level-2 evidence before accepting a tools candidate."""
+    manifest = _manifest(
+        capability_evidence=[
+            {"type": "http_endpoint", "claim": "MediaWiki API returns text", "evidence": "10,529 chars"}
+        ]
+    )
+    result = run_gate(manifest, "parent", _ledger(), [])
+
+    assert result.passed is False
+    assert result.failed_stage is GateStage.ROUNDTRIP_L2
+    assert "Level-2" in result.archive_reason
+
+
+def test_a_pure_prompt_candidate_is_exempt_from_stage_four() -> None:
+    """p.32: "Pure prompt-bucket candidates (no code asset) are exempt"."""
+    manifest = _manifest(
+        bucket=["prompt"],
+        capability_evidence=[],
+        attribution_signature=None,
+        file_changes=[{"path": "gaia_agent.md", "action": "modify", "diff_summary": "one line"}],
+    )
+    result = run_gate(manifest, "parent", _ledger(), [TaskEval("db4fd70a", before=(0, 2), after=(2, 2))])
+
+    assert result.passed is True
+    assert result.decision is Decision.APPLY
+
+
+def test_stage_one_halts_before_stage_four_on_a_manifest() -> None:
+    """Ordering survives the real implementations: the first failing check halts."""
+    manifest = _manifest(candidate_id="", capability_evidence=[])
+    result = run_gate(manifest, "parent", _ledger(), [])
+
+    assert result.failed_stage is GateStage.MANIFEST_COMPLETE
+    assert "candidate_id" in result.archive_reason
+
+
+def test_a_live_roundtrip_check_can_be_injected() -> None:
+    """Batch C wires the provider serializer through ``level2_roundtrip_check``."""
+    truncating = level2_roundtrip_check(lambda content: content[:200], "x" * 10_529)
+    result = run_gate(_manifest(), "parent", _ledger(), [], check_roundtrip=truncating)
+
+    assert result.failed_stage is GateStage.ROUNDTRIP_L2
+    assert "10,529 chars in" in result.archive_reason
+
+    surviving = level2_roundtrip_check(lambda content: content, "x" * 10_529)
+    ok = run_gate(_manifest(), "parent", _ledger(), [TaskEval("t", before=(0, 2), after=(2, 2))],
+                  check_roundtrip=surviving)
+    assert ok.passed is True
+
+
+def test_an_opaque_candidate_keeps_the_stage_a_stub_behaviour() -> None:
+    """Nothing changes for callers that do not hand the gate a manifest."""
+    result = run_gate("cand", "parent", _ledger(), [TaskEval("t", before=(0, 2), after=(2, 2))])
+    assert result.passed is True
+    assert result.decision is Decision.APPLY
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ from .gate import (
     GateResult,
     GateStage,
     TaskEval,
+    level2_roundtrip_check,
     run_gate,
 )
 from .ledger import DEFAULT_STALE_PRIOR, CellStats, SuccessLedger
@@ -79,6 +80,7 @@ __all__ = [
     "VariantPool",
     "check_level2_roundtrip",
     "impact_category",
+    "level2_roundtrip_check",
     "run_gate",
     "select_target_variant",
     "ship_outcome_from_manifest",

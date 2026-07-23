@@ -22,10 +22,25 @@ check halts", candidates "archived with rejection reason"):
 Stage 4 is the paper's Level-2 check (p.32): "a unit call that returns does not
 prove the agent sees the return".
 
-Stages 1-4 are **injected** in stage A (SPEC §5): the real canonicalizer,
-smoke runner and round-trip harness live in the repo and get wired in batch C.
-An absent check passes, so the sequencing and the seesaw can be exercised
-offline with stubs. Stage 5 is implemented in full here.
+Which stages are real
+---------------------
+Stages 1 and 4 are implemented here against :mod:`.manifest`: stage 1 is
+:meth:`ChangeManifest.validate_complete` and stage 4 asks a code candidate for
+the Level-2 round-trip evidence :func:`.manifest.check_level2_roundtrip`
+produces. Both fire only when ``candidate`` actually *is* a
+:class:`ChangeManifest`; an opaque candidate keeps the batch-A stub behaviour,
+and an explicitly injected check always wins over the built-in one.
+
+Stages 2 and 3 stay **injected** (SPEC §5): the canonicalizer
+(``harness.py:944``) and the smoke runner (``replay.py:64``) live in the repo
+and get wired in batch C. An absent check passes, so the sequencing and the
+seesaw can be exercised offline with stubs. Stage 5 is implemented in full here.
+
+Stage 4 has two strengths, deliberately. Offline it verifies that the manifest
+*declares* Level-2 evidence, which is what the Critic checks at ship time
+("the Critic verified Level-2 evidence ... before accepting any tools-bucket
+candidate", p.37). With a live provider, :func:`level2_roundtrip_check` builds
+a check that re-runs the round trip for real; batch C injects it.
 
 Three-way exit (§4.5 p.11, verbatim)
 ------------------------------------
@@ -59,6 +74,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable
+
+from .manifest import DEFAULT_LEVEL2_LABEL, ChangeManifest, check_level2_roundtrip
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
     from .ledger import SuccessLedger
@@ -196,6 +213,55 @@ def _validate_min_fork(min_fork: tuple[int, int]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stages 1 and 4 — the manifest contract (W13 + W24)
+# ---------------------------------------------------------------------------
+
+
+def _manifest_complete(candidate: ChangeManifest) -> list[str]:
+    """Stage 1 — "manifest completeness" (§4.3 p.10)."""
+    return candidate.validate_complete()
+
+
+def _declared_level2(candidate: ChangeManifest) -> tuple[bool, str]:
+    """Stage 4 offline — does the manifest carry Level-2 round-trip evidence?
+
+    A candidate with no code asset is exempt: p.32, "Pure prompt-bucket
+    candidates (no code asset) are exempt -- the counterfactual gate provides
+    the equivalent smoke check". Everything in
+    :data:`.manifest.CODE_BUCKETS` must show the evidence, which is what the
+    Critic did before accepting C-R10-02 (p.37).
+    """
+    if not candidate.needs_code_verification():
+        return True, f"no code asset in bucket={candidate.bucket}; exempt (p.32)"
+    entry = candidate.level2_evidence()
+    if entry is None:
+        return False, f"no Level-2 round-trip evidence for bucket={candidate.bucket}"
+    return True, f"declared: {entry.get('evidence', '')}"
+
+
+def level2_roundtrip_check(
+    serializer: Callable[[str], Any],
+    tool_output: str,
+    *,
+    label: str = DEFAULT_LEVEL2_LABEL,
+) -> Callable[[Any], tuple[bool, str]]:
+    """Build a live stage-4 check around :func:`.manifest.check_level2_roundtrip`.
+
+    Batch C wires the repo's real provider serializer and the candidate's own
+    probe output; stage A has neither (SPEC §5), so the gate falls back to
+    :func:`_declared_level2`. The returned check ignores its candidate argument
+    because the closure is already candidate-specific — one probe output per
+    candidate.
+    """
+
+    def _check(candidate: Any) -> tuple[bool, str]:  # noqa: ARG001 - closure is per candidate
+        evidence = check_level2_roundtrip(tool_output, serializer, label=label)
+        return evidence.survived, evidence.note
+
+    return _check
+
+
+# ---------------------------------------------------------------------------
 # The gate
 # ---------------------------------------------------------------------------
 
@@ -216,22 +282,35 @@ def run_gate(
 
     Parameters
     ----------
-    candidate, parent_config:
-        Opaque in stage A — forwarded untouched to the injected checks. They
-        become the ``ChangeManifest`` and the target variant's config in
-        batch C.
+    candidate:
+        A :class:`.manifest.ChangeManifest`, which switches stages 1 and 4 to
+        their real implementations, or anything opaque, which leaves them to
+        the injected checks.
+    parent_config:
+        The target variant's config; opaque here, forwarded to
+        ``check_canonicalize``.
     tk_results:
         Per-task pass@2 before/after outcomes, already narrowed to ``T_k``.
     check_manifest:
         Returns the list of missing manifest fields (empty = complete), i.e.
-        the signature of ``ChangeManifest.validate_complete``.
+        the signature of ``ChangeManifest.validate_complete``. Defaults to that
+        method when ``candidate`` is a manifest.
     check_canonicalize, check_smoke, check_roundtrip:
-        Return ``(passed, reason)``.
+        Return ``(passed, reason)``. ``check_roundtrip`` defaults to the
+        manifest's declared Level-2 evidence; build a live one with
+        :func:`level2_roundtrip_check`.
 
-    An omitted check passes: stage A wires none of them, so the sequencing and
-    the seesaw are exercised with stubs (SPEC §5).
+    An omitted check on an opaque candidate passes: batch A wires no repo
+    checks, so the sequencing and the seesaw are exercised with stubs (SPEC §5).
+    An explicitly injected check always takes precedence over the built-in one.
     """
     _validate_min_fork(min_fork)
+
+    if isinstance(candidate, ChangeManifest):
+        if check_manifest is None:
+            check_manifest = _manifest_complete
+        if check_roundtrip is None:
+            check_roundtrip = _declared_level2
 
     if check_manifest is not None:
         missing = list(check_manifest(candidate))
