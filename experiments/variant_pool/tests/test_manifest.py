@@ -10,8 +10,11 @@ the paper, so it is what the round-trip has to survive verbatim.
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from variant_pool.manifest import (
     BUCKETS,
@@ -147,7 +150,7 @@ def test_a_scalar_bucket_is_accepted() -> None:
 
 
 def test_an_unknown_key_is_a_parse_error_not_an_incompleteness() -> None:
-    with pytest.raises(Exception):  # pydantic ValidationError; extra="forbid"
+    with pytest.raises(ValidationError):  # extra="forbid"
         ChangeManifest.from_yaml("candidate_id: C-R1-01\nvariant_id: V1\n")
 
 
@@ -404,5 +407,5 @@ def test_level2_evidence_is_found_in_the_manifest(c_r10_02: ChangeManifest) -> N
 
 def test_level2_evidence_dataclass_is_frozen() -> None:
     evidence = Level2Evidence(survived=True, serialized_len=3, note="n")
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         evidence.survived = False  # type: ignore[misc]

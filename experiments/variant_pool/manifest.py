@@ -49,9 +49,10 @@ has no provider (SPEC §5), and batch C passes the repo's real one.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -382,8 +383,10 @@ class ChangeManifest(BaseModel):
         if signature is None or signature.type is None:
             if self.needs_attribution():
                 return [
-                    "attribution_signature: missing for a non-prompt candidate "
-                    f"(bucket={self.bucket}; W19 hard gate)"
+                    (
+                        "attribution_signature: missing for a non-prompt candidate "
+                        f"(bucket={self.bucket}; W19 hard gate)"
+                    )
                 ]
             return []
         problems: list[str] = []
