@@ -12,11 +12,16 @@ from __future__ import annotations
 
 from .ledger import DEFAULT_STALE_PRIOR, CellStats, SuccessLedger
 from .pool import DEFAULT_K, Variant, VariantPool
+from .router import CLUSTER_MODES, TIE_BREAKS, Router, RoutingFreezeError
 
 __all__ = [
+    "CLUSTER_MODES",
     "DEFAULT_K",
     "DEFAULT_STALE_PRIOR",
+    "TIE_BREAKS",
     "CellStats",
+    "Router",
+    "RoutingFreezeError",
     "SuccessLedger",
     "Variant",
     "VariantPool",
