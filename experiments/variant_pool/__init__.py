@@ -20,28 +20,48 @@ from .gate import (
     run_gate,
 )
 from .ledger import DEFAULT_STALE_PRIOR, CellStats, SuccessLedger
+from .manifest import (
+    BUCKETS,
+    LEVEL2_CLAIM,
+    AttributionSignature,
+    ChangeManifest,
+    ImpactCategory,
+    Level2Evidence,
+    PredictedImpact,
+    check_level2_roundtrip,
+    impact_category,
+)
 from .pool import DEFAULT_K, Variant, VariantPool
 from .router import CLUSTER_MODES, TIE_BREAKS, Router, RoutingFreezeError
 from .target import STRATEGIES, select_target_variant
 
 __all__ = [
+    "BUCKETS",
     "CLUSTER_MODES",
     "DEFAULT_K",
     "DEFAULT_MIN_FORK",
     "DEFAULT_STALE_PRIOR",
     "GATE_SEQUENCE",
+    "LEVEL2_CLAIM",
     "STRATEGIES",
     "TIE_BREAKS",
+    "AttributionSignature",
     "CellStats",
+    "ChangeManifest",
     "Decision",
     "GateResult",
     "GateStage",
+    "ImpactCategory",
+    "Level2Evidence",
+    "PredictedImpact",
     "Router",
     "RoutingFreezeError",
     "SuccessLedger",
     "TaskEval",
     "Variant",
     "VariantPool",
+    "check_level2_roundtrip",
+    "impact_category",
     "run_gate",
     "select_target_variant",
 ]
