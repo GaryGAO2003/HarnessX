@@ -1,0 +1,290 @@
+# Copyright 2026 Darwin-Agent
+# SPDX-License-Identifier: MIT
+"""W5 + W21 + W27 — the deterministic gate: five ordered checks, three-way exit.
+
+The gate is the **only** thing that decides what ships: §4.3 p.10, "only
+deterministic checks govern shipping". The Critic produces a ``ship_ranking``
+and nothing more — ranked candidates still run this gate one by one and the
+first one through wins (Algorithm 1 L21-24). Nothing here consults an LLM.
+
+The sequence (§4.3 p.10, verbatim "manifest completeness -> configuration
+normalization -> build/smoke tests -> seesaw constraint", "the first failing
+check halts", candidates "archived with rejection reason"):
+
+===  ================== ===========================================
+1    MANIFEST_COMPLETE  every manifest field present (W13)
+2    CANONICALIZE       candidate config normalises cleanly
+3    BUILD_SMOKE_L1     new processors/tools instantiate and run
+4    ROUNDTRIP_L2       tool output survives provider serialisation (W24)
+5    SEESAW_REGRESSION  three-way decision below
+===  ================== ===========================================
+
+Stage 4 is the paper's Level-2 check (p.32): "a unit call that returns does not
+prove the agent sees the return".
+
+Stages 1-4 are **injected** in stage A (SPEC §5): the real canonicalizer,
+smoke runner and round-trip harness live in the repo and get wired in batch C.
+An absent check passes, so the sequencing and the seesaw can be exercised
+offline with stubs. Stage 5 is implemented in full here.
+
+Three-way exit (§4.5 p.11, verbatim)
+------------------------------------
+"(1) the edit improves some tasks without regressing any, in which case it is
+applied to its target variant; or (2) it improves a subset while regressing
+others, in which case the system forks a new variant rather than rejecting the
+edit outright"; otherwise it is rejected. This is the sharpest move in the
+paper — a conflict stops being a reason to reject and becomes a reason to
+branch.
+
+Two asymmetries in the classification are deliberate:
+
+* **improved** is judged against the candidate's own before-state on ``T_k``
+  (0/2 -> >=1/2);
+* **regressed** is judged against :attr:`SuccessLedger.ever_solved`, the
+  full-history solved set (W21, §4.1 p.8 "any previously solved task recorded
+  in ``T_t``"). A task solved in R3 and quietly broken in R5 is *still* a
+  regression for an R6 candidate that leaves it at 0/2. Anchoring on last
+  round instead would reproduce a strictly weaker constraint than the paper's.
+
+Scope: ``tk_results`` must already be narrowed to ``T_k``, the tasks routed to
+the candidate's target variant ("a candidate targeting variant k is tested only
+against tasks routed to k", §4.5 p.11). That narrowing is what stops one
+cluster's improvement from being blocked by another cluster's regression; the
+caller owns it, the gate assumes it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
+    from .ledger import SuccessLedger
+
+#: Minimum ``(improved, regressed)`` sizes before a conflict is worth a fork.
+#: Ours (SPEC §2.4/§6.6): pass@2 still leaves residual noise, and a one-task
+#: flip in each direction is as likely to be noise as a real cluster conflict.
+#: Forking on it would fill the pool with variants that specialise on nothing.
+#: Ablation {(1, 1), (2, 2)}.
+DEFAULT_MIN_FORK = (2, 2)
+
+
+class GateStage(Enum):
+    """The ordered deterministic checks of §4.3 p.10."""
+
+    MANIFEST_COMPLETE = "manifest_complete"
+    CANONICALIZE = "canonicalize"
+    BUILD_SMOKE_L1 = "build_smoke_l1"
+    ROUNDTRIP_L2 = "roundtrip_l2"
+    SEESAW_REGRESSION = "seesaw_regression"
+
+
+#: Evaluation order; the first failing stage halts the gate.
+GATE_SEQUENCE = (
+    GateStage.MANIFEST_COMPLETE,
+    GateStage.CANONICALIZE,
+    GateStage.BUILD_SMOKE_L1,
+    GateStage.ROUNDTRIP_L2,
+    GateStage.SEESAW_REGRESSION,
+)
+
+
+class Decision(Enum):
+    """Three-way outcome of the seesaw stage (§4.5 p.11)."""
+
+    APPLY = "apply"
+    FORK = "fork"
+    REJECT = "reject"
+
+
+@dataclass(frozen=True)
+class TaskEval:
+    """One task's pass@2 outcome before and after the candidate.
+
+    Each tuple is ``(n_pass, n_att)``; under pass@2 ``n_att == 2`` and
+    ``n_pass in {0, 1, 2}`` (§6.1 p.15). "Solved" means ``n_pass >= 1``.
+    """
+
+    task_id: str
+    before: tuple[int, int]
+    after: tuple[int, int]
+
+    def __post_init__(self) -> None:
+        for label, (n_pass, n_att) in (("before", self.before), ("after", self.after)):
+            if n_att < 0 or n_pass < 0:
+                raise ValueError(f"{self.task_id}.{label}: negative rollout counts {(n_pass, n_att)}")
+            if n_pass > n_att:
+                raise ValueError(f"{self.task_id}.{label}: n_pass exceeds n_att {(n_pass, n_att)}")
+
+
+@dataclass
+class GateResult:
+    """Outcome of one candidate's trip through the gate.
+
+    ``improved``/``regressed`` extend the SPEC fields: a FORK decision has to
+    tell :meth:`VariantPool.fork` *which* tasks the new variant is being spawned
+    to serve, and the archived rejection record is far more useful with the two
+    task sets than without them.
+    """
+
+    passed: bool
+    failed_stage: GateStage | None
+    decision: Decision | None
+    archive_reason: str
+    improved: frozenset[str] = field(default_factory=frozenset)
+    regressed: frozenset[str] = field(default_factory=frozenset)
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 — seesaw
+# ---------------------------------------------------------------------------
+
+
+def _classify(tk_results: Iterable[TaskEval], ledger: SuccessLedger) -> tuple[set[str], set[str]]:
+    """Split ``T_k`` into improved and regressed tasks.
+
+    See the module docstring for why the two sides use different baselines.
+    The categories are mutually exclusive by construction (improved needs
+    ``after >= 1``, regressed needs ``after == 0``).
+    """
+    improved: set[str] = set()
+    regressed: set[str] = set()
+    for outcome in tk_results:
+        before_passes = outcome.before[0]
+        after_passes = outcome.after[0]
+        if before_passes == 0 and after_passes >= 1:
+            improved.add(outcome.task_id)
+        if after_passes == 0 and ledger.is_ever_solved(outcome.task_id):
+            regressed.add(outcome.task_id)
+    return improved, regressed
+
+
+def _decide(improved: set[str], regressed: set[str], min_fork: tuple[int, int]) -> Decision:
+    min_improve, min_regress = min_fork
+    if not improved:
+        # nothing gained: either flat or purely harmful
+        return Decision.REJECT
+    if not regressed:
+        return Decision.APPLY
+    if len(improved) >= min_improve and len(regressed) >= min_regress:
+        return Decision.FORK
+    # a conflict too small to distinguish from pass@2 noise: do not spend a
+    # variant slot on it. The improvement is dropped with it, because the
+    # seesaw forbids applying an edit that regresses an ever-solved task.
+    return Decision.REJECT
+
+
+def _seesaw_three_way(
+    tk_results: Iterable[TaskEval],
+    ledger: SuccessLedger,
+    *,
+    min_fork: tuple[int, int] = DEFAULT_MIN_FORK,
+) -> Decision:
+    """APPLY / FORK / REJECT for a candidate, on ``T_k`` only (§4.5 p.11)."""
+    _validate_min_fork(min_fork)
+    improved, regressed = _classify(tk_results, ledger)
+    return _decide(improved, regressed, min_fork)
+
+
+def _validate_min_fork(min_fork: tuple[int, int]) -> None:
+    if len(min_fork) != 2:
+        raise ValueError(f"min_fork must be a (min_improve, min_regress) pair, got {min_fork!r}")
+    if min_fork[0] < 1 or min_fork[1] < 1:
+        raise ValueError(f"min_fork entries must be >= 1, got {min_fork!r}")
+
+
+# ---------------------------------------------------------------------------
+# The gate
+# ---------------------------------------------------------------------------
+
+
+def run_gate(
+    candidate: Any,
+    parent_config: Any,
+    ledger: SuccessLedger,
+    tk_results: Iterable[TaskEval],
+    *,
+    min_fork: tuple[int, int] = DEFAULT_MIN_FORK,
+    check_manifest: Callable[[Any], list[str]] | None = None,
+    check_canonicalize: Callable[[Any, Any], tuple[bool, str]] | None = None,
+    check_smoke: Callable[[Any], tuple[bool, str]] | None = None,
+    check_roundtrip: Callable[[Any], tuple[bool, str]] | None = None,
+) -> GateResult:
+    """Run the five ordered checks; halt and archive on the first failure.
+
+    Parameters
+    ----------
+    candidate, parent_config:
+        Opaque in stage A — forwarded untouched to the injected checks. They
+        become the ``ChangeManifest`` and the target variant's config in
+        batch C.
+    tk_results:
+        Per-task pass@2 before/after outcomes, already narrowed to ``T_k``.
+    check_manifest:
+        Returns the list of missing manifest fields (empty = complete), i.e.
+        the signature of ``ChangeManifest.validate_complete``.
+    check_canonicalize, check_smoke, check_roundtrip:
+        Return ``(passed, reason)``.
+
+    An omitted check passes: stage A wires none of them, so the sequencing and
+    the seesaw are exercised with stubs (SPEC §5).
+    """
+    _validate_min_fork(min_fork)
+
+    if check_manifest is not None:
+        missing = list(check_manifest(candidate))
+        if missing:
+            return GateResult(
+                passed=False,
+                failed_stage=GateStage.MANIFEST_COMPLETE,
+                decision=None,
+                archive_reason=f"MANIFEST_COMPLETE: missing fields {sorted(missing)}",
+            )
+
+    for stage, check, args in (
+        (GateStage.CANONICALIZE, check_canonicalize, (candidate, parent_config)),
+        (GateStage.BUILD_SMOKE_L1, check_smoke, (candidate,)),
+        (GateStage.ROUNDTRIP_L2, check_roundtrip, (candidate,)),
+    ):
+        if check is None:
+            continue
+        ok, reason = check(*args)
+        if not ok:
+            return GateResult(
+                passed=False,
+                failed_stage=stage,
+                decision=None,
+                archive_reason=f"{stage.name}: {reason}",
+            )
+
+    improved, regressed = _classify(tk_results, ledger)
+    decision = _decide(improved, regressed, min_fork)
+    summary = f"improved={sorted(improved)} regressed={sorted(regressed)}"
+
+    if decision is Decision.REJECT:
+        if not improved:
+            detail = "no task improved"
+        else:
+            detail = (
+                f"conflict below fork threshold min_fork={tuple(min_fork)} "
+                f"(improved={len(improved)}, regressed={len(regressed)})"
+            )
+        return GateResult(
+            passed=False,
+            failed_stage=GateStage.SEESAW_REGRESSION,
+            decision=Decision.REJECT,
+            archive_reason=f"{GateStage.SEESAW_REGRESSION.name}: {detail}; {summary}",
+            improved=frozenset(improved),
+            regressed=frozenset(regressed),
+        )
+
+    return GateResult(
+        passed=True,
+        failed_stage=None,
+        decision=decision,
+        archive_reason=f"{decision.name}: {summary}",
+        improved=frozenset(improved),
+        regressed=frozenset(regressed),
+    )
