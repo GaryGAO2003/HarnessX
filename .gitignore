@@ -18,6 +18,7 @@ venv/
 env/
 .env/
 .harness_env/
+.venv*/
 
 # Environment / secrets
 .env
@@ -110,3 +111,12 @@ benchmarks/tau2/show_report.py
 
 doc_think/
 uv.lock
+.gstack/
+
+# Gated benchmark data — GAIA requires accepting HuggingFace terms per account.
+# Redistributing it (even to a private repo) would violate the dataset licence.
+# Rebuild locally with: python experiments/build_gaia_subset.py
+recipe/gaia_evolver/data/
+
+# Rendered docs (keep the .md sources, not the generated PDFs)
+experiments/docs/*.pdf
