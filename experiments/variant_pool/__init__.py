@@ -22,6 +22,7 @@ from .gate import (
 from .ledger import DEFAULT_STALE_PRIOR, CellStats, SuccessLedger
 from .pool import DEFAULT_K, Variant, VariantPool
 from .router import CLUSTER_MODES, TIE_BREAKS, Router, RoutingFreezeError
+from .target import STRATEGIES, select_target_variant
 
 __all__ = [
     "CLUSTER_MODES",
@@ -29,6 +30,7 @@ __all__ = [
     "DEFAULT_MIN_FORK",
     "DEFAULT_STALE_PRIOR",
     "GATE_SEQUENCE",
+    "STRATEGIES",
     "TIE_BREAKS",
     "CellStats",
     "Decision",
@@ -41,4 +43,5 @@ __all__ = [
     "Variant",
     "VariantPool",
     "run_gate",
+    "select_target_variant",
 ]
