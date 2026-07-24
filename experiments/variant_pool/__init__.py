@@ -18,6 +18,7 @@ from .accounting import (
     CostLedger,
     Pricing,
 )
+from .engine import DEFAULT_PATIENCE, RoundResult, VariantPoolEngine
 from .evidence import (
     LEVER_BAN_HIT_RATE,
     LEVER_BAN_MIN_SHIPS,
@@ -82,6 +83,7 @@ __all__ = [
     "CLUSTER_MODES",
     "DEFAULT_K",
     "DEFAULT_MIN_FORK",
+    "DEFAULT_PATIENCE",
     "DEFAULT_PRICING",
     "DEFAULT_STALE_PRIOR",
     "FAMILY_SECTIONS",
@@ -120,6 +122,7 @@ __all__ = [
     "PredictedImpact",
     "Pricing",
     "RejectedCandidate",
+    "RoundResult",
     "Router",
     "RoutingFreezeError",
     "RunReport",
@@ -130,6 +133,7 @@ __all__ = [
     "TaskResult",
     "Variant",
     "VariantPool",
+    "VariantPoolEngine",
     "check_level2_roundtrip",
     "impact_category",
     "level2_roundtrip_check",
