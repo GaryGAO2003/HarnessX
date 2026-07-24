@@ -72,6 +72,36 @@ def _delta_get(delta: object, key: str):
     return getattr(delta, key, None)
 
 
+def _cache_read_tokens(usage_obj: object) -> int:
+    """Prompt tokens served from the provider's context cache.
+
+    AnthropicProvider and ResponsesProvider already record this; without it the
+    LiteLLM path reports a 0% cache hit rate for every backend, which silently
+    overstates cost by the full cache discount (DeepSeek reads are ~50x cheaper
+    than misses). Two carriers are checked because vendors disagree: the
+    OpenAI-compatible ``prompt_tokens_details.cached_tokens`` and DeepSeek's own
+    ``prompt_cache_hit_tokens``.
+    """
+    if usage_obj is None:
+        return 0
+    details = getattr(usage_obj, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
+    if cached is None:
+        cached = getattr(usage_obj, "prompt_cache_hit_tokens", None)
+    return int(cached or 0)
+
+
+def _cache_write_tokens(usage_obj: object) -> int:
+    """Prompt tokens written into the cache this call (free on DeepSeek)."""
+    if usage_obj is None:
+        return 0
+    details = getattr(usage_obj, "prompt_tokens_details", None)
+    written = getattr(details, "cache_write_tokens", None) if details is not None else None
+    if written is None:
+        written = getattr(usage_obj, "cache_creation_input_tokens", None)
+    return int(written or 0)
+
+
 class LiteLLMProvider(AgenticMixin, BaseModelProvider):
     """Unified LLM provider via litellm. Supports any model string.
 
@@ -242,6 +272,8 @@ class LiteLLMProvider(AgenticMixin, BaseModelProvider):
         usage = Usage(
             input_tokens=getattr(usage_obj, "prompt_tokens", 0) if usage_obj else 0,
             output_tokens=getattr(usage_obj, "completion_tokens", 0) if usage_obj else 0,
+            cache_read_tokens=_cache_read_tokens(usage_obj),
+            cache_write_tokens=_cache_write_tokens(usage_obj),
         )
 
         return ModelResponseEvent(
