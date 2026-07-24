@@ -3,6 +3,7 @@
 > **定位(修正 Jul-23,吸收 Codex 批判):这是"按论文附录重建的、论文启发的跨模型复现(paper-informed re-implementation)",不是"照抄论文"。** 论文未开源(仅承诺未来开源),且我方用 DeepSeek V4 替换了论文的 Opus 4.6 / Sonnet 4.6 / GPT-5.4 内外环模型。⇒ **不得对照论文的绝对分数**;所有未被论文规定的设计选择必须显式记录(§6.6 留白契约表)。冲突处采论文;论文没给的自定并标注,作为贡献面。
 > 完整机制依据:`experiments/docs/HarnessX_VariantPool_TheoryFast_Report`(精读报告,全文逐字);工作项表:`experiments/docs/HARNESSX-IMPL-CHECKLIST.md`。
 > 论文页码指 arXiv 2606.14249v2。
+> **`SPEC_VERSION = "2026-07-24"`** —— §6.6 任一默认值变更时手工 bump;`experiment_lock` 记录本值(§7.6 裁决②)。
 >
 > ⚠️ **符号钉死:`K`(变体池容量,论文全文未给 → 我方自定,默认 8)≠ `K_t`(每轮 Evolver 候选数 = 4,Table 8)≠ buffer 版本序号 k。三者不可互指。**(Codex 批判第 1 条)
 
@@ -381,7 +382,31 @@ Critic = Part 1 逐候选 + Part 2 组合审计,二者皆须实现(prompt p.33-3
 | **hit_rate 比率口径**(§7.3) | cumulative(论文字面) | {cumulative, 最近5轮} | evidence |
 | **Level-2 证据类型**(§7.2) | `level2_roundtrip`(我方扩展) | — | manifest |
 
-## 7.6 实现中确立、值得保留的三条设计原则
+## 7.6 M0 前置批次的六处裁决(Jul-24)
+
+**① 分层配额:超配 level 3 保留,但外推必须按真实比例加权。**
+§6.8 的 24 题 = 8/12/4 确实不等于论文的 39/52/12(按最大余数法应为 9/12/3)。实现的 docstring 给了一个我起初忽略的正当理由:**level 3 按比例只有 3 题,这一层太小,得不出任何结论**——而校准恰恰要看难度对成本与通过率的影响。
+但超配有代价:level 3 任务更长更贵,**直接用样本均值乘全规模会系统性高估成本**。
+**裁决:两个目的分开处理,不二选一**——
+- **取样**:保留 8/12/4(超配 level 3,让分层通过率有意义);6 题 = 2/3/1 恰好等于比例,不变;
+- **外推**:`project()` 必须**按论文 39/52/12 对各层成本加权**,而非对全样本取均值。
+  **已核实现状**:`project()` 目前走 `per_attempt_billed()` = 全样本均值,**未按层加权**。
+  影响范围:**6 题校准不受影响**(2/3/1 恰等于比例,均值即加权均值);**24 题会高估**——样本 level 3 占 16.7% 而全集占 11.7%(超配 1.43×),若 level 3 单题成本显著更高,外推随之偏高。
+  ⇒ 列为待修(需 `AttemptCost` 携带 level,`project` 按层聚合再加权)。在此之前 **24 题外推的成本数字不得直接引用**,只可用于分层通过率与缓存命中率。
+- 两个配额与加权口径都写进 `experiment_lock`,使外推可复核。
+
+**② SPEC 加版本字段。** 采纳建议:本文件顶部 `SPEC_VERSION` 见下,§6.6 任一默认值变更时手工 bump,lock 记录它。
+
+**③ 两个 seed 是对的,不是一个。** §6.3 只写了 "seed",但设计需要两类:per-run 的 RNG seed(router tie-break 用)与 family 的三个 lineage seed(Table 8 的 "seeds=3")。**裁决:确认拆分**为 `env.seed` 与 `hyperparams.seeds`,两者均**不**参与 family 判定。
+
+**④ routing hit rate 的定义,以及它为何分属两个里程碑。** **裁决:采纳实现的读法**——"被路由的评测中,路由到的变体确实解出该任务的比例",无路由时返回 `None`(M0 无路由器,返回 0.0 会被误读成"路由全错")。
+另一种读法("路由到的是否为当时最优变体")需要反事实数据:得知道**其他**变体在该任务上的表现,而变体隔离恰恰不评测它们(§4.5 收窄评测)。⇒ **M1 在线路由拿不到这个量;但 M0 拿得到**,因为 M0 全量评测所有 checkpoint。故:M1 报"路由命中率",M0 报"oracle 后悔值"(路由选择与事后最优的差),两者不可互相替代。
+
+**⑤ headline 指标算最后一轮。** **裁决:确认**。跨轮池化会把一个 harness 与它自己的早期版本混在一起;`final()` / `peak()` 从同一条曲线导出,保证 §6.7 的"final 与 peak 必须成对报"落在同一口径上。
+
+**⑥ 精读报告须随仓自包含。** SPEC 前言与多个模块 docstring 引用 `experiments/docs/HarnessX_VariantPool_TheoryFast_Report`,但该文件只存在于 MAS_Directions 项目,**不在本仓**——导致 coder 无法核验 A.3 公式 6 的形状与 A.4 的 H0 措辞。**裁决:把精读报告复制进本仓 `experiments/docs/`**,使论文依据链在仓内闭合。
+
+## 7.7 实现中确立、值得保留的三条设计原则
 
 review 中确认的判断,记录以免后续被改坏:
 1. **宽松解析,严格门控**:`ChangeManifest` 所有字段带默认值,不完整的 manifest 仍能解析,由 `validate_complete()` 判定 —— 否则是 pydantic 而非确定性门在决定什么能 ship,违背 §4.3 "only deterministic checks govern shipping"。唯一例外是 `extra="forbid"`(未知键 = 臆造 schema,属解析错误)。
