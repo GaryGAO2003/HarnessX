@@ -37,6 +37,11 @@ from benchmarks.gaia.evaluator import GAIAPipelineEvaluator
 from benchmarks.gaia.harness import make_gaia_builder_gpt5
 from benchmarks.gaia.task import GAIATask, load_gaia_tasks, load_gaia_tasks_from_json
 
+# The unbiased pass@k estimator (paper A.3 p.29, formula 6) already lives in
+# the variant-pool reporting module; W17 reuses it rather than growing a second
+# copy that could drift from it.
+from experiments.variant_pool.reporting import pass_at_k
+
 from .defaults import (
     DEFAULT_CONCURRENCY,
     DEFAULT_META_MODEL,
@@ -448,13 +453,54 @@ async def _run_task_pass_k(
     return _merge_attempt_records(attempts)
 
 
-def print_multiround_comparison(rounds: list[list[dict]]) -> None:
+def _round_pass_rate(records: list[dict], pass_k: int) -> float:
+    """Round score = mean over tasks of the unbiased pass@k estimator.
+
+    Reuses :func:`experiments.variant_pool.reporting.pass_at_k` (A.3 p.29,
+    formula 6) rather than re-deriving it. At ``n == k`` the estimator and the
+    naive "did any attempt pass" ratio coincide — so ``--pass-k 1`` reproduces
+    the historical ``passed / len(records)`` number exactly, and so does
+    ``--pass-k 2`` with two rollouts. They diverge only when a task was sampled
+    more often than k, which is the case the estimator exists for.
+
+    A task with fewer attempts than k is scored at ``k_eff = n_att`` rather
+    than guessed at: that degrades to "any attempt passed" for that task and is
+    logged, because silently clamping is how a report starts lying.
+    """
+    if not records:
+        return 0.0
+    total = 0.0
+    for record in records:
+        n_att = int(record.get("n_att") or 0)
+        n_pass = int(record.get("n_pass") or 0)
+        if n_att < 1:
+            # No attempt recorded at all — scores 0, exactly like a failure.
+            continue
+        k_eff = min(pass_k, n_att)
+        if k_eff < pass_k:
+            logger.warning(
+                "task %s has %d attempt(s) but pass_k=%d — scoring it as pass@%d",
+                record.get("task_id", "?"),
+                n_att,
+                pass_k,
+                k_eff,
+            )
+        total += pass_at_k(n_att, n_pass, k_eff)
+    return total / len(records)
+
+
+def print_multiround_comparison(rounds: list[list[dict]], *, pass_k: int = 1) -> None:
     """Print multi-round comparison as two aligned tables + headline.
 
     Layout:
       * Per-task pass/fail history — PASS/FAIL per round + best-vs-R0 pp delta.
+        Under pass@k each cell also carries the task's ``n_pass/n_att``, which
+        is where a 2/2 → 1/2 drift becomes visible; §7.1 p.21 warns that pass@2
+        hides exactly that decline behind an unchanged "solved".
       * Round totals — pass_rate, cost_usd, tokens, steps per round with a
-        dedicated Δ column between consecutive rounds.
+        dedicated Δ column between consecutive rounds. Under pass@k two more
+        rows appear: the unbiased pass@k estimator and the pooled per-attempt
+        rate (SPEC §6.7: never report one without the other).
       * Headline — one-line callout of the total pass_rate swing.
     """
     if not rounds:
@@ -463,11 +509,27 @@ def print_multiround_comparison(rounds: list[list[dict]]) -> None:
     task_ids = [r["task_id"] for r in rounds[0]]
     n_tasks = len(task_ids)
 
+    # Records written before pass@k carry no attempt counts; treat them as one
+    # attempt whose outcome is `passed`, which is what they were.
+    def _att(record: dict) -> tuple[int, int]:
+        n_att = int(record.get("n_att") or 1)
+        n_pass = record.get("n_pass")
+        if n_pass is None:
+            n_pass = 1 if record.get("passed") else 0
+        return int(n_pass), n_att
+
+    max_att = max((_att(r)[1] for rd in rounds for r in rd), default=1)
+    multi_attempt = max_att > 1
+    k_show = pass_k if pass_k > 1 else max_att
+
     lines: list[str] = []
 
     r_word = "round" if n_rounds == 1 else "rounds"
     t_word = "task" if n_tasks == 1 else "tasks"
-    lines.append(f"GAIA Evolver — Multi-Round Comparison  ({n_rounds} {r_word} × {n_tasks} {t_word})")
+    header = f"GAIA Evolver — Multi-Round Comparison  ({n_rounds} {r_word} × {n_tasks} {t_word})"
+    if multi_attempt:
+        header += f"  [pass@{k_show}]"
+    lines.append(header)
     lines.append("")
 
     # Compute historical-best round index for "vs-best" deltas.
@@ -477,6 +539,12 @@ def print_multiround_comparison(rounds: list[list[dict]]) -> None:
             "cost": sum(r.get("cost_usd", 0) or 0 for r in rd),
             "tokens": sum(r.get("total_tokens", 0) or 0 for r in rd),
             "steps": sum(r.get("steps", 0) or 0 for r in rd),
+            "n_pass": sum(_att(r)[0] for r in rd),
+            "n_att": sum(_att(r)[1] for r in rd),
+            "pass_at_k": _round_pass_rate(
+                [{"n_att": _att(r)[1], "n_pass": _att(r)[0], "task_id": r.get("task_id")} for r in rd],
+                k_show,
+            ),
         }
         for rd in rounds
     ]
@@ -512,6 +580,9 @@ def print_multiround_comparison(rounds: list[list[dict]]) -> None:
         for i in range(n_rounds):
             rec = next((r for r in rounds[i] if r["task_id"] == tid), {})
             status = "PASS" if rec.get("passed") else "FAIL"
+            if multi_attempt and rec:
+                n_pass_i, n_att_i = _att(rec)
+                status = f"{status} {n_pass_i}/{n_att_i}"
             row += f" | {status:^{STAT_W}}"
         if n_rounds > 1:
             pp = (100 if rec_best.get("passed") else 0) - (100 if rec0.get("passed") else 0)
@@ -558,6 +629,29 @@ def print_multiround_comparison(rounds: list[list[dict]]) -> None:
             lambda cur, prev: f"{100 * (cur['passed'] - prev['passed']) / n:+.1f}pp" if n else "-",
         )
     )
+    if multi_attempt:
+        # The unbiased estimator (A.3 p.29) and, right under it, the pooled
+        # per-attempt rate. Reporting them together is the whole point: they
+        # coincide when nothing is drifting and separate when pass@k is
+        # masking a decline in per-attempt success probability (§7.1 p.21).
+        lines.append(
+            _row(
+                f"pass@{k_show}",
+                lambda t: f"{100 * t['pass_at_k']:.1f}%",
+                lambda cur, prev: f"{100 * (cur['pass_at_k'] - prev['pass_at_k']):+.1f}pp",
+            )
+        )
+        lines.append(
+            _row(
+                "rollouts",
+                lambda t: (f"{100 * t['n_pass'] / t['n_att']:.1f}% ({t['n_pass']}/{t['n_att']})" if t["n_att"] else "-"),
+                lambda cur, prev: (
+                    f"{100 * (cur['n_pass'] / cur['n_att'] - prev['n_pass'] / prev['n_att']):+.1f}pp"
+                    if cur["n_att"] and prev["n_att"]
+                    else "-"
+                ),
+            )
+        )
     lines.append(
         _row(
             "cost_usd",
@@ -1019,7 +1113,7 @@ async def main() -> None:
         infra_total = sum(int(r.get("infra_failures") or 0) for r in records)
         round_cost = sum((r.get("cost_usd") or 0) for r in records)
         totals = _compute_round_totals(records)
-        round_pass_rate = round(passed / len(records), 3) if records else 0.0
+        round_pass_rate = round(_round_pass_rate(records, args.pass_k), 3)
         round_summaries.append(
             {
                 "round": round_idx,
@@ -1229,7 +1323,7 @@ async def main() -> None:
             )
 
     # ── Final showcase ─────────────────────────────────────────────────────
-    print_multiround_comparison(all_rounds)
+    print_multiround_comparison(all_rounds, pass_k=args.pass_k)
 
     results_path = RUN_DIR / "comparison.json"
     results_path.write_text(
@@ -1243,6 +1337,8 @@ async def main() -> None:
                     "max_tasks": args.max_tasks,
                     "max_cost_usd": args.max_cost,
                     "num_rounds": args.num_rounds,
+                    "pass_k": args.pass_k,
+                    "concurrency": args.concurrency,
                     "evolve_steps": args.evolve_steps,
                     "evolve_cost": args.evolve_cost,
                     "evolve_wall_clock": args.evolve_wall_clock,
