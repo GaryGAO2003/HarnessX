@@ -163,7 +163,13 @@ class LiteLLMProvider(AgenticMixin, BaseModelProvider):
         # because the direct Anthropic SDK requires them in the separate system= kwarg.
         litellm_messages = []
         for m in messages:
-            msg: dict = {"role": m.role, "content": to_openai_content(m.content)}
+            # ``to_openai_content`` returns None for empty content, which is what an
+            # assistant message carrying only tool_calls looks like. OpenAI accepts
+            # "content": null there; DeepSeek's deserializer rejects the whole request
+            # ("missing field `content` at messages[N]"), so a long tool-using
+            # trajectory dies mid-run. An empty string satisfies both.
+            content = to_openai_content(m.content)
+            msg: dict = {"role": m.role, "content": "" if content is None else content}
             if m.tool_call_id:
                 msg["tool_call_id"] = m.tool_call_id
             if m.name:
