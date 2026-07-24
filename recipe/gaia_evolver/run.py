@@ -140,6 +140,7 @@ async def _run_task(
     *,
     pipeline_eval: "GAIAPipelineEvaluator",
     harness_config: Any | None = None,
+    attempt_idx: int = 0,
 ) -> dict:
     """Run a single task + externally evaluate the answer.
 
@@ -166,13 +167,20 @@ async def _run_task(
     import) threaded through so the caller can dump processor / tool
     info into the trajectory markdown and read `tool_registry` for the
     `unused_tools` signal.
+
+    ``attempt_idx`` is the 0-based rollout index under pass@k (§6.1 p.15).
+    It only disambiguates the session id and the log line: attempt 0 keeps
+    the historical `{label}-{task_id}` session id verbatim, so a
+    ``--pass-k 1`` run is indistinguishable from a pre-pass@k run.
     """
     t0 = time.time()
     task_id = task.task_id or "?"
-    logger.info("[%s] Running %s (Level %d)...", label, task_id, task.level)
+    session_id = f"{label}-{task_id}" if attempt_idx == 0 else f"{label}-{task_id}-a{attempt_idx + 1}"
+    attempt_tag = "" if attempt_idx == 0 else f" [a{attempt_idx + 1}]"
+    logger.info("[%s] Running %s (Level %d)%s...", label, task_id, task.level, attempt_tag)
 
     try:
-        result = await harness.run(task, session_id=f"{label}-{task_id}")
+        result = await harness.run(task, session_id=session_id)
         elapsed = time.time() - t0
 
         # External evaluation — does NOT feed back into trajectory/stats.
@@ -197,6 +205,7 @@ async def _run_task(
         empty_end_turn_recovered = bool((slots.get("__empty_end_turn_recovered") or {}).get("content"))
         record = {
             "task_id": task_id,
+            "attempt": attempt_idx,
             "level": task.level,
             "question": task.question[:150],
             "expected": task.final_answer,
@@ -238,6 +247,7 @@ async def _run_task(
         logger.error("[%s] %s ERROR: %s (%.1fs)", label, task_id, exc, elapsed)
         return {
             "task_id": task_id,
+            "attempt": attempt_idx,
             "level": task.level,
             "question": task.question[:150],
             "expected": task.final_answer,
@@ -250,6 +260,192 @@ async def _run_task(
             "tool_error_counts": {},
             "_result": None,
         }
+
+
+# ---------------------------------------------------------------------------
+# pass@k — k independent rollouts per task per round (W17)
+# ---------------------------------------------------------------------------
+#
+# §6.1 p.15, verbatim: "each task receives two independent attempts per round
+# (pass@2: solved if either succeeds), reducing sampling noise while preserving
+# a binary per-task signal for the seesaw constraint". A.3 p.29 gives the
+# unbiased estimator (formula 6) and the rule that infrastructure failures
+# "count as failures" and are not dropped.
+#
+# The two-sidedness is deliberate and must not be "fixed" here: §7.1 p.21 notes
+# that under pass@2 "a task whose success probability has degraded can still
+# register as 'solved,' so sub-threshold regressions evade the seesaw
+# constraint". That masking is the mechanism behind the paper's Global-arm
+# collapse; ``n_pass`` / ``n_att`` are recorded per task precisely so pass@1 can
+# be reported alongside pass@2 (SPEC §6.7) and the drift stays visible.
+
+#: Per-attempt fields carried into the merged record's ``attempts`` list.
+#: Deliberately a whitelist: the merged record already holds the primary
+#: attempt's question/expected/output, and duplicating them k times would
+#: bloat comparison.json for no audit value.
+_ATTEMPT_SUMMARY_KEYS = (
+    "exit_reason",
+    "passed",
+    "score",
+    "steps",
+    "total_tokens",
+    "cost_usd",
+    "elapsed_s",
+    "trajectory_file",
+    "reason",
+)
+
+#: Fields that are *resource* accounting and therefore sum over attempts: a
+#: pass@2 round really did spend both attempts' tokens, and ``round_cost``
+#: sums these records. Everything else is taken from the primary attempt.
+_SUMMED_ATTEMPT_KEYS = ("steps", "total_tokens", "cost_usd", "elapsed_s")
+
+
+def _is_infra_failure(record: dict) -> bool:
+    """Did this attempt die on infrastructure rather than on the task?
+
+    ``exit_reason == "error"`` is how this runner marks a rollout that raised
+    out of ``harness.run`` — a provider timeout, a sandbox that would not
+    start, an exception in the pipeline. A.3 p.29 is explicit that such
+    attempts *count as failures* and are not resampled, so the flag never
+    removes an attempt from the denominator; it exists so the rate can be
+    audited after the fact.
+    """
+    return (record.get("exit_reason") or "") == "error"
+
+
+def _merge_attempt_records(attempts: list[dict]) -> dict:
+    """Fold k independent rollouts of one task into one comparison.json record.
+
+    Backward compatibility is the constraint: ``passed`` stays a bool and every
+    field an existing reader looks at keeps its meaning, so ``comparison.json``
+    is still readable by code written before pass@k existed. What is *added* is
+    ``n_pass`` / ``n_att`` / ``attempts`` (plus ``infra_failures`` and
+    ``primary_attempt``), which is what lets the same file yield pass@1 as well
+    as pass@k.
+
+    Two choices worth naming:
+
+    * ``passed = n_pass > 0`` — "solved if either succeeds" (§6.1 p.15).
+    * The *primary* attempt (whose answer/verdict/trajectory the flat fields
+      describe) is the first passing one, falling back to attempt 0. Picking
+      attempt 0 unconditionally would leave ``passed: true`` sitting next to a
+      failing ``output``/``score``, which reads as a bug in every downstream
+      view.
+
+    Resource fields sum across attempts; that is what makes the round-level
+    cost and token totals true of the run that was actually paid for.
+    """
+    if not attempts:
+        raise ValueError("_merge_attempt_records needs at least one attempt record")
+
+    n_att = len(attempts)
+    n_pass = sum(1 for a in attempts if a.get("passed"))
+    primary_idx = next((i for i, a in enumerate(attempts) if a.get("passed")), 0)
+    merged = dict(attempts[primary_idx])
+
+    for key in _SUMMED_ATTEMPT_KEYS:
+        # Absent in every attempt (the error branch carries no steps/tokens) →
+        # leave it absent, so a k=1 record is byte-identical to the old shape.
+        if not any(key in a for a in attempts):
+            continue
+        total = sum(float(a.get(key) or 0) for a in attempts)
+        if key in ("steps", "total_tokens"):
+            merged[key] = int(total)
+        elif key == "elapsed_s":
+            merged[key] = round(total, 1)
+        else:
+            merged[key] = total
+
+    merged["passed"] = n_pass > 0
+    merged["n_pass"] = n_pass
+    merged["n_att"] = n_att
+    merged["infra_failures"] = sum(1 for a in attempts if _is_infra_failure(a))
+    merged["primary_attempt"] = primary_idx
+    merged["attempts"] = [
+        {
+            "attempt": int(a.get("attempt") if a.get("attempt") is not None else i),
+            **{k: a[k] for k in _ATTEMPT_SUMMARY_KEYS if k in a},
+            "infra_failure": _is_infra_failure(a),
+        }
+        for i, a in enumerate(attempts)
+    ]
+    return merged
+
+
+async def _rollout_once(
+    task: GAIATask,
+    attempt_idx: int,
+    *,
+    label: str,
+    model_config: Any,
+    round_config: Any,
+    pipeline_eval: "GAIAPipelineEvaluator",
+    max_cost: float,
+    run_task: Any = None,
+) -> dict:
+    """One *independent* rollout of ``task`` (§6.1 p.15).
+
+    Independence is the whole point, so nothing is shared between attempts:
+
+    * a fresh harness is built from ``round_config`` per attempt, which is also
+      how the pre-pass@k code obtained a fresh runtime per task (Table 8: "each
+      rollout runs in a fresh environment instance"). No slots, tool registry,
+      or processor state cross over;
+    * the task dataclass is copied per attempt, so the per-task cost cap
+      applies to each attempt separately — k=2 can therefore spend up to twice
+      ``--max-cost`` on one task, by design.
+
+    The harness instance is handed back on the private ``_harness`` key because
+    the caller needs it to retrieve the judge verdict; private keys are
+    stripped before serialisation. ``run_task`` is injectable so the rollout
+    path can be exercised offline.
+    """
+    from dataclasses import replace as _dc_replace
+
+    runner = run_task if run_task is not None else _run_task
+    task = _dc_replace(task, max_cost_usd=max_cost)
+    harness = model_config.agentic(round_config)
+    record = await runner(
+        harness,
+        task,
+        label,
+        pipeline_eval=pipeline_eval,
+        harness_config=round_config,
+        attempt_idx=attempt_idx,
+    )
+    record["_harness"] = harness
+    return record
+
+
+async def _run_task_pass_k(
+    task: GAIATask,
+    *,
+    pass_k: int,
+    sem: asyncio.Semaphore,
+    rollout: Any,
+    finalize: Any = None,
+) -> dict:
+    """Run ``pass_k`` independent rollouts of one task; return one merged record.
+
+    Concurrency: the semaphore is acquired **per attempt, not per task**, so
+    raising k does not multiply the number of harnesses in flight — the k
+    attempts of a task queue for the same ``--concurrency`` slots as every
+    other attempt in the round. Post-processing (judge lookup, trajectory
+    write) runs outside the semaphore, exactly as it did before pass@k.
+    """
+    if pass_k < 1:
+        raise ValueError(f"pass_k must be >= 1, got {pass_k}")
+
+    async def _attempt(attempt_idx: int) -> dict:
+        async with sem:
+            record = await rollout(task, attempt_idx)
+        if finalize is not None:
+            record = await finalize(task, attempt_idx, record)
+        return record
+
+    attempts = list(await asyncio.gather(*(_attempt(i) for i in range(pass_k))))
+    return _merge_attempt_records(attempts)
 
 
 def print_multiround_comparison(rounds: list[list[dict]]) -> None:
@@ -539,7 +735,24 @@ async def main() -> None:
         default=DEFAULT_CONCURRENCY,
         help=(f"Max concurrent trajectories per round. 1 = serial. Default: {DEFAULT_CONCURRENCY}."),
     )
+    parser.add_argument(
+        "--pass-k",
+        type=int,
+        default=1,
+        help=(
+            "Independent rollouts per task per round (paper §6.1 p.15 runs "
+            "pass@2: 'solved if either succeeds'). Each attempt builds its own "
+            "harness and carries its own --max-cost cap, so k=2 roughly doubles "
+            "a round's spend; concurrency is unchanged because the semaphore is "
+            "acquired per attempt. Infrastructure failures count as failed "
+            "attempts and are not resampled (A.3 p.29). Default: 1 — one "
+            "rollout per task, the historical behaviour."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.pass_k < 1:
+        parser.error(f"--pass-k must be >= 1, got {args.pass_k}")
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -699,8 +912,8 @@ async def main() -> None:
 
         # judge_proc is no longer a round-level handle: each per-task harness
         # instantiates its own LLMJudgeProcessor from the YAML dict, with its
-        # own _verdict_sink. Verdict retrieval happens inside _run_one after
-        # the harness has run, by scanning harness._rt.processors directly.
+        # own _verdict_sink. Verdict retrieval happens inside _finalize_attempt
+        # after the harness has run, by scanning harness._rt.processors directly.
 
         # Dump the config actually executed this round — baseline or evolved —
         # for reproducibility and for evolve() to Read on the next iteration.
@@ -713,38 +926,39 @@ async def main() -> None:
         logger.info("=" * 60)
 
         # ── Run all tasks (up to args.concurrency in parallel) ─────────────
-        # Trajectories are independent: each gets its own harness instance,
-        # own session_id, and writes to its own per-task file. judge_proc is
-        # shared but keyed by run_id. The semaphore bounds concurrent
-        # harness.run() calls to stay within LLM provider rate limits; cheap
-        # post-processing (judge lookup, trajectory write) runs outside it.
+        # Trajectories are independent: each rollout gets its own harness
+        # instance, own session_id, and writes to its own per-attempt file.
+        # judge_proc is shared but keyed by run_id. The semaphore bounds
+        # concurrent harness.run() calls to stay within LLM provider rate
+        # limits; it is acquired per *attempt*, so --pass-k does not multiply
+        # concurrency. Cheap post-processing (judge lookup, trajectory write)
+        # runs outside it.
         sem = asyncio.Semaphore(max(1, args.concurrency))
 
-        async def _run_one(task: GAIATask) -> dict:
-            # dataclass.replace gives us a per-round copy of the task with
-            # this round's budget; avoids mutating the original (which is
-            # later consumed by the replay gate through _task_index).
-            from dataclasses import replace as _dc_replace
+        async def _rollout(task: GAIATask, attempt_idx: int) -> dict:
+            return await _rollout_once(
+                task,
+                attempt_idx,
+                label=f"R{round_idx}",
+                model_config=model_config,
+                round_config=round_config,
+                pipeline_eval=pipeline_eval,
+                max_cost=args.max_cost,
+            )
 
-            async with sem:
-                task = _dc_replace(task, max_cost_usd=args.max_cost)
-                harness = model_config.agentic(round_config)
-                record = await _run_task(
-                    harness,
-                    task,
-                    f"R{round_idx}",
-                    pipeline_eval=pipeline_eval,
-                    harness_config=round_config,
-                )
-
+        async def _finalize_attempt(task: GAIATask, attempt_idx: int, record: dict) -> dict:
+            harness = record.pop("_harness", None)
             raw = record.get("_result")
             tid = record.get("task_id") or "unknown"
-            record["trajectory_file"] = f"R{round_idx}/trajectories/{tid}.md"
+            # Attempt 0 keeps the historical <task_id>.md name so a --pass-k 1
+            # round's trajectory tree is unchanged; later attempts get a suffix.
+            traj_name = f"{tid}.md" if attempt_idx == 0 else f"{tid}.a{attempt_idx + 1}.md"
+            record["trajectory_file"] = f"R{round_idx}/trajectories/{traj_name}"
 
             # Collect judge verdict: find the LLMJudgeProcessor that ran
             # inside this harness instance and pull its verdict for this run_id.
             judge_entry: dict = {}
-            if not args.no_judge:
+            if not args.no_judge and harness is not None:
                 from harnessx.processors.evaluation.llm_judge import (
                     LLMJudgeProcessor as _LJP,
                 )
@@ -768,15 +982,41 @@ async def main() -> None:
                 _, err_count = _compute_tool_stats(raw)
                 record["error_count"] = err_count
                 traj_text = _build_trajectory_text(task, raw, harness_config=round_config)
-                _write_task_trajectory(traj_dir, task, traj_text, record=record)
+                _write_task_trajectory(
+                    traj_dir,
+                    task,
+                    traj_text,
+                    record=record,
+                    filename=traj_name,
+                )
             return record
 
-        records: list[dict] = list(await asyncio.gather(*(_run_one(t) for t in tasks)))
+        records: list[dict] = list(
+            await asyncio.gather(
+                *(
+                    _run_task_pass_k(
+                        t,
+                        pass_k=args.pass_k,
+                        sem=sem,
+                        rollout=_rollout,
+                        finalize=_finalize_attempt,
+                    )
+                    for t in tasks
+                )
+            )
+        )
         gc.collect()
 
         all_rounds.append(records)
 
+        # ``passed`` stays the count of *tasks* solved ("either attempt
+        # succeeds", §6.1 p.15) — that is the binary per-task signal the
+        # seesaw constraint and the noise-threshold gate consume. The rollout
+        # totals below are what make pass@1 recoverable from the same file.
         passed = sum(1 for r in records if r.get("passed"))
+        n_pass_total = sum(int(r.get("n_pass") or 0) for r in records)
+        n_att_total = sum(int(r.get("n_att") or 0) for r in records)
+        infra_total = sum(int(r.get("infra_failures") or 0) for r in records)
         round_cost = sum((r.get("cost_usd") or 0) for r in records)
         totals = _compute_round_totals(records)
         round_pass_rate = round(passed / len(records), 3) if records else 0.0
@@ -787,13 +1027,29 @@ async def main() -> None:
                 "tasks": len(records),
                 "passed": passed,
                 "pass_rate": round_pass_rate,
+                "pass_k": args.pass_k,
+                "n_pass": n_pass_total,
+                "n_att": n_att_total,
+                "infra_failures": infra_total,
                 "total_cost_usd": round(round_cost, 4),
                 "total_tokens": totals["total_tokens"],
                 "total_steps": totals["total_steps"],
                 "evolve_status": next_evolve_status,
             }
         )
-        logger.info("[R%d] pass=%d/%d  cost=$%.3f", round_idx, passed, len(records), round_cost)
+        if args.pass_k > 1:
+            logger.info(
+                "[R%d] pass=%d/%d  rollouts=%d/%d (infra_fail=%d)  cost=$%.3f",
+                round_idx,
+                passed,
+                len(records),
+                n_pass_total,
+                n_att_total,
+                infra_total,
+                round_cost,
+            )
+        else:
+            logger.info("[R%d] pass=%d/%d  cost=$%.3f", round_idx, passed, len(records), round_cost)
 
         # ── Best-so-far gating ────────────────────────────────────────────
         # Compare against the historical-best round (not the last-accepted)
@@ -1132,6 +1388,7 @@ def _write_task_trajectory(
     task: Any,
     text: str,
     record: dict | None = None,
+    filename: str | None = None,
 ) -> None:
     """Write a single task's trajectory to ``round_dir/<task_id>.md``.
 
@@ -1139,13 +1396,18 @@ def _write_task_trajectory(
     :func:`_render_trajectory_frontmatter`. Legacy callers passing only
     ``(round_dir, task, text)`` still work — they just get a body without
     frontmatter.
+
+    ``filename`` overrides the default ``<task_id>.md``. Under pass@k the
+    attempts of one task would otherwise overwrite each other; attempt 0 keeps
+    the historical name and later attempts get a suffix, so each rollout has
+    its own trajectory with its own (per-attempt) frontmatter.
     """
     round_dir.mkdir(parents=True, exist_ok=True)
     tid = getattr(task, "task_id", None) or "unknown"
     if record is not None:
         fm = _render_trajectory_frontmatter(record)
         text = f"{fm}\n\n{text.lstrip()}"
-    (round_dir / f"{tid}.md").write_text(text, encoding="utf-8")
+    (round_dir / (filename or f"{tid}.md")).write_text(text, encoding="utf-8")
 
 
 def write_round_trajectories(
