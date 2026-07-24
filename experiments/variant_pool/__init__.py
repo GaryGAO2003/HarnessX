@@ -58,6 +58,14 @@ from .manifest import (
     impact_category,
 )
 from .pool import DEFAULT_K, Variant, VariantPool
+from .reporting import (
+    IMPLICIT_VARIANT,
+    POOL_EVENT_KINDS,
+    RunReport,
+    TaskResult,
+    pass_at_k,
+    report_from_rows,
+)
 from .router import CLUSTER_MODES, TIE_BREAKS, Router, RoutingFreezeError
 from .target import STRATEGIES, select_target_variant
 
@@ -69,12 +77,14 @@ __all__ = [
     "DEFAULT_STALE_PRIOR",
     "FAMILY_SECTIONS",
     "GATE_SEQUENCE",
+    "IMPLICIT_VARIANT",
     "LEVEL2_CLAIM",
     "LEVER_BAN_HIT_RATE",
     "LEVER_BAN_MIN_SHIPS",
     "LEVER_BAN_WINDOW",
     "LOCK_FILENAME",
     "PAPER_LEVEL_DISTRIBUTION",
+    "POOL_EVENT_KINDS",
     "SPEC_VERSION",
     "STRATEGIES",
     "TIE_BREAKS",
@@ -98,15 +108,19 @@ __all__ = [
     "RejectedCandidate",
     "Router",
     "RoutingFreezeError",
+    "RunReport",
     "ShipOutcome",
     "SuccessLedger",
     "TaskDigest",
     "TaskEval",
+    "TaskResult",
     "Variant",
     "VariantPool",
     "check_level2_roundtrip",
     "impact_category",
     "level2_roundtrip_check",
+    "pass_at_k",
+    "report_from_rows",
     "run_gate",
     "select_target_variant",
     "sha256_file",
