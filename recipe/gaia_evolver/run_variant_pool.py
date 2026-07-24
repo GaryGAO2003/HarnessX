@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import logging
 import shutil
@@ -155,6 +156,32 @@ def _prepare_round_config(config_path: Path, journal: Any):
     return cfg.copy(tracer=journal)
 
 
+def _make_variant_meta_agent(template: Any, journal_path: Path) -> Any:
+    """W9 — a per-variant meta-agent bound to that variant's own journal.
+
+    The paper's gates (canonicalize -> replay smoke -> novelty -> evidence) run
+    *inside* ``meta_agent.evolve``, not in the C1 gate: ``agent.py`` builds an
+    ``EvolveValidator(memo_path=self.memo_path)`` which calls ``check_novelty``
+    on that memo. ``MetaAgent`` binds ``memo_path`` at construction time and
+    ``evolve`` takes no per-call memo override, so isolating the novelty check
+    per variant means one meta-agent per variant, each bound to
+    ``variant.journal_path`` (SPEC §2.1 / §C3 W9). Sharing one global memo would
+    let variant B's legitimate retry of a cluster variant A reverted trip
+    ``reverted_signature_reused`` and be falsely killed.
+
+    A shallow copy shares the template's read-only config (model, budgets, skill
+    dirs, write roots) and swaps only the memo; ``MetaAgent`` keeps no
+    per-evolve mutable state — its tracer/harness/scratch are all built locally
+    inside each ``evolve`` call — so the copy is safe. ``.resolve()`` mirrors
+    ``MetaAgent.__init__`` so V0's journal (``run_dir/learnings.md``) reproduces
+    the single-lineage memo byte-for-byte under K=1. Module level so the offline
+    W9 test can observe / replace it.
+    """
+    clone = copy.copy(template)
+    clone.memo_path = Path(journal_path).resolve()
+    return clone
+
+
 @dataclass
 class PoolCandidate:
     """One round's proposed config for one variant.
@@ -216,6 +243,11 @@ class VariantPoolRecipe:
         # pool ``config_path``; ``_last_traj_dir`` is where that config was last
         # evaluated (what the next evolve reads).
         self._last_traj_dir: dict[str, Path] = {}
+        # W9 — ``self.meta_agent`` is the *template*; each variant evolves through
+        # its own clone bound to ``variant.journal_path`` so the novelty gate
+        # (run inside ``evolve``) only sees that variant's lineage. Cached by
+        # variant_id (journal_path is immutable after add_root/fork).
+        self._meta_agents: dict[str, Any] = {}
         # Reset each round; populated by the callbacks, consumed by reconcile.
         self._round_candidates: dict[str, PoolCandidate | None] = {}
         self._round_traj_dir: dict[str, Path] = {}
@@ -276,6 +308,24 @@ class VariantPoolRecipe:
     # callback: evolve
     # ------------------------------------------------------------------
 
+    def _meta_agent_for(self, variant: Any) -> Any:
+        """The per-variant meta-agent (W9), lazily cloned from the template.
+
+        Built once per ``variant_id`` and cached: a variant's ``journal_path``
+        never changes after ``add_root`` / ``fork``. A forked child's journal
+        was already copied from its parent by :meth:`VariantPool.fork`
+        (inherit-then-diverge, SPEC §2.1), so the child's first evolve reads the
+        parent's history and then accumulates on its own file. Under K=1 only V0
+        exists and its journal is ``run_dir/learnings.md`` — the same memo the
+        single-lineage ``run.py`` uses — so behaviour is unchanged.
+        """
+        vid = variant.variant_id
+        agent = self._meta_agents.get(vid)
+        if agent is None:
+            agent = _make_variant_meta_agent(self.meta_agent, variant.journal_path)
+            self._meta_agents[vid] = agent
+        return agent
+
     def _evolve(self, variant: Any, round_idx: int) -> PoolCandidate | None:
         """Produce this round's candidate config for ``variant`` (or ``None``)."""
         vid = variant.variant_id
@@ -296,15 +346,29 @@ class VariantPoolRecipe:
         evolve_dir.mkdir(parents=True, exist_ok=True)
         logger.info("[R%d] %s evolve -> %s", round_idx, vid, evolve_dir)
 
-        new_yaml = self._await(
-            self.meta_agent.evolve(
-                current_config=Path(variant.config_path),
-                trajectories_dir=self._last_traj_dir[vid],
-                output_dir=evolve_dir,
-                replay_model=self.model_config,
-                replay_max_cost_usd=min(0.5, float(self.args.max_cost)),
+        # meta_agent.evolve runs the paper's own gates internally (canonicalize
+        # -> replay smoke -> novelty -> evidence; the "Gates check replay/novelty"
+        # of Figure 6). A rejected candidate raises rather than returns — e.g. a
+        # replay-smoke timeout, which DeepSeek hits where the paper's stronger
+        # models did not. run.py wraps this same call in a broad except (~1316):
+        # a crashed/rejected evolve just means "no shipped candidate this round,
+        # reuse the current config". We mirror that: the variant contributes to
+        # idle and its config is untouched. Swallowing here (not in the engine)
+        # keeps the failure attributable to one variant's evolve, not the round.
+        try:
+            new_yaml = self._await(
+                self._meta_agent_for(variant).evolve(
+                    current_config=Path(variant.config_path),
+                    trajectories_dir=self._last_traj_dir[vid],
+                    output_dir=evolve_dir,
+                    replay_model=self.model_config,
+                    replay_max_cost_usd=min(0.5, float(self.args.max_cost)),
+                )
             )
-        )
+        except Exception as exc:  # noqa: BLE001 — mirrors run.py's evolve guard
+            logger.warning("[R%d] %s evolve rejected/crashed -> no candidate: %s", round_idx, vid, exc)
+            self._round_candidates[vid] = None
+            return None
         new_yaml = Path(new_yaml)
 
         # Byte-identical output == the meta-agent's explicit no-op idiom
@@ -451,6 +515,7 @@ class VariantPoolRecipe:
         """Advance each variant's held config after the gate decided (see module doc)."""
         for retired_id in result.retired:
             self._last_traj_dir.pop(retired_id, None)
+            self._meta_agents.pop(retired_id, None)  # W9: drop the retired variant's agent
 
         for vid, cand in self._round_candidates.items():
             if cand is None:
