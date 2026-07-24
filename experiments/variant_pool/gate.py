@@ -31,10 +31,40 @@ produces. Both fire only when ``candidate`` actually *is* a
 :class:`ChangeManifest`; an opaque candidate keeps the batch-A stub behaviour,
 and an explicitly injected check always wins over the built-in one.
 
-Stages 2 and 3 stay **injected** (SPEC §5): the canonicalizer
-(``harness.py:944``) and the smoke runner (``replay.py:64``) live in the repo
-and get wired in batch C. An absent check passes, so the sequencing and the
-seesaw can be exercised offline with stubs. Stage 5 is implemented in full here.
+Stages 2 and 3 are **no-op by design** (SPEC §7.8, batch C4). The canonicalizer
+(``harness.py:944``) and the synthetic smoke runner (``replay.py:64``) are
+*not* re-run here: the C4 investigation established that every candidate which
+reaches this gate has already passed both, upstream, before the seesaw sees it.
+
+* ``meta_agent.evolve`` runs the paper's own gate internally
+  (``EvolveValidator.run``, ``validate_workflow.py:890``): canonicalize ->
+  contract -> replay(synthetic smoke) -> novelty -> evidence, and *raises* on
+  the first failure. It returns a ``config.yaml`` only after that validator
+  passes, so an evolved candidate has provably canonicalized and cleared the
+  replay smoke; a rejected one raises and never becomes a candidate
+  (``run_variant_pool._evolve`` catches it as "no candidate this round"). A
+  *forked* candidate is the **same** evolve product — ``_reconcile`` repoints the
+  fork child at the gated candidate's YAML, it does not synthesise a fresh,
+  un-evolved config — so a fork never bypasses the check either.
+* The recipe's ``evaluate`` step runs *before* this gate in
+  :meth:`VariantPoolEngine.run_round`, and it loads every candidate's config
+  through ``_prepare_round_config`` =
+  ``HarnessConfig.from_yaml_file(...).canonicalize()`` (un-guarded: a failure
+  raises and the candidate never reaches the gate) and then runs the full
+  harness for real. That canonicalizes even the round-0 *baseline* candidate —
+  the only path that skips ``evolve`` — and the real rollouts are a strictly
+  stronger smoke than the synthetic one.
+
+Re-running canonicalize/replay here would verify nothing new and would risk a
+*second* replay timeout — the exact failure that surfaced on the first real run.
+The two stages keep their enum slots, their position in the sequence, and their
+injection seams: an explicitly injected ``check_canonicalize`` / ``check_smoke``
+still wins (so a V1 reward-hacking probe, SPEC §9.5, can force a failure), but
+no built-in check is wired and none should be. An absent check passes, so the
+sequencing and the seesaw are also exercised offline with stubs. The gate's real
+interception therefore comes from three stages: MANIFEST_COMPLETE and
+ROUNDTRIP_L2 (on a :class:`ChangeManifest`) and SEESAW_REGRESSION (always).
+Stage 5 is implemented in full here.
 
 Stage 4 has two strengths, deliberately. Offline it verifies that the manifest
 *declares* Level-2 evidence, which is what the Critic checks at ship time
@@ -322,6 +352,11 @@ def run_gate(
                 archive_reason=f"MANIFEST_COMPLETE: missing fields {sorted(missing)}",
             )
 
+    # Stages 2-4. CANONICALIZE and BUILD_SMOKE_L1 have no built-in check: they are
+    # no-op by design (SPEC §7.8, C4) — evolve's internal gate and the evaluate-time
+    # canonicalize + full-harness rollout already guarantee both for every candidate
+    # that reaches here. ROUNDTRIP_L2 keeps its manifest-backed default. For all three,
+    # an explicitly injected check still runs and wins (an absent one passes).
     for stage, check, args in (
         (GateStage.CANONICALIZE, check_canonicalize, (candidate, parent_config)),
         (GateStage.BUILD_SMOKE_L1, check_smoke, (candidate,)),

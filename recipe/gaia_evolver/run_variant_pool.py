@@ -188,8 +188,11 @@ class PoolCandidate:
 
     Deliberately **not** a :class:`~experiments.variant_pool.manifest.ChangeManifest`
     so the C1 gate treats it opaquely and the decision is the pure seesaw on
-    ``T_k`` (SPEC §8.4 step 3); wiring the manifest / canonicalize / smoke stages
-    into the gate is batch C4. Carries ``target_variant`` (the variant this
+    ``T_k`` (SPEC §8.4 step 3). Batch C4 investigated the gate's canonicalize /
+    smoke stages and found them redundant with ``meta_agent.evolve``'s internal
+    gate plus the evaluate-time ``_prepare_round_config`` canonicalize, so they
+    stay no-op by design (SPEC §7.8); no per-candidate manifest is wired here.
+    Carries ``target_variant`` (the variant this
     candidate is for) and ``candidate_id`` (read by the engine when archiving a
     rejection). ``is_baseline`` marks a round-0 "adopt my own config" candidate,
     which produced no meta-agent call.

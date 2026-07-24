@@ -156,6 +156,7 @@ def _seesaw_three_way(tk_results, ledger, *, min_fork=(2,2)) -> Decision:
 **论文依据**:五关序列 §4.3 p.10 逐字("manifest completeness → configuration normalization → build/smoke tests → seesaw constraint";"first failing check halts";"archived with rejection reason");Figure 6(c) 图注补 replay/novelty(H6,repo 已有);三路 §4.5 p.11;seesaw 基准 §4.1 p.8;Level-2 prompt p.32。
 **我方自定**:fork 最小规模门槛。
 **关键**:门是唯一 ship 判据(§4.3 "only deterministic checks govern shipping");Critic 的 ship_ranking **只排序、不放行**——排序后的候选仍须逐个过完整门,第一个过门者胜出(Alg.1 L21-24)。
+**C4 裁定(Jul-24,见 §7.8)**:CANONICALIZE(2)/ BUILD_SMOKE_L1(3)两关经调查确认与 `meta_agent.evolve` 内部门(`validate_workflow.py:890`)+ evaluate 期 `_prepare_round_config` 的 canonicalize **完全冗余**,**正式标注为 no-op-by-design,不重复接线**(重跑无新增校验,且会二次 replay timeout——即首次真跑暴露的失败)。保留五关枚举位、`GateResult`/`GATE_SEQUENCE` 结构与注入缝(注入的 `check_canonicalize`/`check_smoke` 仍优先,V1 反 reward-hacking §9.5 可强制失败);gate 实际拦截来自 MANIFEST_COMPLETE / ROUNDTRIP_L2(manifest)/ SEESAW_REGRESSION(恒真)三关。
 
 ### 2.5 `target.py` — W14
 
@@ -422,7 +423,7 @@ Critic = Part 1 逐候选 + Part 2 组合审计,二者皆须实现(prompt p.33-3
 | **C1** 演化引擎 | 新 `variant_pool/engine.py`:路由→逐变体评测→门→fork/apply/retire→更新账本→下轮;评测与 evolve 为**注入回调** | 否(全离线单测) | 否 |
 | C2 真实接线 | 新 `recipe/gaia_evolver/run_variant_pool.py`;`--pool-k`(1=单谱系回归) | 是(小烟雾) | 否(新增文件) |
 | C3 逐变体 journal 隔离(W9) | 每变体 `learnings_{id}.md`,novelty 按变体作用域 | 否 | 局部 |
-| C4 门两关接真实(W27) | canonicalize(`harness.py:944`)/ smoke(`replay.py:64`)从桩换真实 | 否 | 否 |
+| C4 门两关去向裁定(W27) | 调查 evolve 内部门 vs gate 两关 → 裁定 canonicalize(`harness.py:944`)/ smoke(`replay.py:64`)**冗余**,正式标注 no-op-by-design,不重复接线(§7.8) | 否 | 否 |
 
 ### 8.4 C1 引擎契约(本批)
 `VariantPoolEngine` 编排一轮 = 论文 Algorithm 1 + §4.5 变体隔离:
@@ -437,9 +438,82 @@ Critic = Part 1 逐候选 + Part 2 组合审计,二者皆须实现(prompt p.33-3
 
 **K=1 回归**:池只有 V0,路由恒返回 V0,永不 fork,行为等同单谱系。C1 必须有一个 `--pool-k 1` 等价的测试证明这一点。
 
+## 9. 实验设计(冻结基线,吸收对抗审查 Jul-24)
+
+Gate 式:前一层不过就止损,不进下一层。K 值由 P1 反推,不盲定。evolver(单候选/多候选+Critic)待用户裁定。
+
+### 9.0 预注册主假设(防 HARKing / 多重比较污染)
+- **H1(唯一确认性主假设)**:McNemar **配对**检验(两臂同 103 题),`Ensemble_final > Global_final`,单尾,**Δ ≥ 10pp**,α=0.05。分析单元 = **task-level 配对**。
+- **H2(次)**:TOST 等价检验,`Ensemble (peak − final)` 落在 ±5% 噪声带内(证明不退化)。
+- 其余全部 **exploratory**,BH 校正或明确不作推断。seed-level 只报粗方差带,**不作主推断**(3 seed 估不出可靠方差)。
+
+### 9.1 阶段 0 — 探针(必须最先跑,任一不过止损)
+| # | 配置 | 判据 | ~成本 |
+|---|---|---|---|
+| P1 fork 触发 | K=4 / 20题分层 / 6轮 | fork 触发数次;测触发率(反推可行 K)与方差 | $5 |
+| P2 Global 崩塌 | K=1 / 40题 / **12+轮** | Global **final < peak** 超 ±5% 噪声带 | $40 |
+P1 不触发=变体池名存实亡;P2 不崩=Ensemble 无东西可赢,主对比空转。
+
+### 9.2 阶段 1 — 主对比(3 臂 × 3 seed)
+| 臂 | 配置 | 作用 |
+|---|---|---|
+| M-A K=1 Global | 103题/15轮/pass@2 ×3seed | baseline |
+| M-B K=K* fork-on-conflict | 同上 | 论文机制 |
+| **M-C K=K* 非-fork portfolio** | 同上 | **隔离"机制 vs 集成红利"** —— 缺此臂,M-B 赢会被判"只是 ensemble" |
++ **held-out**:20 题不参与演化,最终池两种路由(按簇/塌缩单变体)各评(复现论文 §7.5 未测的部署塌缩)。
+成本:9 run ≈ **$400-700** + held-out $25-40。
+
+### 9.3 阶段 2 — 诊断
+**免费**(阶段1日志算):路由命中率 / pass@1 / per-attempt / level分层 / 种子方差 / **实现K vs 名义K**(按实现K分组)/ **变体多样性指标**(config diff + 路由重叠)/ infra失败率跨臂平衡。
+**付费**:oracle headroom(需全网格 K×103,scoped只测对角线)= **$70-150**。
+
+### 9.4 阶段 3 — 消融(exploratory,只描述不推断)
+n=40 欠功效(只检出17-20pp)+ 有状态演化轨迹分叉不可比 → **禁写"X优于Y"**。
+K{4,8}(**删K=16**:破碎)/ 簇{routed/failure/level}/ 口径{裸率/Laplace/EMA}/ 门槛{(1,1)/(2,2)};每臂≥2seed。~**$130-300**。
+
+### 9.5 阶段 4 — 验证性($5 each)
+- V1 反 reward-hacking 阳性:植入已知 format-exploit,确认门拒绝。
+- V2 pass@2 独立性:确认两次 rollout 不被 prefix cache 拖成相关。
+
+### 9.6 横切原则
+- **token 分账**:匹配 task-agent rollout 预算,meta-token 作独立效率轴**单独报不匹配**(论文效率优势正是"不matched反而更省")。
+- **成本总账(修正后)**:最小可发表(探针+主对比+免费诊断+held-out)~**$500-800**;完整 ~**$700-1200**。此前 $115 是漏算机制分离臂/K=8增量/held-out/headroom,错近10×。
+
+## 10. 原体改动清单(upstream 污染台账,用户裁定 Jul-24:全部可配置、默认=原体)
+
+**原则**:变体池的全部逻辑(~12,900 行)在**新增文件**里,零污染原体。对 upstream 原有文件的改动只有下表三处,**每处都默认关闭或只在非 Claude 路径生效**——用原论文配置(Claude + `--pass-k 1` 缺省)跑,原体行为逐字节不变。
+
+| # | 文件 | 改动 | 性质 | 如何关回原样 |
+|---|---|---|---|---|
+| 1 | `recipe/gaia_evolver/run.py` | pass@k 双 rollout(~430 行:`_rollout_once` / `_run_task_pass_k` / `_merge_attempt_records` / `_round_pass_rate` + `--pass-k`) | 功能(论文 §6.1 pass@2,repo 未实现) | **`--pass-k 1`(默认)= 单次评测,与 pre-pass@k 逐字节不可区分**(`run.py:179` 自证)。传 2 才启用论文 pass@2 |
+| 2 | `harnessx/providers/litellm_provider.py` | cache token 提取(~30 行:`_cache_read_tokens` / `_cache_write_tokens`) | **Bug 修复**(补 upstream 疏漏:anthropic/responses provider 都读了 cache 字段,litellm 漏了) | 只影响**走 litellm 路径**的模型(DeepSeek/OpenAI…);**Claude 走 `anthropic_provider`,完全不碰此处**。读 cache 字段对任何 provider 都正确,不改变行为,只修正成本核算 |
+| 3 | `harnessx/providers/litellm_provider.py` | 空 content 发 `""` 而非 `null`(~3 行) | **Bug 修复**(DeepSeek 反序列化器拒收 `content: null`,长任务全崩) | 同上,只走 litellm 路径;`""` 对 OpenAI/DeepSeek 都合法,Claude 路径不受影响 |
+
+**判定**:#1 是唯一的"功能"改动,已做成默认关闭的开关(`--pass-k`);#2/#3 是让 upstream 在非 Claude 模型上不出错的修复,**不影响论文原配置(Claude)的行为**。⇒ **"原体默认行为 = 原版" 已满足**;无需撤出。
+新增文件(平行 recipe + experiments 包)对 upstream 零侵入,可随时 `git checkout origin/main -- <原体文件>` 完全复原。
+
 ## 7.7 实现中确立、值得保留的三条设计原则
 
 review 中确认的判断,记录以免后续被改坏:
 1. **宽松解析,严格门控**:`ChangeManifest` 所有字段带默认值,不完整的 manifest 仍能解析,由 `validate_complete()` 判定 —— 否则是 pydantic 而非确定性门在决定什么能 ship,违背 §4.3 "only deterministic checks govern shipping"。唯一例外是 `extra="forbid"`(未知键 = 臆造 schema,属解析错误)。
 2. **hit-rate 池化而非平均**:`sum(hits)/sum(predicted)` 跨 ship 汇总;平均会让一个走运的 1 任务 ship 抵消一个失败的 5 任务 ship。分母为 0 返回 `None` 而非 0.0,禁用规则拒绝在未定义比率上触发。
 3. **pass@2 语义忠实**:2/2 掉到 1/2 **不算回退**(仍 solved),这正是论文 §7.1 所述 pass@2 掩盖亚阈值退化的机制;实现不得"顺手修好"它——那会偏离论文并使 Global 臂的崩塌不可复现。
+
+## 7.8 C4 门两关(CANONICALIZE / BUILD_SMOKE_L1)去向:裁定为冗余,标注 no-op-by-design(Jul-24)
+
+C4 首次真跑时,evolve 内部 replay 门 timeout 抛异常,被 `run_variant_pool._evolve` 的 guard 接住当"本轮无候选"。这暗示:候选能到达我方 gate,是否说明它已过 evolve 内部的 canonicalize + replay 门?**调查结论:是,且两关与 gate 完全冗余。**
+
+**① evolve 内部门保证什么。** `meta_agent.evolve`(`agent.py:538`)在 agent turn 后调 `EvolveValidator.run`(`validate_workflow.py:890`),按序跑 validity 相:canonicalize(`harness.py:944` 的 `HarnessConfig.from_yaml_file(...).canonicalize()`)→ contract → replay(synthetic smoke,`replay.py:64`,经 `run_replay_gate_strict:200` 包装)→ 再 policy 相(changeset 非空时 novelty/evidence);**首个失败即 `raise RuntimeError`**。`evolve` 仅在 `validator.run` 无异常返回后才交出 `output_dir/config.yaml`。⇒ **evolve 成功返回 ⟺ 返回的 config 已 canonicalize 通过 + replay smoke 通过**(非空 changeset 另含 novelty/evidence)。今日的 timeout 正是这条 replay 门在 DeepSeek 上触发(论文的强模型未触发),行为符合设计。
+
+**② 三条到达 gate 的候选路径**(`run_variant_pool._evolve`):
+- **演化候选**(后续轮真实改动)= `meta_agent.evolve` 产物,**已过 evolve 门**(否则 raise → guard 兜住返回 `None`,根本到不了 gate);
+- **baseline 候选**(round-0 或变体首现,`is_baseline=True`)= 变体自身冻结的 H0 config(`V0/config.yaml`,由 `make_gaia_builder_gpt5().build()` 序列化),**未经 `meta_agent.evolve`**;
+- **byte-identical no-op** → 返回 `None`,不到 gate。
+
+**③ fork 候选不是新配置。** `engine._fork` 里 `pool.fork` 克隆的是**父**config,但该克隆立即被 recipe 的 `_reconcile` 覆盖:`child.config_path = Path(cand.config_path)`,其中 `cand` 就是刚过门的同一 `PoolCandidate`。⇒ **fork 只是把已过门的候选分给新变体,不产生绕过门的新 config**,故 fork 候选与被 gate 看到的候选门态相同。
+
+**④ baseline 候选也已 canonicalize——被 recipe 自己的 evaluate 步。** `VariantPoolEngine.run_round` 的次序是 evaluate(步 2)→ gate(步 3)。recipe 的 `_evaluate`→`_run_evaluation` 先调 `_prepare_round_config` = `HarnessConfig.from_yaml_file(config_path).canonicalize()`(**未套 try/except**,失败即 raise,候选到不了 gate),再用真实 harness 全量跑 rollout(实例化并驱动全部 processor/tool,比 synthetic smoke 更强)。⇒ **任何候选到达 gate 时其 config 必已 canonicalize 通过**(演化/fork 由 evolve 保证,baseline 由 evaluate 保证);smoke 由 evolve 的 synthetic replay(演化/fork)或 evaluate 的真实 rollout(全部)覆盖。**不存在同时绕过 evolve 门与 evaluate 期 canonicalize 的候选路径。**
+
+**⑤ 裁定:gate 的 CANONICALIZE / BUILD_SMOKE_L1 = 冗余双重检查,正式标注为 no-op-by-design,不重复接线。** 理由:(a) 无候选路径绕过上游两道保证;(b) 重跑 canonicalize 零新增校验;(c) 重跑 replay 会二次 timeout——正是今日暴露的失败。**保留**五关枚举位、`GateResult`/`GATE_SEQUENCE` 结构、以及注入缝(`check_canonicalize`/`check_smoke` 参数)——注入的检查仍优先执行并可 halt,故 V1 反 reward-hacking 探针(§9.5)仍可强制失败;但 gate **不接内建 canonicalize/smoke 检查**(代码里这两关本就没有内建实现,仅 stage 1/4 对 manifest 有内建默认)。gate 的实际拦截来自三关:**MANIFEST_COMPLETE**(candidate 为 manifest 时)、**ROUNDTRIP_L2**(manifest 且 code bucket)、**SEESAW_REGRESSION**(恒真)。
+
+**落点**:`gate.py` 模块 docstring "Which stages are real" 段与 `run_gate` 内联注释已改写标注;`run_variant_pool.PoolCandidate` docstring 的 "batch C4" 前向引用已更新;测试见 `tests/test_gate_c4_redundancy.py`(锁定两关 no-op + 三关拦截 + 结构不变)。
