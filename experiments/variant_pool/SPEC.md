@@ -406,6 +406,37 @@ Critic = Part 1 逐候选 + Part 2 组合审计,二者皆须实现(prompt p.33-3
 
 **⑥ 精读报告须随仓自包含。** SPEC 前言与多个模块 docstring 引用 `experiments/docs/HarnessX_VariantPool_TheoryFast_Report`,但该文件只存在于 MAS_Directions 项目,**不在本仓**——导致 coder 无法核验 A.3 公式 6 的形状与 A.4 的 H0 措辞。**裁决:把精读报告复制进本仓 `experiments/docs/`**,使论文依据链在仓内闭合。
 
+## 8. 阶段 C 架构(Jul-24,用户裁定直接建 M1 fork)
+
+**用户裁定:跳过独立 M0,直接建变体池(fork 互补)。** 对照不因此丢失——反而更干净。
+
+### 8.1 K=1 即 Global,对照内建
+变体池容量 `K=1` 时退化为单谱系,等价于论文 Global 臂。故**同一份变体池 recipe 跑 `--pool-k 1` 与 `--pool-k 8`,即 Table 5 的 Global vs Ensemble**,同代码路径、同数据、同参数,唯一变量是变体数。比独立 M0(用原 `run.py` 跑 Global,跨代码路径)可比性更强。
+
+### 8.2 平行 recipe,不改 run.py 主体
+阶段 C **不重构** `run.py` 的内联主循环(会破坏已能跑的基线,且 pass@2 刚改过)。新写平行 recipe `recipe/gaia_evolver/run_variant_pool.py`,复用 run.py 的零件(`_run_task_pass_k`、`meta_agent.evolve`、gate 的 canonicalize/smoke),用变体池引擎编排。这是 repo 既有模式(`run.py` / `run_meta.py` 本就平行)。
+
+### 8.3 分解
+| 批次 | 模块 | 接触 API | 破坏 repo |
+|---|---|---|---|
+| **C1** 演化引擎 | 新 `variant_pool/engine.py`:路由→逐变体评测→门→fork/apply/retire→更新账本→下轮;评测与 evolve 为**注入回调** | 否(全离线单测) | 否 |
+| C2 真实接线 | 新 `recipe/gaia_evolver/run_variant_pool.py`;`--pool-k`(1=单谱系回归) | 是(小烟雾) | 否(新增文件) |
+| C3 逐变体 journal 隔离(W9) | 每变体 `learnings_{id}.md`,novelty 按变体作用域 | 否 | 局部 |
+| C4 门两关接真实(W27) | canonicalize(`harness.py:944`)/ smoke(`replay.py:64`)从桩换真实 | 否 | 否 |
+
+### 8.4 C1 引擎契约(本批)
+`VariantPoolEngine` 编排一轮 = 论文 Algorithm 1 + §4.5 变体隔离:
+1. **路由冻结**:`router.freeze_routing(tasks, pool, ledger, round_idx)` —— rollout 前,只读先前轮账本(§6.2 正确性核心)。
+2. **逐变体评测**(注入回调 `evaluate(variant, tasks) -> {task: (n_pass,n_att)}`):候选只在 `T_k` 上评测(§4.5 收窄)。
+3. **evolve**(注入回调 `evolve(variant) -> candidate`):产候选(C1 用桩;C2 接 `meta_agent.evolve`)。
+4. **门**:`run_gate(candidate, ..., tk_results)` → APPLY / FORK / REJECT。
+5. **fork/retire**:FORK 时 `pool.fork`;池满 `pool.retire` + `pool.reassign`。
+6. **更新账本**:`ledger.record`(供**下一轮**路由;本轮不得回读——freeze 已强制)。
+7. **早停**:`idle >= P`(P=3);idle 作用域=全局(§6.6 默认,对齐 Alg.1 单 idle)。
+8. 每轮落 per-variant 报表(reporting.py)与 EvidenceStore digest。
+
+**K=1 回归**:池只有 V0,路由恒返回 V0,永不 fork,行为等同单谱系。C1 必须有一个 `--pool-k 1` 等价的测试证明这一点。
+
 ## 7.7 实现中确立、值得保留的三条设计原则
 
 review 中确认的判断,记录以免后续被改坏:

@@ -120,3 +120,6 @@ recipe/gaia_evolver/data/
 
 # Rendered docs (keep the .md sources, not the generated PDFs)
 experiments/docs/*.pdf
+
+# Live overnight scratch dir (archived runs kept under overnight-<tag>/)
+experiments/overnight/
