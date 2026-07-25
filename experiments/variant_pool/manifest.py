@@ -52,6 +52,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal
 
 import yaml
@@ -90,6 +91,59 @@ _LEVEL2_MARKERS = ("level 2", "level-2", "level2")
 
 #: Default label for the round-trip note, mirroring the paper's evidence line.
 DEFAULT_LEVEL2_LABEL = "_prepare_messages([tool_msg])"
+
+# ---------------------------------------------------------------------------
+# Manifest provenance (--manifest-mode) — W28
+# ---------------------------------------------------------------------------
+#
+# The open-source ``harnessx`` meta-agent is trained against the repo's own
+# journal format (``harnessx/meta_harness/workspace/skills/journal/SKILL.md``),
+# not the paper's Table 9 (p.36) manifest schema, which the published repo does
+# not contain. A real $3 run (``runs/forkprobe_11``) showed every structured
+# candidate dying at parse time because the meta-agent filled our Table-9 keys
+# with journal vocabulary (``levers`` / ``predicted_affected`` / ``hypothesis_id``
+# and ``lens`` / ``lever`` / ``intent`` inside ``attribution_signature``) and
+# with natural-language strings where the schema wants lists/dicts.
+#
+# ``provenance`` records which contract a manifest was produced under so the
+# report can declare it honestly and so the gate's completeness check can relax
+# *paper-only* requirements (capability_evidence, attribution_signature) that a
+# repo-journal candidate legitimately cannot supply. The deterministic seesaw
+# (gate stage 5, real evaluation) remains the shipping authority either way;
+# paper-manifest provenance keeps the strict Table-9 contract unchanged.
+
+#: A manifest written to the paper's Table 9 schema (the strict default).
+PAPER_MANIFEST_PROVENANCE = "paper_manifest"
+
+#: A manifest adapted from the repo's own journal vocabulary via
+#: :func:`adapt_repo_journal_manifest`.
+REPO_JOURNAL_PROVENANCE = "repo_journal"
+
+#: The repo journal's ``levers`` vocabulary (SKILL.md line 46,
+#: ``{configuration, control, action, instruction}``) mapped to our Table-9
+#: ``bucket`` edit types. Values already in :data:`BUCKETS` pass through, so a
+#: manifest that happens to use paper vocabulary still maps cleanly.
+REPO_LEVER_TO_BUCKET = {
+    "configuration": "config",
+    "config": "config",
+    "instruction": "prompt",
+    "prompt": "prompt",
+    "action": "tools",
+    "tools": "tools",
+    "control": "processor",
+    "processor": "processor",
+}
+
+
+class RepoJournalFormatError(ValueError):
+    """The manifest text is not a parseable repo-journal mapping.
+
+    Raised by :func:`adapt_repo_journal_manifest` for a *format mismatch* (the
+    YAML does not load as a mapping at all), as opposed to a *missing field*
+    (the mapping parses but omits a required field, which surfaces later through
+    :meth:`ChangeManifest.validate_complete`). Keeping the two apart lets the
+    pipeline archive the right rejection reason.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +281,16 @@ class ChangeManifest(BaseModel):
     #: **Ours** — the variant this candidate targets (§4.5 p.11 "a candidate
     #: targeting variant k"). The paper's schema has no such field.
     target_variant: str = ""
+    #: **Ours (W28)** — which contract produced this manifest. Not a Table 9
+    #: field, so :meth:`to_yaml` excludes it (the logged YAML stays byte-for-byte
+    #: the paper's eight-key shape). ``paper_manifest`` keeps the strict schema;
+    #: ``repo_journal`` marks a manifest adapted from the repo's journal
+    #: vocabulary and relaxes the paper-only completeness requirements.
+    provenance: str = PAPER_MANIFEST_PROVENANCE
+    #: **Ours (W28)** — the repo journal's ``hypothesis_id`` retained across the
+    #: adaptation so cross-round lineage is not lost. ``None`` for paper
+    #: manifests. Excluded from :meth:`to_yaml` for the same reason.
+    source_hypothesis_id: str | None = None
 
     @field_validator("bucket", mode="before")
     @classmethod
@@ -241,9 +305,15 @@ class ChangeManifest(BaseModel):
     # ------------------------------------------------------------------
 
     def to_yaml(self) -> str:
-        """Serialise to the manifest YAML block (schema p.36)."""
+        """Serialise to the manifest YAML block (schema p.36).
+
+        The two provenance fields (``provenance``, ``source_hypothesis_id``) are
+        ours, not Table 9, so they are excluded here — the logged manifest keeps
+        the paper's eight-key shape and order. Provenance is surfaced through the
+        report/audit, not the manifest YAML.
+        """
         return yaml.safe_dump(
-            self.model_dump(mode="json"),
+            self.model_dump(mode="json", exclude={"provenance", "source_hypothesis_id"}),
             sort_keys=False,
             allow_unicode=True,
             default_flow_style=False,
@@ -327,9 +397,15 @@ class ChangeManifest(BaseModel):
     def _capability_evidence_problems(self) -> list[str]:
         problems: list[str] = []
         if self.needs_code_verification() and not self.capability_evidence:
-            problems.append(
-                f"capability_evidence: missing for a code candidate (bucket={self.bucket})"
-            )
+            # A repo-journal manifest has no structured capability-evidence
+            # source (SKILL.md never asks for one). We mark the gap via
+            # :meth:`paper_only_gaps` instead of fabricating an entry; the
+            # deterministic seesaw still governs shipping. Paper provenance keeps
+            # the strict Table-9 requirement.
+            if self.provenance != REPO_JOURNAL_PROVENANCE:
+                problems.append(
+                    f"capability_evidence: missing for a code candidate (bucket={self.bucket})"
+                )
         for idx, entry in enumerate(self.capability_evidence):
             missing = [key for key in ("type", "claim", "evidence") if not str(entry.get(key, "")).strip()]
             if missing:
@@ -381,7 +457,11 @@ class ChangeManifest(BaseModel):
     def _attribution_problems(self) -> list[str]:
         signature = self.attribution_signature
         if signature is None or signature.type is None:
-            if self.needs_attribution():
+            # The repo journal's lens/lever/intent tags are not a paper
+            # attribution signature, so a repo-journal manifest cannot supply
+            # one. Marked missing via :meth:`paper_only_gaps` rather than
+            # blocked; paper provenance keeps the W19 hard gate.
+            if self.needs_attribution() and self.provenance != REPO_JOURNAL_PROVENANCE:
                 return [
                     (
                         "attribution_signature: missing for a non-prompt candidate "
@@ -423,6 +503,107 @@ class ChangeManifest(BaseModel):
             if any(marker in claim for marker in _LEVEL2_MARKERS):
                 return entry
         return None
+
+    def paper_only_gaps(self) -> list[str]:
+        """Paper-schema fields a repo-journal manifest legitimately cannot fill.
+
+        Empty for paper provenance. For ``repo_journal`` provenance it names the
+        Table-9 fields the repo journal has no source for and that this manifest
+        therefore omits — reported honestly rather than fabricated. Only fields
+        the paper *would* require for this candidate's bucket count as gaps, so a
+        prompt-bucket candidate (which the paper exempts from both) has none.
+        """
+        if self.provenance != REPO_JOURNAL_PROVENANCE:
+            return []
+        gaps: list[str] = []
+        if self.needs_code_verification() and not self.capability_evidence:
+            gaps.append("capability_evidence")
+        if self.needs_attribution() and (
+            self.attribution_signature is None or self.attribution_signature.type is None
+        ):
+            gaps.append("attribution_signature")
+        return gaps
+
+
+@dataclass(frozen=True)
+class CandidateArtifact:
+    """A non-opaque Evolver result that can be audited and gated.
+
+    The paper's candidate files and manifest are described separately.  Under
+    variant isolation that is too weak: a config with no structured prediction,
+    or a manifest with no concrete config, cannot be checked by the deterministic
+    gate.  This binding is therefore an explicit engineering contract.
+
+    ``regression_explanations`` is also ours.  SPEC §6.5 requires the Critic to
+    stop a whole round when regressions are neither handled nor explained, but
+    the published manifest schema provides no machine-readable home for those
+    explanations.  Keeping the sidecar on the artifact preserves the paper
+    manifest's field order while making the audit deterministic.
+    """
+
+    config_path: Path
+    manifest: ChangeManifest
+    target_variant: str
+    regression_explanations: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "config_path", Path(self.config_path))
+        object.__setattr__(
+            self,
+            "regression_explanations",
+            tuple(sorted((str(task_id), str(reason)) for task_id, reason in self.regression_explanations)),
+        )
+
+    @property
+    def candidate_id(self) -> str:
+        return self.manifest.candidate_id
+
+    @property
+    def explained_regressions(self) -> frozenset[str]:
+        return frozenset(task_id for task_id, reason in self.regression_explanations if reason.strip())
+
+    def validation_errors(
+        self,
+        *,
+        expected_target: str | None = None,
+        expected_round: int | None = None,
+        require_config: bool = True,
+    ) -> list[str]:
+        """Return every machine-checkable contract violation.
+
+        This deliberately reuses :meth:`ChangeManifest.validate_complete`
+        rather than duplicating gate stage 1.  The pipeline rejects malformed
+        and opaque proposals early, while the deterministic gate remains the
+        sole authority over whether a *valid* candidate ships.
+        """
+
+        problems = list(self.manifest.validate_complete())
+        if not self.target_variant.strip():
+            problems.append("artifact.target_variant: missing")
+        if self.manifest.target_variant != self.target_variant:
+            problems.append(
+                "target_variant: artifact/manifest mismatch "
+                f"({self.target_variant!r} != {self.manifest.target_variant!r})"
+            )
+        if expected_target is not None and self.target_variant != expected_target:
+            problems.append(
+                f"target_variant: expected {expected_target!r}, got {self.target_variant!r}"
+            )
+        if expected_round is not None:
+            prefix = f"C-R{expected_round}-"
+            if not self.candidate_id.startswith(prefix):
+                problems.append(
+                    f"candidate_id: expected round {expected_round} prefix {prefix!r}, "
+                    f"got {self.candidate_id!r}"
+                )
+        if require_config and not self.config_path.is_file():
+            problems.append(f"config_path: file not found: {self.config_path}")
+        for task_id, reason in self.regression_explanations:
+            if not task_id.strip():
+                problems.append("regression_explanations: empty task id")
+            if not reason.strip():
+                problems.append(f"regression_explanations[{task_id!r}]: empty explanation")
+        return problems
 
 
 def _strip_front_matter(text: str) -> str:
@@ -526,3 +707,218 @@ def check_level2_roundtrip(
             f"{len(tool_output):,} chars in, {len(serialized):,} chars out"
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# W28 — repo-journal -> paper-manifest adapter (--manifest-mode repo)
+# ---------------------------------------------------------------------------
+
+
+def _as_str_list(value: Any) -> list[str]:
+    """Flatten a scalar/list value into a list of non-empty strings."""
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        text = value.decode() if isinstance(value, bytes) else value
+        text = text.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        # e.g. ``predicted_affected: {task_a: ..., task_b: ...}`` — take the keys.
+        return [str(key).strip() for key in value if str(key).strip()]
+    try:
+        items = list(value)
+    except TypeError:
+        text = str(value).strip()
+        return [text] if text else []
+    out: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _coerce_file_change(entry: Any) -> dict[str, str]:
+    """Map one repo journal change (dict or free-text bullet) to Table-9 shape.
+
+    The repo journal's ``### Changes`` bullets are prose like
+    ``config.yaml (template_path updated)``. We structure them into
+    ``{path, action, diff_summary}`` — the path is extracted, the full text is
+    kept verbatim as the summary, and the action defaults to ``modify`` (the
+    common case) unless the bullet opens with an explicit create/delete verb.
+    Nothing is invented: the descriptive content is preserved, only re-shaped.
+    """
+    if isinstance(entry, dict):
+        return {
+            "path": str(entry.get("path", "")).strip(),
+            "action": (str(entry.get("action", "")).strip() or "modify"),
+            "diff_summary": str(
+                entry.get("diff_summary") or entry.get("summary") or entry.get("description") or ""
+            ).strip(),
+        }
+    text = str(entry).strip()
+    if not text:
+        return {"path": "", "action": "modify", "diff_summary": ""}
+    # The leading token up to the first delimiter is the path-like fragment.
+    head = text
+    for sep in ("(", " — ", " -- ", ":", " "):
+        if sep in head:
+            head = head.split(sep, 1)[0]
+            if head.strip():
+                break
+    path = head.strip()
+    first_word = text.split()[0].lower() if text.split() else ""
+    action = "modify"
+    if first_word in {"create", "add", "new"} or text.lower().startswith("create "):
+        action = "create"
+    elif first_word in {"delete", "remove", "drop"}:
+        action = "delete"
+    return {"path": path, "action": action, "diff_summary": text}
+
+
+def _gather(data: dict[str, Any], nested: dict[str, Any], *keys: str) -> Any:
+    """First present value for any of ``keys`` at top level, then nested."""
+    for source in (data, nested):
+        for key in keys:
+            if key in source and source[key] not in (None, "", [], {}):
+                return source[key]
+    return None
+
+
+def adapt_repo_journal_manifest(
+    text: str,
+    *,
+    journal_text: str | None = None,
+    fallback_candidate_id: str = "",
+    fallback_target_variant: str = "",
+) -> ChangeManifest:
+    """Adapt a repo-journal ``manifest.yaml`` into a paper :class:`ChangeManifest`.
+
+    This is the ``--manifest-mode repo`` parser. Rather than reject the repo
+    meta-agent's natural output (which mixes Table-9 keys with the journal
+    vocabulary of ``skills/journal/SKILL.md``), it maps what the journal *does*
+    carry and marks what it cannot:
+
+    * ``levers`` / ``lever`` (``{configuration, control, action, instruction}``,
+      wherever they appear — top level or inside ``attribution_signature``) ->
+      :data:`BUCKETS` via :data:`REPO_LEVER_TO_BUCKET`; an explicit ``bucket`` is
+      honoured and mapped too;
+    * ``predicted_affected`` -> ``predicted_impact.tasks_will_unlock`` (the flip
+      claim), merged with any structured ``predicted_impact`` mapping;
+    * ``hypothesis_id`` -> :attr:`ChangeManifest.source_hypothesis_id`;
+    * ``file_changes`` prose bullets -> structured ``{path, action, diff_summary}``;
+    * ``capability_evidence`` / ``attribution_signature`` — paper-only fields the
+      journal has no source for — are left empty/``None`` (see
+      :meth:`ChangeManifest.paper_only_gaps`), never fabricated.
+
+    The returned manifest carries ``provenance="repo_journal"``, which relaxes
+    exactly those two paper-only completeness requirements at gate stage 1 while
+    leaving the deterministic seesaw (stage 5) as the shipping authority.
+
+    Raises
+    ------
+    RepoJournalFormatError
+        If ``text`` does not load as a YAML mapping (a *format mismatch*). A
+        mapping that merely omits fields is not a format error — it parses here
+        and fails later at :meth:`validate_complete` as a *missing field*.
+    """
+    body = _strip_front_matter(text)
+    try:
+        loaded = yaml.safe_load(body)
+    except yaml.YAMLError as exc:  # pragma: no cover - defensive
+        raise RepoJournalFormatError(f"manifest is not valid YAML: {exc}") from exc
+    if loaded is None:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        raise RepoJournalFormatError(
+            f"manifest must be a YAML mapping, got {type(loaded).__name__}"
+        )
+    data: dict[str, Any] = loaded
+
+    signature_block = data.get("attribution_signature")
+    nested: dict[str, Any] = signature_block if isinstance(signature_block, dict) else {}
+
+    # --- bucket, from explicit bucket and/or lever vocabulary ---------------
+    raw_buckets = _as_str_list(data.get("bucket"))
+    raw_buckets += _as_str_list(_gather(data, nested, "levers", "lever"))
+    buckets: list[str] = []
+    for token in raw_buckets:
+        mapped = REPO_LEVER_TO_BUCKET.get(token.lower().strip(), token.lower().strip())
+        if mapped in BUCKETS and mapped not in buckets:
+            buckets.append(mapped)
+
+    # --- predicted impact ---------------------------------------------------
+    impact_kwargs: dict[str, list[str]] = {
+        "tasks_will_unlock": [],
+        "tasks_will_stabilize": [],
+        "tasks_at_risk": [],
+    }
+    structured_impact = data.get("predicted_impact")
+    if isinstance(structured_impact, dict):
+        for key in impact_kwargs:
+            impact_kwargs[key] = _as_str_list(structured_impact.get(key))
+    predicted_affected = _as_str_list(_gather(data, nested, "predicted_affected"))
+    for task_id in predicted_affected:
+        if (
+            task_id not in impact_kwargs["tasks_will_unlock"]
+            and task_id not in impact_kwargs["tasks_will_stabilize"]
+        ):
+            impact_kwargs["tasks_will_unlock"].append(task_id)
+    predicted_impact = PredictedImpact(**impact_kwargs)
+
+    # --- file changes (repo bullets or structured entries) ------------------
+    file_changes = [
+        _coerce_file_change(entry) for entry in _as_list(data.get("file_changes"))
+    ]
+
+    # --- capability evidence: keep only already-structured triples ----------
+    capability_evidence: list[dict[str, Any]] = [
+        entry for entry in _as_list(data.get("capability_evidence")) if isinstance(entry, dict)
+    ]
+
+    # --- attribution signature: keep only a real paper signature ------------
+    attribution: AttributionSignature | None = None
+    if isinstance(signature_block, dict) and signature_block.get("type") in SIGNATURE_TYPES:
+        attribution = AttributionSignature(
+            type=signature_block.get("type"),
+            tool_name=signature_block.get("tool_name"),
+            expected_min_calls=int(signature_block.get("expected_min_calls", 1) or 1),
+        )
+
+    hypothesis_id = _gather(data, nested, "hypothesis_id", "hypothesis")
+
+    candidate_id = str(data.get("candidate_id") or fallback_candidate_id or "").strip()
+    target_variant = str(data.get("target_variant") or fallback_target_variant or "").strip()
+
+    return ChangeManifest.model_validate(
+        {
+            "candidate_id": candidate_id,
+            "bucket": buckets,
+            "iterates_from": data.get("iterates_from"),
+            "capability_evidence": capability_evidence,
+            "file_changes": file_changes,
+            "predicted_impact": predicted_impact.model_dump(),
+            "attribution_signature": (
+                attribution.model_dump() if attribution is not None else None
+            ),
+            "target_variant": target_variant,
+            "provenance": REPO_JOURNAL_PROVENANCE,
+            "source_hypothesis_id": str(hypothesis_id).strip() if hypothesis_id else None,
+        }
+    )
+
+
+def _as_list(value: Any) -> list[Any]:
+    """Coerce a scalar/None/sequence into a list, preserving dict entries."""
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        text = value.decode() if isinstance(value, bytes) else value
+        text = text.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        return [value]
+    try:
+        return list(value)
+    except TypeError:
+        return [value]
