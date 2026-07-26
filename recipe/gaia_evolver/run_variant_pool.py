@@ -135,7 +135,15 @@ from experiments.variant_pool.candidate_pipeline import (
     PlannerStage,
     PlanningArtifact,
 )
-from experiments.variant_pool.critic import DeterministicCritic
+from experiments.variant_pool.critic import (
+    CandidateVerdict,
+    CriticContext,
+    CriticRejection,
+    CriticReview,
+    CriticStage,
+    DeterministicCritic,
+    RevisionRequest,
+)
 from experiments.variant_pool.evidence import EvidenceStore, RejectedCandidate, TaskDigest
 from experiments.variant_pool.experiment_lock import (
     DatasetSpec,
@@ -226,6 +234,22 @@ DEFAULT_AEGIS_DIGESTER = "deterministic"
 #: per-role Planner name flips.
 AEGIS_PLANNER_MODES = ("deterministic", "llm")
 DEFAULT_AEGIS_PLANNER = "deterministic"
+
+#: --aegis-critic — Phase A3 of the LLM-AEGIS reconstruction
+#: (experiments/docs/REPRO-COMPLETION-PLAN.md). The paper's Critic (§4.3) is
+#: LLM-driven: it audits the Evolver's structured candidate portfolio, emits a
+#: ship_ranking for the deterministic gate to inspect, and may request AT MOST
+#: ONE revision. Our current adapter is the deterministic portfolio-audit
+#: fallback (:class:`experiments.variant_pool.critic.DeterministicCritic`).
+#: ``deterministic`` (default) keeps the byte-identical fallback; ``llm`` routes
+#: the round's candidates + digests through one meta-model call (plus one
+#: parse-retry) that ranks/rejects/requests. The Critic never ships — the
+#: deterministic gate stays the sole shipping authority — so ``llm`` only changes
+#: the inspection order and the (at most one) revision. Only when Digester,
+#: Planner AND Critic are all ``llm`` does the audit's ``llm_aegis_reproduction``
+#: flag flip to ``True``; any deterministic role keeps it ``False``.
+AEGIS_CRITIC_MODES = ("deterministic", "llm")
+DEFAULT_AEGIS_CRITIC = "deterministic"
 
 # B4 — the repo's own hard requirement, quoted from ``agent.py`` L926-937's
 # DECISION_REQUIRED notice, front-loaded into our injected brief so the
@@ -948,6 +972,112 @@ def _planner_brief_with_regressions(
         'explained").'
     )
     return merged
+
+
+def _planner_brief_with_revision(
+    brief: Mapping[str, Any],
+    revision: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    """Surface a Critic revision request in the meta-agent's planner brief (A3).
+
+    When the Critic (paper §4.3) asks for the single allowed revision, the
+    meta-agent must be told *what* to fix. This merges the Critic's ``reason``
+    and ``instructions`` into the brief ``_build_candidate_contract`` renders
+    verbatim into ``TASK.md`` (key ``critic_revision_request``), exactly the
+    merge pattern :func:`_planner_brief_with_regressions` uses.
+
+    Byte-stable when absent: with no revision (``None`` or empty) the result is
+    exactly ``dict(brief)`` (no new key), so an ordinary proposal keeps its brief
+    verbatim and the non-revision path stays byte-identical.
+    """
+    merged = dict(brief)
+    if not revision:
+        return merged
+    merged["critic_revision_request"] = {
+        "reason": str(revision.get("reason", "") or ""),
+        "instructions": str(revision.get("instructions", "") or ""),
+    }
+    return merged
+
+
+#: A revision slot id (``C-R1-01-revision-01``, allocated by
+#: :meth:`experiments.variant_pool.candidate_pipeline.IsolatedEvolverAdapter.revise`).
+#: Kept as an OWN recipe constant rather than reaching into candidate_pipeline's
+#: private ``_PAPER_SLOT_ID``.
+_REVISION_SLOT_ID = re.compile(r"^C-R(\d+)-(\d+)-revision-(\d+)$")
+
+
+def _revision_manifest_candidate_id(slot: "CandidateSlot") -> str:
+    """A gate-valid paper-shape candidate id for one revised candidate.
+
+    The revision slot id ``C-R1-01-revision-01`` does NOT match the manifest's
+    ``^C-R\\d+-\\d{2,}$`` id contract (``manifest.CANDIDATE_ID_RE``), so a revised
+    manifest keyed by the raw slot id would be rejected at gate stage 1
+    (``validate_complete``) and the pipeline's revision path could never actually
+    settle. Pack the parent slot ordinal and the revision ordinal into one valid
+    ``NN``: parent ``C-R1-01`` revision ``01`` -> ``C-R1-0101`` — it matches the
+    id regex, keeps the round prefix the pipeline checks
+    (``expected_round``), and is DISTINCT from the parent so the revised
+    manifest's ``iterates_from`` can point at the parent without a self-loop.
+    Degrades to the raw slot id when the slot is not a revision slot.
+    """
+    match = _REVISION_SLOT_ID.match(slot.suggested_candidate_id)
+    if match is None:
+        return slot.suggested_candidate_id
+    round_idx = int(match.group(1))
+    parent_slot = int(match.group(2))
+    revision = int(match.group(3))
+    return f"C-R{round_idx}-{parent_slot:02d}{revision:02d}"
+
+
+def _composed_pipeline_adapter(
+    digester_mode: str,
+    planner_mode: str,
+    critic_mode: str,
+    *,
+    all_deterministic_literal: str,
+) -> str:
+    """One truthful ``candidate_pipeline_adapter`` string across all three roles.
+
+    A3 unifies the digester-only-aware provenance flagged in commit a4eeae7. When
+    Digester, Planner and Critic are ALL deterministic the caller's
+    ``all_deterministic_literal`` is returned UNCHANGED so the pre-A1 string stays
+    byte-identical (the composed ``digester=...,planner=...,critic=...`` form is
+    not byte-identical to that literal, so the ruling is: keep the literal for the
+    all-deterministic case, use the composed form only when a role is ``llm``).
+    The Evolver is always the LLM MetaAgent, echoed as the ``+llm_metaagent_evolver``
+    suffix exactly like the old literal.
+    """
+    modes = (digester_mode, planner_mode, critic_mode)
+    if all(mode == "deterministic" for mode in modes):
+        return all_deterministic_literal
+    return (
+        f"digester={digester_mode},planner={planner_mode},"
+        f"critic={critic_mode}+llm_metaagent_evolver"
+    )
+
+
+def _digest_prior_ship_history(digest: TaskDigest) -> str:
+    """This task's prior outcomes + shipped candidate ids per round, from the digest.
+
+    Reads ``digest.prior_history`` — the cross-round continuity the EvidenceStore
+    attaches at write time (``ships`` = what was already tried). This is the
+    "prior-ship history the recipe can already reach"; no store is queried.
+    Shared by the A2 Planner and the A3 Critic so both read the same source.
+    """
+    entries: list[str] = []
+    for entry in digest.prior_history:
+        if not isinstance(entry, dict):
+            continue
+        round_idx = entry.get("round_idx")
+        solved = entry.get("solved")
+        category = entry.get("failure_category")
+        ships = [str(ship) for ship in (entry.get("ships") or [])]
+        ship_str = ",".join(ships) if ships else "no_ship"
+        outcome = "solved" if solved else "failed"
+        category_str = f"/{category}" if category else ""
+        entries.append(f"R{round_idx}:{outcome}{category_str} ships=[{ship_str}]")
+    return "; ".join(entries)
 
 
 def _repo_journal_file_changes(
@@ -2021,24 +2151,12 @@ class _LLMPlanner:
     def _prior_ship_history(digest: TaskDigest) -> str:
         """This task's prior outcomes + the candidate ids shipped for it, per round.
 
-        Reads ``digest.prior_history`` — the cross-round continuity the
-        EvidenceStore attaches at write time (``ships`` = what was already tried).
-        This is the "prior-ship history the recipe can already reach"; no store is
-        queried directly.
+        Delegates to the module-level :func:`_digest_prior_ship_history` so the A2
+        Planner and the A3 Critic read the "prior-ship history the recipe can
+        already reach" from the same source. Output is byte-identical to the
+        previous inline body.
         """
-        entries: list[str] = []
-        for entry in digest.prior_history:
-            if not isinstance(entry, dict):
-                continue
-            round_idx = entry.get("round_idx")
-            solved = entry.get("solved")
-            category = entry.get("failure_category")
-            ships = [str(ship) for ship in (entry.get("ships") or [])]
-            ship_str = ",".join(ships) if ships else "no_ship"
-            outcome = "solved" if solved else "failed"
-            category_str = f"/{category}" if category else ""
-            entries.append(f"R{round_idx}:{outcome}{category_str} ships=[{ship_str}]")
-        return "; ".join(entries)
+        return _digest_prior_ship_history(digest)
 
     # -- prompt assembly ------------------------------------------------------
 
@@ -2216,6 +2334,552 @@ class _LLMPlanner:
 
 
 # ---------------------------------------------------------------------------
+# A3 — LLM Critic (third and final LLM-AEGIS role; paper §4.3)
+# ---------------------------------------------------------------------------
+#
+# The paper's Critic audits the Evolver's structured candidate portfolio, emits a
+# ship_ranking for the deterministic gate to inspect, and may request AT MOST ONE
+# revision (§4.3 p.10). This adapter makes that step model-backed while keeping
+# the deterministic gate and engine untouched (REPRO-COMPLETION-PLAN Phase A3;
+# SPEC §4.3 principle: the shipping authority stays deterministic). The prompt is
+# OURS — a reconstruction of the withheld §4.3 role description.
+
+#: [OURS] Serialized-input budget for one Critic call (mirrors the A2 Planner).
+#: Candidate manifests + digests can be long; the input is capped here and the
+#: digest evidence_anchors are truncated FIRST (candidate ids / buckets /
+#: predicted_impact / file paths and the digest task ids / categories are never
+#: dropped), keeping the call well under the meta model's context.
+_LLM_CRITIC_INPUT_CAP = 30_000
+
+#: [OURS] Critic prompt. Frozen/audited later, so it is a module constant carrying
+#: the instruction + inline JSON schema; the round's candidates + evidence are
+#: appended at call time. The Critic does NOT re-derive task outcomes and cannot
+#: ship — it audits the structured candidates and hands the deterministic gate a
+#: ranked queue.
+_LLM_CRITIC_PROMPT = (
+    "You are the Critic in a self-improving agent harness (AEGIS Critic role, "
+    "paper section 4.3). The Evolver has proposed a batch of structured candidates "
+    "for ONE target harness variant; each candidate carries a change manifest "
+    "(candidate_id, bucket, predicted_impact, capability_evidence, file_changes, "
+    "target_variant). The Digester's per-task failure summaries for this round are "
+    "given too (their pass/fail outcomes are GROUND TRUTH — do NOT re-judge "
+    "them).\n"
+    "\n"
+    "Your job is a PORTFOLIO AUDIT: (1) produce a ship_ranking — the order in which "
+    "the gate should inspect the candidates, best first; (2) reject any candidate "
+    "that is unsound or redundant; (3) raise portfolio-level strategy concerns; and "
+    "(4) for AT MOST ONE candidate, request a single revision with concrete "
+    "instructions for the Evolver.\n"
+    "\n"
+    "You do NOT ship, approve, or apply anything. A separate DETERMINISTIC gate "
+    "re-evaluates every ranked candidate on real tasks and is the ONLY shipping "
+    "authority: your ranking is merely the inspection order, and a rejection only "
+    "removes a candidate from that queue. You cannot make a candidate ship.\n"
+    "\n"
+    "Output ONLY a JSON object (no prose, no markdown fences, no code block) with "
+    "EXACTLY these keys:\n"
+    "{\n"
+    '  "ranked_candidate_ids": ["<candidate ids best-first; a permutation of the '
+    'candidates you did NOT reject>"],\n'
+    '  "verdicts": [{"candidate_id": "<id>", "rank": <1-based integer>, "reasons": '
+    '["<short justification>"]}],\n'
+    '  "rejections": [{"candidate_id": "<id>", "reason": "<why it must not be '
+    'ranked>"}],\n'
+    '  "revision_requests": [{"candidate_id": "<id>", "reason": "<what is wrong>", '
+    '"instructions": "<concrete fix for the Evolver>"}],\n'
+    '  "no_op": <true to stop the whole round, else false>,\n'
+    '  "no_op_reasons": ["<non-empty when no_op is true>"],\n'
+    '  "strategy_concerns": ["<0+ portfolio-level observations>"]\n'
+    "}\n"
+    "\n"
+    "Rules: use ONLY the candidate ids shown below; never invent an id. Emit AT "
+    "MOST ONE revision request (paper section 4.3). `ranked_candidate_ids` must be "
+    "a permutation of the candidates you did not reject (rank every non-rejected "
+    "candidate, none twice). Base every judgement only on the manifests and "
+    "evidence shown. Return the JSON object and nothing else."
+)
+
+
+class _CriticWholesaleFallback(Exception):
+    """Signal that the whole LLM Critic call must revert to deterministic.
+
+    Carries the human-readable ``reason`` prefixed onto the fallback review's
+    strategy_concerns (fallback policy; mirrors :class:`_PlannerWholesaleFallback`).
+    """
+
+
+@dataclass
+class _LLMCritic:
+    """Model-backed Critic (paper §4.3), third and last of the LLM-AEGIS roles.
+
+    Implements the ``CriticStage`` protocol the pipeline calls
+    (``review(*, context, candidates)``). In ONE meta-model call (plus at most one
+    parse-retry) it audits the Evolver's structured candidates and returns a
+    :class:`~experiments.variant_pool.critic.CriticReview` — a ship_ranking, per
+    candidate verdicts, rejections, at most one revision request, and strategy
+    concerns.
+
+    Shipping authority — unchanged. The Critic NEVER ships or un-ships: the
+    pipeline consumes ``ranked_for_gate`` as a *gate queue*
+    (``CandidatePipeline._resolve_ranking`` feeds the deterministic ``run_gate``),
+    and ``CriticReview.requires_deterministic_gate`` is always True. Ranking only
+    orders the gate's inspection; a rejection only drops a candidate from the
+    queue. So an ``llm`` Critic cannot make a candidate ship that the
+    deterministic seesaw would reject, nor keep one shipping beyond removing it
+    from this round's queue — the deterministic gate stays the sole shipping
+    authority (SPEC §4.3).
+
+    Validation (task ruling): every id the model emits must be an ACTUAL candidate
+    id (unknowns are dropped, each noted in strategy_concerns); AT MOST ONE
+    revision request survives (extras dropped, noted — paper §4.3); and
+    ``ranked_candidate_ids`` is repaired to a permutation of the non-rejected ids
+    (rejected/unknown/duplicate ids removed, missing ids appended in candidate-id
+    order, the repair noted). Robustness (mirrors A1/A2): a JSON parse/validation
+    failure retries once with the error fed back; a provider error or a double
+    parse failure reverts the WHOLE review to what
+    :class:`~experiments.variant_pool.critic.DeterministicCritic` returns, with the
+    strategy_concerns prefixed ``llm_critic_fell_back:``. A round never dies here.
+
+    Whole-round regression veto — kept. The DeterministicCritic's OUR-side safety
+    rule (no_op the round when an active regression is neither handled in a
+    surviving candidate's ``tasks_at_risk`` nor explained) is NOT bypassed by the
+    model: after mapping the LLM review, the same deterministic check
+    (``DeterministicCritic._unresolved_regressions``, reused DIRECTLY — it is a
+    stateless staticmethod, so calling it duplicates no logic and leaves critic.py
+    untouched) runs over the surviving candidates and forces the round to no_op if
+    a regression is unhandled, whatever the model ranked.
+
+    Revision plumbing (A3 Part 2). When the review carries the single revision
+    request, ``(reason, instructions)`` is recorded into ``revision_sink`` keyed by
+    the target candidate id, so the recipe's revision producer — which only
+    receives ``slot.revision_of`` — can inject the instructions into the revised
+    candidate's contract. ``RevisionRequest`` itself has only ``candidate_id`` and
+    ``reason`` (critic.py is untouched), so the free-form ``instructions`` live in
+    the sink.
+
+    The active adapter name is set truthfully by the recipe
+    (``MetaModel_llm_critic``); ``llm_aegis_reproduction`` flips to ``True`` only
+    when the Digester and Planner are LLM too.
+    """
+
+    provider: Any
+    fallback: DeterministicCritic
+    revision_sink: dict[str, dict[str, str]] | None = None
+
+    async def review(
+        self,
+        *,
+        context: CriticContext,
+        candidates: Sequence[CandidateArtifact],
+    ) -> CriticReview:
+        candidates = tuple(candidates)
+        try:
+            return await self._review_llm(context, candidates)
+        except _CriticWholesaleFallback as exc:
+            return await self._wholesale_fallback(context, candidates, str(exc))
+        except Exception as exc:  # noqa: BLE001 - provider/other error must not kill the round
+            return await self._wholesale_fallback(
+                context, candidates, f"{type(exc).__name__}: {exc}"
+            )
+
+    async def _review_llm(
+        self,
+        context: CriticContext,
+        candidates: tuple[CandidateArtifact, ...],
+    ) -> CriticReview:
+        summary, truncation = self._build_input(context, candidates)
+        error: str | None = None
+        for _attempt in range(2):
+            prompt = self._build_prompt(summary, truncation=truncation, retry_error=error)
+            text = await self._complete(prompt)
+            parsed, error = self._parse_review_json(text)
+            if parsed is not None:
+                return self._map_review(context, candidates, parsed)
+        raise _CriticWholesaleFallback(f"critic JSON failed twice ({error})")
+
+    # -- input assembly (capped) ---------------------------------------------
+
+    def _build_input(
+        self,
+        context: CriticContext,
+        candidates: tuple[CandidateArtifact, ...],
+    ) -> tuple[str, tuple[str, ...]]:
+        """``(serialized_input, truncation_notes)`` under :data:`_LLM_CRITIC_INPUT_CAP`.
+
+        digest evidence_anchors are the only field trimmed (candidate ids,
+        buckets, predicted_impact, file paths and the digest task ids / categories
+        are always kept); the note records how far they were trimmed so the audit
+        shows the input was capped. Mirrors :meth:`_LLMPlanner._build_input`.
+        """
+        for max_anchors in (None, 3, 1, 0):
+            body = self._compose_input(context, candidates, max_anchors=max_anchors)
+            if len(body) <= _LLM_CRITIC_INPUT_CAP:
+                if max_anchors is None:
+                    return body, ()
+                if max_anchors == 0:
+                    note = (
+                        "evidence_anchors dropped entirely to fit the "
+                        f"~{_LLM_CRITIC_INPUT_CAP}-char input cap"
+                    )
+                else:
+                    note = (
+                        f"evidence_anchors truncated to <= {max_anchors} per task to fit "
+                        f"the ~{_LLM_CRITIC_INPUT_CAP}-char input cap"
+                    )
+                return body, (note,)
+        body = self._compose_input(context, candidates, max_anchors=0)[:_LLM_CRITIC_INPUT_CAP]
+        return body, (f"input hard-truncated to {_LLM_CRITIC_INPUT_CAP} chars",)
+
+    def _compose_input(
+        self,
+        context: CriticContext,
+        candidates: tuple[CandidateArtifact, ...],
+        *,
+        max_anchors: int | None,
+    ) -> str:
+        regressions = ", ".join(context.regressions) or "none"
+        failure_buckets = ", ".join(context.failure_buckets) or "none"
+        lines = [
+            f"TARGET VARIANT: {context.target_variant}",
+            f"ROUND: {context.round_idx}",
+            f"ACTIVE REGRESSIONS (previously solved, now failing): {regressions}",
+            f"SETTLED FAILURE CATEGORIES: {failure_buckets}",
+            "",
+            "CANDIDATES TO AUDIT:",
+        ]
+        for candidate in candidates:
+            manifest = candidate.manifest
+            impact = manifest.predicted_impact
+            flips = ", ".join(impact.predicted_flips()) or "none"
+            at_risk = ", ".join(impact.tasks_at_risk) or "none"
+            claims = (
+                "; ".join(
+                    str(entry.get("claim", "")).strip()
+                    for entry in manifest.capability_evidence
+                    if str(entry.get("claim", "")).strip()
+                )
+                or "none"
+            )
+            paths = (
+                ", ".join(
+                    str(change.get("path", "")).strip()
+                    for change in manifest.file_changes
+                    if str(change.get("path", "")).strip()
+                )
+                or "none"
+            )
+            lines.append(
+                f"- {candidate.candidate_id}: bucket={list(manifest.bucket)}; "
+                f"target={manifest.target_variant}; predicted_flips=[{flips}]; "
+                f"tasks_at_risk=[{at_risk}]; file_changes=[{paths}]; "
+                f"capability_evidence=[{claims}]"
+            )
+        lines.append("")
+        lines.append("PER-TASK SUMMARIES THIS ROUND:")
+        for digest in context.digests:
+            n_pass, n_att = digest.outcome
+            status = "SOLVED" if digest.solved else "FAILED"
+            components = ", ".join(digest.implicated_components) or "none"
+            anchors = list(digest.evidence_anchors)
+            if max_anchors is not None:
+                anchors = anchors[:max_anchors]
+            anchor_str = " | ".join(anchors) if anchors else "none"
+            lines.append(
+                f"- {digest.task_id}: {status} ({n_pass}/{n_att}); "
+                f"category={digest.failure_category or 'unknown'}; "
+                f"components=[{components}]; evidence=[{anchor_str}]"
+            )
+            prior = _digest_prior_ship_history(digest)
+            if prior:
+                lines.append(f"    prior_history: {prior}")
+        return "\n".join(lines)
+
+    # -- prompt assembly ------------------------------------------------------
+
+    def _build_prompt(
+        self,
+        summary: str,
+        *,
+        truncation: tuple[str, ...],
+        retry_error: str | None,
+    ) -> str:
+        parts = [
+            _LLM_CRITIC_PROMPT,
+            f"\n\nROUND PORTFOLIO + EVIDENCE:\n{summary}",
+        ]
+        if truncation:
+            parts.append("\n\nINPUT NOTES: " + "; ".join(truncation))
+        if retry_error:
+            parts.append(
+                "\n\nYour previous response was rejected: "
+                f"{retry_error}. Return ONLY a single valid JSON object with the "
+                "required keys and nothing else."
+            )
+        return "".join(parts)
+
+    # -- parsing / validation / mapping --------------------------------------
+
+    def _parse_review_json(self, text: str) -> tuple[dict | None, str | None]:
+        block = _first_json_object(text)
+        if block is None:
+            return None, "no JSON object found in response"
+        try:
+            obj = json.loads(block)
+        except (ValueError, TypeError) as exc:
+            return None, f"json.loads failed: {exc}"
+        if not isinstance(obj, dict):
+            return None, "top-level JSON value is not an object"
+        for key in ("ranked_candidate_ids", "verdicts", "rejections", "revision_requests"):
+            value = obj.get(key)
+            if value is not None and not isinstance(value, list):
+                return None, f"'{key}' must be a JSON array"
+        if "no_op" in obj and not isinstance(obj.get("no_op"), bool):
+            return None, "'no_op' must be a boolean"
+        return obj, None
+
+    def _map_review(
+        self,
+        context: CriticContext,
+        candidates: tuple[CandidateArtifact, ...],
+        obj: Mapping[str, Any],
+    ) -> CriticReview:
+        actual_ids = [candidate.candidate_id for candidate in candidates]
+        id_set = set(actual_ids)
+        by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        notes: list[str] = [
+            str(concern).strip()
+            for concern in (obj.get("strategy_concerns") or [])
+            if str(concern).strip()
+        ]
+
+        # -- rejections: known candidate ids only ----------------------------
+        rejections: list[CriticRejection] = []
+        rejected_ids: set[str] = set()
+        for raw in obj.get("rejections") or []:
+            if not isinstance(raw, Mapping):
+                continue
+            cid = str(raw.get("candidate_id", "")).strip()
+            if cid not in id_set:
+                notes.append(f"dropped rejection of unknown candidate id {cid!r}")
+                continue
+            if cid in rejected_ids:
+                continue
+            rejected_ids.add(cid)
+            rejections.append(
+                CriticRejection(cid, str(raw.get("reason", "")).strip() or "rejected by Critic")
+            )
+
+        # -- revision requests: known ids, AT MOST ONE (paper §4.3) ----------
+        revision_requests: list[RevisionRequest] = []
+        revision_target: str | None = None
+        revision_details: dict[str, str] | None = None
+        for raw in obj.get("revision_requests") or []:
+            if not isinstance(raw, Mapping):
+                continue
+            cid = str(raw.get("candidate_id", "")).strip()
+            reason = str(raw.get("reason", "")).strip()
+            instructions = str(raw.get("instructions", "")).strip()
+            if cid not in id_set:
+                notes.append(f"dropped revision request for unknown candidate id {cid!r}")
+                continue
+            if revision_requests:
+                notes.append(
+                    f"dropped extra revision request for {cid!r}; only one revision "
+                    "is allowed (paper §4.3)"
+                )
+                continue
+            revision_requests.append(
+                RevisionRequest(cid, reason or "revision requested by Critic")
+            )
+            revision_target = cid
+            revision_details = {"reason": reason, "instructions": instructions}
+
+        no_op_reasons = tuple(
+            str(reason).strip()
+            for reason in (obj.get("no_op_reasons") or [])
+            if str(reason).strip()
+        )
+        if bool(obj.get("no_op")):
+            # A no-op review cannot also rank candidates (CriticReview guard).
+            return CriticReview(
+                rejections=tuple(rejections),
+                no_op=True,
+                no_op_reasons=no_op_reasons
+                or ("llm_critic requested a whole-round no-op (no reason given)",),
+                strategy_concerns=tuple(notes),
+            )
+
+        # -- verdicts: known candidate ids only ------------------------------
+        verdicts: list[CandidateVerdict] = []
+        for raw in obj.get("verdicts") or []:
+            if not isinstance(raw, Mapping):
+                continue
+            cid = str(raw.get("candidate_id", "")).strip()
+            if cid not in id_set:
+                notes.append(f"dropped verdict for unknown candidate id {cid!r}")
+                continue
+            rank_raw = raw.get("rank")
+            try:
+                rank = int(rank_raw) if rank_raw is not None else None
+            except (TypeError, ValueError):
+                rank = None
+            verdicts.append(
+                CandidateVerdict(
+                    candidate_id=cid,
+                    rank=rank,
+                    mutation_surface=self._surface(by_id[cid]),
+                    reasons=tuple(
+                        str(item).strip()
+                        for item in (raw.get("reasons") or [])
+                        if str(item).strip()
+                    ),
+                )
+            )
+
+        # -- ship_ranking: repair to a permutation of the non-rejected ids ---
+        non_rejected = [cid for cid in actual_ids if cid not in rejected_ids]
+        ranked, repair_notes = self._repair_ranking(
+            obj.get("ranked_candidate_ids") or [], non_rejected, rejected_ids, id_set
+        )
+        notes.extend(repair_notes)
+
+        # -- whole-round regression veto (parity with DeterministicCritic) ---
+        veto = self._regression_veto(context, candidates, rejected_ids)
+        if veto is not None:
+            return CriticReview(
+                rejections=tuple(rejections),
+                no_op=True,
+                no_op_reasons=(veto,),
+                strategy_concerns=tuple(notes),
+            )
+
+        # Record the single surviving revision request so the recipe's revision
+        # producer (which only sees slot.revision_of) can inject the instructions.
+        if (
+            self.revision_sink is not None
+            and revision_target is not None
+            and revision_details is not None
+        ):
+            self.revision_sink[revision_target] = revision_details
+
+        return CriticReview(
+            ranked_candidate_ids=tuple(ranked),
+            verdicts=tuple(verdicts),
+            rejections=tuple(rejections),
+            revision_requests=tuple(revision_requests),
+            strategy_concerns=tuple(notes),
+        )
+
+    @staticmethod
+    def _surface(candidate: CandidateArtifact) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    str(change.get("path", "")).strip()
+                    for change in candidate.manifest.file_changes
+                    if str(change.get("path", "")).strip()
+                }
+            )
+        )
+
+    @staticmethod
+    def _repair_ranking(
+        raw_ranked: Sequence[Any],
+        non_rejected: Sequence[str],
+        rejected_ids: set[str],
+        id_set: set[str],
+    ) -> tuple[list[str], list[str]]:
+        """Deterministically repair the model's ranking into a permutation.
+
+        Drops unknown/rejected/duplicate ids (each noted) and appends any
+        non-rejected id missing from the ranking in candidate-id order. The result
+        is exactly the non-rejected set, ordered by the model where it was valid.
+        """
+        notes: list[str] = []
+        ranked: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_ranked:
+            cid = str(raw).strip()
+            if cid not in id_set:
+                notes.append(f"dropped ranked unknown candidate id {cid!r}")
+                continue
+            if cid in rejected_ids:
+                notes.append(f"dropped ranked candidate {cid!r} that was also rejected")
+                continue
+            if cid in seen:
+                notes.append(f"dropped duplicate ranked candidate id {cid!r}")
+                continue
+            seen.add(cid)
+            ranked.append(cid)
+        missing = sorted(cid for cid in non_rejected if cid not in seen)
+        if missing:
+            notes.append(
+                "ranking repaired: appended non-rejected candidates missing from "
+                f"ship_ranking in candidate-id order: {missing}"
+            )
+            ranked.extend(missing)
+        return ranked, notes
+
+    def _regression_veto(
+        self,
+        context: CriticContext,
+        candidates: tuple[CandidateArtifact, ...],
+        rejected_ids: set[str],
+    ) -> str | None:
+        """The DeterministicCritic whole-round veto, reused so the LLM cannot bypass it.
+
+        ``DeterministicCritic._unresolved_regressions`` is a stateless staticmethod;
+        calling it directly reuses the exact deterministic logic without
+        duplicating it and without touching critic.py. Computed over the surviving
+        (non-rejected) candidates, matching how the deterministic Critic computes it
+        over its post-audit eligible set.
+        """
+        surviving = [
+            candidate for candidate in candidates if candidate.candidate_id not in rejected_ids
+        ]
+        unresolved = DeterministicCritic._unresolved_regressions(
+            context.regressions, surviving
+        )
+        if not unresolved:
+            return None
+        return (
+            "whole-round no-op: regressions were neither handled in tasks_at_risk "
+            f"nor explained: {', '.join(unresolved)}"
+        )
+
+    # -- LLM plumbing / fallback ---------------------------------------------
+
+    async def _complete(self, prompt: str) -> str:
+        # Plain async completion on the recipe's meta provider — the same seam A1
+        # and A2 use. Temperature is left at the provider default.
+        from harnessx.core.events import Message
+
+        response = await self.provider.complete(
+            [Message(role="user", content=prompt)], []
+        )
+        return str(getattr(response, "content", "") or "")
+
+    async def _wholesale_fallback(
+        self,
+        context: CriticContext,
+        candidates: tuple[CandidateArtifact, ...],
+        reason: str,
+    ) -> CriticReview:
+        base = await self.fallback.review(context=context, candidates=candidates)
+        return CriticReview(
+            ranked_candidate_ids=base.ranked_candidate_ids,
+            verdicts=base.verdicts,
+            rejections=base.rejections,
+            revision_requests=base.revision_requests,
+            no_op=base.no_op,
+            no_op_reasons=base.no_op_reasons,
+            strategy_concerns=(f"llm_critic_fell_back: {reason};", *base.strategy_concerns),
+            unexplored_failure_clusters=base.unexplored_failure_clusters,
+            unexplored_failure_buckets=base.unexplored_failure_buckets,
+        )
+
+
+# ---------------------------------------------------------------------------
 # The recipe
 # ---------------------------------------------------------------------------
 
@@ -2308,6 +2972,14 @@ class VariantPoolRecipe:
                 f"aegis_planner must be one of {AEGIS_PLANNER_MODES}, "
                 f"got {self.aegis_planner!r}"
             )
+        # --aegis-critic: Phase A3. ``deterministic`` (default) keeps the
+        # byte-identical DeterministicCritic; ``llm`` model-backs the Critic role.
+        self.aegis_critic = str(getattr(args, "aegis_critic", DEFAULT_AEGIS_CRITIC))
+        if self.aegis_critic not in AEGIS_CRITIC_MODES:
+            raise ValueError(
+                f"aegis_critic must be one of {AEGIS_CRITIC_MODES}, "
+                f"got {self.aegis_critic!r}"
+            )
         self.target_strategy = str(
             getattr(
                 args,
@@ -2346,6 +3018,10 @@ class VariantPoolRecipe:
         # separate. Only the latter are admitted to RunReport.results.
         self._round_records: dict[str, dict[str, dict]] = {}
         self._round_candidate_memos: dict[str, Path] = {}
+        # A3 — Critic revision requests this round, keyed by the target candidate
+        # id ({candidate_id: {"reason", "instructions"}}). The LLM Critic writes it
+        # during review(); the revision producer reads it by ``slot.revision_of``.
+        self._round_revision_requests: dict[str, dict[str, str]] = {}
         # W28 — per-candidate manifest-mode/retry provenance for the report:
         # {candidate_id_or_slot: {"provenance", "retries", "attempts",
         #  "parse_status", "paper_only_gaps"}}. Never folded into headline scores.
@@ -2427,6 +3103,7 @@ class VariantPoolRecipe:
             self._round_traj_dir = {}
             self._round_records = {}
             self._round_candidate_memos = {}
+            self._round_revision_requests = {}
             self._pipeline_results = {}
             self._pipeline_audit_paths = {}
             self._paper_target_variant = None
@@ -2674,6 +3351,51 @@ class VariantPoolRecipe:
             else "deterministic_failure_cluster_fallback"
         )
 
+    def _make_critic(self) -> CriticStage:
+        """The active Critic adapter (--aegis-critic).
+
+        ``deterministic`` (default) returns the byte-identical
+        :class:`~experiments.variant_pool.critic.DeterministicCritic`. ``llm``
+        returns the model-backed :class:`_LLMCritic`, sharing the recipe's meta
+        provider (``meta_agent.inner_model``'s ``main`` role — the same provider
+        the Digester/Planner/evolve calls use), keeping the deterministic Critic as
+        its wholesale fallback (so a revert is byte-identical to the deterministic
+        arm), and given the round's revision sink so the revision producer can
+        reach the Critic's instructions by ``slot.revision_of``.
+        """
+        deterministic = DeterministicCritic(self.evidence)
+        if self.aegis_critic != "llm":
+            return deterministic
+        provider = self.meta_agent.inner_model.get("main")
+        return _LLMCritic(
+            provider=provider,
+            fallback=deterministic,
+            revision_sink=self._round_revision_requests,
+        )
+
+    @property
+    def _critic_adapter_name(self) -> str:
+        """Truthful pipeline-audit name for the active Critic role."""
+        return (
+            "MetaModel_llm_critic"
+            if self.aegis_critic == "llm"
+            else "deterministic_portfolio_fallback"
+        )
+
+    @property
+    def _llm_aegis_reproduction(self) -> bool:
+        """True ONLY when Digester, Planner AND Critic are all LLM (A1+A2+A3).
+
+        This is the moment the pipeline-audit flag was reserved for: the full
+        AEGIS three-role dialogue is model-backed (prompts are OURS
+        reconstructions). Any deterministic role keeps it False.
+        """
+        return (
+            self.aegis_digester == "llm"
+            and self.aegis_planner == "llm"
+            and self.aegis_critic == "llm"
+        )
+
     async def _run_paper_candidate_pipeline(
         self,
         variant: Any,
@@ -2704,11 +3426,35 @@ class VariantPoolRecipe:
                 slot=slot,
             )
 
+        async def _revision_producer(
+            *,
+            context: PipelineContext,
+            plan: PlanningArtifact,
+            slot: CandidateSlot,
+        ) -> CandidateArtifact | None:
+            # A3 Part 2. The adapter hands us the revision slot only
+            # (``slot.revision_of`` = the parent candidate id); the Critic's
+            # ``reason``+``instructions`` are looked up from the round revision
+            # sink the LLM Critic populated, and injected into the revised
+            # candidate's contract by ``_produce_paper_candidate``.
+            revision = self._round_revision_requests.get(slot.revision_of or "")
+            return await self._produce_paper_candidate(
+                variant=variant,
+                context=context,
+                plan=plan,
+                slot=slot,
+                revision=revision,
+            )
+
+        critic = self._make_critic()
         pipeline = CandidatePipeline(
             digester=digester,
             planner=planner,
-            evolver=IsolatedEvolverAdapter(producer=_producer),
-            critic=DeterministicCritic(self.evidence),
+            evolver=IsolatedEvolverAdapter(
+                producer=_producer,
+                revision_producer=_revision_producer,
+            ),
+            critic=critic,
             k_t=self.candidates_per_round,
             actionability_threshold=float(
                 getattr(self.args, "actionability_threshold", 1.0)
@@ -2740,6 +3486,7 @@ class VariantPoolRecipe:
         context: PipelineContext,
         plan: PlanningArtifact,
         slot: CandidateSlot,
+        revision: Mapping[str, str] | None = None,
     ) -> CandidateArtifact | None:
         """Run MetaAgent in one isolated slot and require a valid manifest.
 
@@ -2747,6 +3494,16 @@ class VariantPoolRecipe:
         (1) manifest format via ``--manifest-mode`` (repo adapter vs paper
         schema injection) and (2) no-config outcomes via ``--evolve-retry``.
         Neither touches ``harnessx/``.
+
+        A3 Part 2 — revision. When ``revision`` is given (the Critic's
+        ``{"reason", "instructions"}`` for the parent candidate), this runs in the
+        revision slot ``<parent>-revision-01`` allocated by the adapter, injects
+        the request into the meta contract (``critic_revision_request`` in the
+        planner brief), and finalizes the revised manifest with a gate-valid
+        paper-shape candidate id (:func:`_revision_manifest_candidate_id`) whose
+        ``iterates_from`` points at the parent — the two things the pipeline's
+        revision path checks before it lets the revised candidate rejoin the
+        batch. ``revision=None`` keeps the ordinary proposal byte-identical.
         """
 
         brief = self._brief_for_slot(plan, slot)
@@ -2764,8 +3521,11 @@ class VariantPoolRecipe:
                 slot=slot,
                 manifest_mode=self.manifest_mode,
                 target_variant=context.target_variant,
-                planner_brief=_planner_brief_with_regressions(
-                    asdict(brief), context.regressions
+                planner_brief=_planner_brief_with_revision(
+                    _planner_brief_with_regressions(
+                        asdict(brief), context.regressions
+                    ),
+                    revision,
                 ),
                 base_evolve_kwargs=base_kwargs,
                 max_retries=self.evolve_retry,
@@ -2858,6 +3618,17 @@ class VariantPoolRecipe:
         if manifest.candidate_id == alias and alias != slot_id:
             meta["repo_candidate_id"] = alias
             manifest = manifest.model_copy(update={"candidate_id": slot_id})
+
+        if revision is not None:
+            # A3 Part 2. The revision slot id (``C-R1-01-revision-01``) is not a
+            # gate-valid manifest candidate id, so finalize a paper-shape one and
+            # point iterates_from at the parent — both required for the pipeline to
+            # accept the revised candidate back into the batch.
+            revised_id = _revision_manifest_candidate_id(slot)
+            manifest = manifest.model_copy(
+                update={"candidate_id": revised_id, "iterates_from": slot.revision_of}
+            )
+            meta["revision_of"] = slot.revision_of
 
         meta["provenance"] = manifest.provenance
         meta["paper_only_gaps"] = list(manifest.paper_only_gaps())
@@ -2953,11 +3724,10 @@ class VariantPoolRecipe:
                 "digester": self._digester_adapter_name,
                 "planner": self._planner_adapter_name,
                 "evolver": "MetaAgent_isolated_slots",
-                "critic": "deterministic_portfolio_fallback",
-                # Stays False until ALL THREE roles (Digester/Planner/Critic) are
-                # LLM; A1/A2 model-back the Digester and Planner (per-role names
-                # above), but the Critic is still deterministic.
-                "llm_aegis_reproduction": False,
+                "critic": self._critic_adapter_name,
+                # True ONLY when Digester, Planner AND Critic are all LLM (A1+A2+A3
+                # complete); any deterministic role keeps it False.
+                "llm_aegis_reproduction": self._llm_aegis_reproduction,
             },
             "digests": [digest.to_dict() for digest in pipeline_result.digests],
             "plan": (
@@ -3985,16 +4755,20 @@ class VariantPoolRecipe:
                     else "legacy ablation: all active routed variants"
                 ),
                 "candidate_pipeline_adapter": (
-                    (
-                        "LLM Digester (A1) + deterministic Planner/Critic fallbacks "
-                        "+ MetaAgent Evolver"
-                        if self.aegis_digester == "llm"
-                        else "deterministic Digester/Planner/Critic fallbacks + MetaAgent Evolver"
+                    # A3 — one composed string across all three LLM-AEGIS roles;
+                    # byte-identical to the pre-A1 literal when all deterministic.
+                    _composed_pipeline_adapter(
+                        self.aegis_digester,
+                        self.aegis_planner,
+                        self.aegis_critic,
+                        all_deterministic_literal=(
+                            "deterministic Digester/Planner/Critic fallbacks + MetaAgent Evolver"
+                        ),
                     )
                     if self.candidate_mode == "paper"
                     else "legacy MetaAgent single proposal"
                 ),
-                "llm_aegis_reproduction": False,
+                "llm_aegis_reproduction": self._llm_aegis_reproduction,
                 "actionability_threshold": (
                     float(getattr(self.args, "actionability_threshold", 1.0))
                     if self.candidate_mode == "paper"
@@ -4163,10 +4937,17 @@ def _build_experiment_lock(
             ),
             candidate_limit=candidate_limit if paper_mode else 1,
             candidate_pipeline_adapter=(
-                (
-                    "llm_digester+deterministic_planner_critic+llm_metaagent_evolver"
-                    if str(getattr(args, "aegis_digester", DEFAULT_AEGIS_DIGESTER)) == "llm"
-                    else "deterministic_evidence_digester_planner_critic+llm_metaagent_evolver"
+                # A3 — one composed string across all three LLM-AEGIS roles. When
+                # all deterministic it is byte-identical to the pre-A1 literal
+                # (the Hyperparams default); the composed form is used only when a
+                # role is llm (see :func:`_composed_pipeline_adapter`).
+                _composed_pipeline_adapter(
+                    str(getattr(args, "aegis_digester", DEFAULT_AEGIS_DIGESTER)),
+                    str(getattr(args, "aegis_planner", DEFAULT_AEGIS_PLANNER)),
+                    str(getattr(args, "aegis_critic", DEFAULT_AEGIS_CRITIC)),
+                    all_deterministic_literal=(
+                        "deterministic_evidence_digester_planner_critic+llm_metaagent_evolver"
+                    ),
                 )
                 if paper_mode
                 else "legacy_metaagent_single_proposal_per_active_variant"
@@ -4423,6 +5204,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Prompts are OURS. Critic stays deterministic, so "
             "llm_aegis_reproduction stays False; only the audit's per-role "
             "Planner name flips to MetaModel_llm_planner."
+        ),
+    )
+    parser.add_argument(
+        "--aegis-critic",
+        choices=AEGIS_CRITIC_MODES,
+        default=DEFAULT_AEGIS_CRITIC,
+        help=(
+            "LLM-AEGIS Critic role (paper section 4.3; REPRO-COMPLETION-PLAN "
+            "Phase A3). deterministic (default) = the byte-identical "
+            "DeterministicCritic portfolio audit. llm = one meta-model call (plus "
+            "one parse-retry) audits the Evolver's structured candidate batch and "
+            "emits a ship_ranking, rejections, strategy concerns and AT MOST ONE "
+            "revision request; the deterministic gate stays the sole shipping "
+            "authority (the Critic only ranks/requests) and the deterministic "
+            "regression veto still applies. Prompt is OURS. Only when Digester, "
+            "Planner AND Critic are all llm does llm_aegis_reproduction flip to "
+            "True; the audit's per-role Critic name flips to MetaModel_llm_critic."
         ),
     )
     parser.add_argument(

@@ -142,6 +142,18 @@ def test_runtime_parameters_and_paper_plan_are_not_conflated() -> None:
     assert params.candidates_per_round == "global_up_to_4"
     assert params.candidate_limit == 4
     assert "not_full_llm_aegis" in params.candidate_pipeline_semantics
+    # A3 provenance pin (OURS — updated for the three-role unification). The
+    # schema default is the all-deterministic case and MUST stay byte-identical to
+    # the pre-A1 literal: the recipe's ``_composed_pipeline_adapter`` returns this
+    # exact string when Digester+Planner+Critic are all deterministic, and only
+    # emits the composed ``digester=...,planner=...,critic=...`` form once a role
+    # is ``llm`` (that composed form is exercised in test_llm_critic.py, since the
+    # llm case is produced by the recipe's ``_build_experiment_lock``, not by this
+    # dataclass default).
+    assert (
+        params.candidate_pipeline_adapter
+        == "deterministic_evidence_digester_planner_critic+llm_metaagent_evolver"
+    )
     assert params.actionability_threshold == 1.0
     assert params.baseline_round_policy.startswith("R0_")
     assert (params.T, params.P) == (15, 3)
