@@ -189,8 +189,19 @@
 - 时序纪律:A3 coder 在 run_variant_pool.py 施工期间**冻结一切 live run**
   (启动会导入半成品代码)。
 
+### paper4 — **忠实臂冲线:paper 模式候选首次走完全程** ✅(收敛序列收官)
+- 配置:同 paper3 + type 词表(2ad682e 系列四修复齐:顺序条款/署名收紧/60s replay 帽/
+  词表);首发因 `float(None)` 启动崩(见提交 2ad682e 的教训记录),无管道重启后干净跑完。
+- **判决**:C-R1-01 全程通过——`paper_manifest` 合法解析 → replay 过关 → **首次真实
+  评测** → 第 5 关诚实判决(improved=[] regressed=[])→ 按实力 REJECT。另一 slot 死于
+  no_config_after_retry(随机顽疾,非结构;正式 paper 跑可升 --evolve-retry)。
+- **四连跑结论(论文口径定稿)**:DeepSeek 作 meta **撑得起论文忠实臂**,条件是契约把
+  隐性知识显性化(写作顺序/署名适用域/schema 词表)+ replay 帽适配延迟——"开源 meta
+  需要显式契约脚手架,强模型靠隐性能力补齐"= §7.7 未测面的干净观察,证据链 n=10
+  (paper1×4 + paper2×2 + paper3×2 + paper4×2)。
+
 ### 会话成本合计(实测)
-¥194.14 → ¥168.94(**¥25.20**:十个 run;paper2+paper3+a1smoke 合计 ¥7.55)
+¥194.14 → ¥168.94(至 a1smoke 止 **¥25.20**;paper4/aegis1 待收口回填)
 
 ### 本日提交索引(全部已推 lab)
 | commit | 内容 |
