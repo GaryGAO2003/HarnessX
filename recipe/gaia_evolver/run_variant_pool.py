@@ -5273,15 +5273,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--actionability-threshold",
-        type=float,
-        default=1.0,
-        help=(
-            "OURS: threshold on binary any-unsolved settled evidence (0 or 1) "
-            "required to run Planner/Evolver; the paper does not publish it."
-        ),
-    )
-    parser.add_argument(
         "--target-strategy",
         choices=(*TARGET_STRATEGIES, "all_active_variants"),
         default="worst_first",
