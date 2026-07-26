@@ -82,6 +82,12 @@ class PlanningArtifact:
     target_variant: str
     briefs: tuple[CandidateBrief, ...] = ()
     notes: tuple[str, ...] = ()
+    #: [A2] Set ``True`` ONLY by an LLM Planner that itself returned zero briefs
+    #: (an explicitly empty mutation landscape, paper §4.3) — the second half of
+    #: EXP-E07's real short-circuit. The deterministic Planner and every fallback
+    #: leave this ``False``, so the legacy empty-briefs path (``short_circuit=
+    #: "empty_landscape"``) stays byte-identical. Backward-compatible default.
+    empty_landscape: bool = False
 
 
 @dataclass(frozen=True)
@@ -458,6 +464,34 @@ class CandidatePipeline:
             raise ValueError(
                 "Planner target mismatch: "
                 f"{plan.target_variant!r} != {context.target_variant!r}"
+            )
+        if plan.empty_landscape and not plan.briefs:
+            # [A2/EXP-E07] The Planner itself declared the mutation landscape
+            # empty (an LLM Planner that returned zero briefs). Skip the Evolver
+            # and Critic entirely and settle the round as a planner-driven no-op.
+            # This is distinct from the byte-identical legacy path below (empty
+            # briefs WITHOUT the flag — the deterministic Planner or a fallback),
+            # which keeps ``short_circuit="empty_landscape"``.
+            reason = "; ".join(note for note in plan.notes if note.strip()) or (
+                "Planner reported an empty actionable mutation landscape (briefs=0)"
+            )
+            audit.append(
+                AuditRecord(
+                    phase="planner",
+                    disposition="short_circuit",
+                    reason=reason,
+                )
+            )
+            review = CriticReview(no_op=True, no_op_reasons=(reason,))
+            audit.extend(self._review_audit(review, phase="planner"))
+            return self._result(
+                digester_artifact=digester_artifact,
+                plan=plan,
+                candidates=(),
+                review=review,
+                audit=audit,
+                revision_count=0,
+                short_circuit="planner_empty_landscape",
             )
         if not plan.briefs:
             reason = (

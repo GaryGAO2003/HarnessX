@@ -134,7 +134,7 @@ class _Digester:
 
 
 class _Planner:
-    def __init__(self, briefs=None):
+    def __init__(self, briefs=None, *, empty_landscape=False):
         self.briefs = (
             (
                 CandidateBrief(
@@ -147,6 +147,7 @@ class _Planner:
             if briefs is None
             else tuple(briefs)
         )
+        self.empty_landscape = empty_landscape
         self.calls = 0
 
     async def plan(self, *, context, digests):
@@ -154,6 +155,7 @@ class _Planner:
         return PlanningArtifact(
             target_variant=context.target_variant,
             briefs=self.briefs,
+            empty_landscape=self.empty_landscape,
         )
 
 
@@ -274,6 +276,59 @@ async def test_empty_planner_landscape_short_circuits_evolver_and_critic(
         and record.disposition == "no_op"
         and "empty actionable landscape" in record.reason
         for record in result.audit
+    )
+
+
+@pytest.mark.asyncio
+async def test_planner_empty_landscape_flag_short_circuits_before_evolver(
+    tmp_path: Path,
+) -> None:
+    # [A2/EXP-E07] A Planner that itself declares the mutation landscape empty
+    # (empty_landscape=True + zero briefs) short-circuits with the new reason and
+    # a dedicated planner short_circuit audit record, never touching Evolver/Critic.
+    context = _context(tmp_path, round_idx=3)
+    digester = _Digester(actionability=0.8)
+    planner = _Planner(
+        briefs=(),
+        empty_landscape=True,
+    )
+    evolver = _Evolver([_artifact(tmp_path, "C-R3-01")])
+    critic = _RankingCritic()
+    pipeline = CandidatePipeline(digester, planner, evolver, critic)
+
+    result = await pipeline.run(context)
+
+    assert planner.calls == 1
+    assert evolver.calls == 0
+    assert critic.calls == 0
+    assert result.no_op
+    assert result.short_circuit == "planner_empty_landscape"
+    assert any(
+        record.phase == "planner" and record.disposition == "short_circuit"
+        for record in result.audit
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_briefs_without_flag_keeps_legacy_short_circuit(
+    tmp_path: Path,
+) -> None:
+    # Regression: empty briefs WITHOUT the empty_landscape flag (the deterministic
+    # Planner / any fallback) must keep the byte-identical legacy short-circuit.
+    context = _context(tmp_path, round_idx=3)
+    evolver = _Evolver([_artifact(tmp_path, "C-R3-01")])
+    critic = _RankingCritic()
+    pipeline = CandidatePipeline(_Digester(actionability=0.8), _Planner(briefs=()), evolver, critic)
+
+    result = await pipeline.run(context)
+
+    assert evolver.calls == 0
+    assert critic.calls == 0
+    assert result.plan is not None
+    assert result.plan.empty_landscape is False
+    assert result.short_circuit == "empty_landscape"
+    assert not any(
+        record.disposition == "short_circuit" for record in result.audit
     )
 
 

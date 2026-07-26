@@ -132,6 +132,7 @@ from experiments.variant_pool.candidate_pipeline import (
     outward_candidate_id,
     PipelineContext,
     PipelineResult,
+    PlannerStage,
     PlanningArtifact,
 )
 from experiments.variant_pool.critic import DeterministicCritic
@@ -210,6 +211,21 @@ DEFAULT_L2_CERT = "auto"
 #: per-role Digester name flips.
 AEGIS_DIGESTER_MODES = ("deterministic", "llm")
 DEFAULT_AEGIS_DIGESTER = "deterministic"
+
+#: --aegis-planner — Phase A2 of the LLM-AEGIS reconstruction
+#: (experiments/docs/REPRO-COMPLETION-PLAN.md). The paper's Planner (§4.3) is
+#: LLM-driven: it builds the mutation landscape ("who fails / what was tried /
+#: which edit classes are untried") from the round's digests + prior-ship
+#: history and emits the K_t candidate briefs. Our current adapter is a
+#: deterministic failure-cluster grouping. ``deterministic`` (default) keeps the
+#: byte-identical :class:`_DeterministicPlanner`; ``llm`` routes the round's
+#: evidence through one meta-model call (plus one parse-retry) that emits the
+#: briefs — an empty landscape short-circuits the round. The Digester can be LLM
+#: independently; the Critic stays deterministic, so the audit's
+#: ``llm_aegis_reproduction`` flag stays ``False`` in both modes — only the
+#: per-role Planner name flips.
+AEGIS_PLANNER_MODES = ("deterministic", "llm")
+DEFAULT_AEGIS_PLANNER = "deterministic"
 
 # B4 — the repo's own hard requirement, quoted from ``agent.py`` L926-937's
 # DECISION_REQUIRED notice, front-loaded into our injected brief so the
@@ -1768,6 +1784,438 @@ class _DeterministicPlanner:
 
 
 # ---------------------------------------------------------------------------
+# A2 — LLM Planner (second LLM-AEGIS role; paper §4.3)
+# ---------------------------------------------------------------------------
+#
+# The paper's Planner "builds the mutation landscape — which tasks still fail,
+# what edits were already tried on them, and which of the four edit classes are
+# untried — and emits up to K_t candidate briefs, one falsifiable edit
+# hypothesis each" (§4.3 p.10). This adapter makes that step model-backed while
+# keeping the deterministic gate and engine untouched (REPRO-COMPLETION-PLAN
+# Phase A2; SPEC §4.3 principle: the shipping authority stays deterministic). The
+# prompt is OURS — a reconstruction of the withheld §4.3 role description.
+
+#: The four paper edit classes (Table 9 ``bucket``; PAPER_MANIFEST_SCHEMA_BRIEF
+#: "subset of [prompt, tools, config, processor]"). In ``--aegis-planner llm`` a
+#: brief's ``buckets`` are SUGGESTED edit classes drawn from this set (paper
+#: semantics), unlike the deterministic Planner whose ``buckets`` carry
+#: failure-cluster labels; see :class:`_LLMPlanner`.
+_PAPER_EDIT_CLASSES = ("prompt", "tools", "config", "processor")
+
+#: [OURS] Serialized-input budget for one Planner call. A round can carry many
+#: failed tasks with long evidence_anchor lists; the input is capped here and
+#: evidence_anchors are truncated first (the task ids / categories / prior-ship
+#: history are never dropped), keeping the call well under the meta model's
+#: context.
+_LLM_PLANNER_INPUT_CAP = 30_000
+
+#: [OURS] Planner prompt. Frozen/audited later, so it is a module constant
+#: carrying the instruction + inline JSON schema; the round's evidence is
+#: appended at call time. The Planner does NOT re-derive task outcomes — it reads
+#: the Digester's structured per-task summaries and proposes the mutation
+#: landscape.
+_LLM_PLANNER_PROMPT = (
+    "You are the Planner in a self-improving agent harness (AEGIS Planner role, "
+    "paper section 4.3). The Digester has already compressed this round's traces "
+    "into the per-task failure summaries given below (their pass/fail outcomes "
+    "are GROUND TRUTH — do NOT re-judge them). Your job is to build the MUTATION "
+    "LANDSCAPE for the target harness variant — which tasks still fail, what was "
+    "already tried on them (from the prior-ship history), and which of the four "
+    "edit classes are still untried — and to emit up to K_t candidate briefs, one "
+    "falsifiable edit hypothesis each.\n"
+    "\n"
+    "The four edit classes (paper Table 9 buckets) are EXACTLY: prompt, tools, "
+    "config, processor. Each brief's `buckets` is your SUGGESTED edit class(es) "
+    "for that one candidate (one or more of those four literals) — it is NOT a "
+    "failure label. When several distinct failure clusters exist and you emit "
+    "more than one brief, make the briefs differ in their bucket mix so the batch "
+    "explores the landscape instead of repeating a single edit.\n"
+    "\n"
+    "Output ONLY a JSON object (no prose, no markdown fences, no code block) with "
+    "EXACTLY these two keys:\n"
+    "{\n"
+    '  "briefs": [\n'
+    "    {\n"
+    '      "buckets": ["<1+ of: prompt, tools, config, processor>"],\n'
+    '      "task_ids": ["<task ids taken ONLY from this round\'s summaries below>"],\n'
+    '      "rationale": "<one evidence-anchored hypothesis for this single '
+    'candidate; must be non-empty>"\n'
+    "    }\n"
+    "  ],\n"
+    '  "landscape_notes": "<short summary of what has been tried and which edit '
+    'classes remain untried>"\n'
+    "}\n"
+    "\n"
+    "Emit between 0 and K_t briefs. Returning `\"briefs\": []` is a LEGITIMATE "
+    "outcome when nothing in the evidence is addressable by a harness edit this "
+    "round — do NOT invent a brief to fill the batch. Rules: never invent task "
+    "ids, tool names, or edit classes; use ONLY the ids and evidence shown; keep "
+    "the whole object small. Return the JSON object and nothing else."
+)
+
+
+class _PlannerWholesaleFallback(Exception):
+    """Signal that the whole LLM Planner round must revert to deterministic.
+
+    Carries the human-readable ``reason`` prefixed onto the returned plan's notes
+    (fallback policy, mirrors :class:`_DigesterWholesaleFallback`).
+    """
+
+
+@dataclass
+class _LLMPlanner:
+    """Model-backed Planner (paper §4.3), second of the three LLM-AEGIS roles.
+
+    Consumes exactly the digests the pipeline hands every Planner (this round's
+    per-task summaries, carrying the LLM-Digester output when ``--aegis-digester
+    llm`` is also on) and, in ONE meta-model call (plus at most one parse-retry),
+    emits between 0 and ``k_t`` :class:`~experiments.variant_pool.candidate_pipeline.CandidateBrief`
+    objects plus a landscape summary. The input assembled into the prompt is the
+    round's digests (task_id / outcome / failure_category / implicated_components
+    / evidence_anchors), ``context.regressions``, ``context.failure_buckets`` and
+    the prior-ship history the recipe can already reach — each digest's
+    ``prior_history`` (its ``ships`` per prior round), which the EvidenceStore
+    attached at write time; no new store is queried. The serialized input is
+    capped at ~30k chars, truncating evidence_anchors first.
+
+    Buckets semantics — a deliberate SHIFT from the deterministic arm. The
+    deterministic :class:`_DeterministicPlanner` puts *failure-cluster labels*
+    (e.g. ``gaia_level_1``) in a brief's ``buckets``. In ``llm`` mode ``buckets``
+    are instead *suggested edit classes* — a subset of the four paper edit
+    classes (``prompt``/``tools``/``config``/``processor``, :data:`_PAPER_EDIT_CLASSES`).
+    This is safe because no consumer treats ``CandidateBrief.buckets`` as the
+    manifest ``bucket`` enum: a brief is only rendered verbatim into the meta
+    contract (``asdict(brief)`` -> ``planner_brief`` JSON in
+    ``VariantPoolMetaAgent._render_candidate_contract``); ``_brief_for_slot`` and
+    the contract renderer never parse ``buckets``. The deterministic arm already
+    ships non-enum labels through that same path, so both semantics coexist.
+
+    Validation (task ruling): each brief's ``buckets`` is filtered to the four
+    edit classes (a brief with none left is dropped), ``task_ids`` is filtered to
+    this round's digest ids (unknown ids dropped, noted), and an empty
+    ``rationale`` drops the brief; all drops are recorded in the plan notes.
+    Briefs are renumbered ``P-R{round}-{NN}`` exactly like the deterministic
+    Planner. Robustness (mirrors A1): a JSON parse/validation failure retries once
+    with the error fed back; a provider error or a double parse failure reverts
+    the WHOLE round to what :class:`_DeterministicPlanner` returns, with the notes
+    prefixed ``llm_planner_fell_back:``. A round never dies here.
+
+    Empty landscape: when the model itself returns ``"briefs": []`` the plan sets
+    :attr:`~experiments.variant_pool.candidate_pipeline.PlanningArtifact.empty_landscape`,
+    which the pipeline short-circuits (``short_circuit="planner_empty_landscape"``).
+    Fallbacks NEVER set the flag; a response whose briefs were all dropped as
+    invalid leaves it ``False`` and takes the legacy empty-briefs path.
+
+    The active adapter name is set truthfully by the recipe
+    (``MetaModel_llm_planner``); ``llm_aegis_reproduction`` stays ``False`` until
+    the Critic is LLM too.
+    """
+
+    provider: Any
+    k_t: int
+    fallback: _DeterministicPlanner
+
+    async def plan(
+        self,
+        *,
+        context: PipelineContext,
+        digests: Sequence[TaskDigest],
+    ) -> PlanningArtifact:
+        digests = tuple(digests)
+        try:
+            return await self._plan_llm(context, digests)
+        except _PlannerWholesaleFallback as exc:
+            return await self._wholesale_fallback(context, digests, str(exc))
+        except Exception as exc:  # noqa: BLE001 - provider/other error must not kill the round
+            return await self._wholesale_fallback(
+                context, digests, f"{type(exc).__name__}: {exc}"
+            )
+
+    async def _plan_llm(
+        self,
+        context: PipelineContext,
+        digests: tuple[TaskDigest, ...],
+    ) -> PlanningArtifact:
+        summary, truncation = self._build_input(context, digests)
+        valid_ids = {digest.task_id for digest in digests}
+        error: str | None = None
+        for _attempt in range(2):
+            prompt = self._build_prompt(summary, truncation=truncation, retry_error=error)
+            text = await self._complete(prompt)
+            parsed, error = self._parse_plan_json(text)
+            if parsed is not None:
+                return self._map_plan(context, parsed, valid_ids, truncation)
+        raise _PlannerWholesaleFallback(f"planner JSON failed twice ({error})")
+
+    # -- input assembly (capped) ---------------------------------------------
+
+    def _build_input(
+        self,
+        context: PipelineContext,
+        digests: tuple[TaskDigest, ...],
+    ) -> tuple[str, tuple[str, ...]]:
+        """``(serialized_input, truncation_notes)`` under :data:`_LLM_PLANNER_INPUT_CAP`.
+
+        evidence_anchors are the only field trimmed (task ids, categories,
+        components and prior-ship history are always kept); the note records how
+        far they were trimmed so the audit shows the input was capped.
+        """
+        for max_anchors in (None, 3, 1, 0):
+            body = self._compose_input(context, digests, max_anchors=max_anchors)
+            if len(body) <= _LLM_PLANNER_INPUT_CAP:
+                if max_anchors is None:
+                    return body, ()
+                if max_anchors == 0:
+                    note = (
+                        "evidence_anchors dropped entirely to fit the "
+                        f"~{_LLM_PLANNER_INPUT_CAP}-char input cap"
+                    )
+                else:
+                    note = (
+                        f"evidence_anchors truncated to <= {max_anchors} per task to fit "
+                        f"the ~{_LLM_PLANNER_INPUT_CAP}-char input cap"
+                    )
+                return body, (note,)
+        body = self._compose_input(context, digests, max_anchors=0)[:_LLM_PLANNER_INPUT_CAP]
+        return body, (
+            f"input hard-truncated to {_LLM_PLANNER_INPUT_CAP} chars",
+        )
+
+    def _compose_input(
+        self,
+        context: PipelineContext,
+        digests: tuple[TaskDigest, ...],
+        *,
+        max_anchors: int | None,
+    ) -> str:
+        regressions = ", ".join(context.regressions) or "none"
+        failure_buckets = ", ".join(context.failure_buckets) or "none"
+        lines = [
+            f"TARGET VARIANT: {context.target_variant}",
+            f"ROUND: {context.round_idx}",
+            f"K_t (max briefs to emit this round): {self.k_t}",
+            f"ACTIVE REGRESSIONS (previously solved, now failing): {regressions}",
+            f"SETTLED FAILURE CATEGORIES: {failure_buckets}",
+            "",
+            "PER-TASK SUMMARIES THIS ROUND:",
+        ]
+        for digest in digests:
+            n_pass, n_att = digest.outcome
+            status = "SOLVED" if digest.solved else "FAILED"
+            components = ", ".join(digest.implicated_components) or "none"
+            anchors = list(digest.evidence_anchors)
+            if max_anchors is not None:
+                anchors = anchors[:max_anchors]
+            anchor_str = " | ".join(anchors) if anchors else "none"
+            lines.append(
+                f"- {digest.task_id}: {status} ({n_pass}/{n_att}); "
+                f"category={digest.failure_category or 'unknown'}; "
+                f"components=[{components}]; evidence=[{anchor_str}]"
+            )
+            prior = self._prior_ship_history(digest)
+            if prior:
+                lines.append(f"    prior_history: {prior}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _prior_ship_history(digest: TaskDigest) -> str:
+        """This task's prior outcomes + the candidate ids shipped for it, per round.
+
+        Reads ``digest.prior_history`` — the cross-round continuity the
+        EvidenceStore attaches at write time (``ships`` = what was already tried).
+        This is the "prior-ship history the recipe can already reach"; no store is
+        queried directly.
+        """
+        entries: list[str] = []
+        for entry in digest.prior_history:
+            if not isinstance(entry, dict):
+                continue
+            round_idx = entry.get("round_idx")
+            solved = entry.get("solved")
+            category = entry.get("failure_category")
+            ships = [str(ship) for ship in (entry.get("ships") or [])]
+            ship_str = ",".join(ships) if ships else "no_ship"
+            outcome = "solved" if solved else "failed"
+            category_str = f"/{category}" if category else ""
+            entries.append(f"R{round_idx}:{outcome}{category_str} ships=[{ship_str}]")
+        return "; ".join(entries)
+
+    # -- prompt assembly ------------------------------------------------------
+
+    def _build_prompt(
+        self,
+        summary: str,
+        *,
+        truncation: tuple[str, ...],
+        retry_error: str | None,
+    ) -> str:
+        parts = [
+            _LLM_PLANNER_PROMPT,
+            f"\n\nROUND EVIDENCE:\n{summary}",
+        ]
+        if truncation:
+            parts.append("\n\nINPUT NOTES: " + "; ".join(truncation))
+        if retry_error:
+            parts.append(
+                "\n\nYour previous response was rejected: "
+                f"{retry_error}. Return ONLY a single valid JSON object with the "
+                "two required keys ('briefs' and 'landscape_notes') and nothing else."
+            )
+        return "".join(parts)
+
+    # -- parsing / validation / mapping --------------------------------------
+
+    def _parse_plan_json(self, text: str) -> tuple[dict | None, str | None]:
+        block = _first_json_object(text)
+        if block is None:
+            return None, "no JSON object found in response"
+        try:
+            obj = json.loads(block)
+        except (ValueError, TypeError) as exc:
+            return None, f"json.loads failed: {exc}"
+        if not isinstance(obj, dict):
+            return None, "top-level JSON value is not an object"
+        briefs = obj.get("briefs")
+        if not isinstance(briefs, list):
+            return None, "'briefs' must be a JSON array (possibly empty)"
+        notes = obj.get("landscape_notes", "")
+        if notes is not None and not isinstance(notes, str):
+            return None, "'landscape_notes' must be a string"
+        return obj, None
+
+    def _map_plan(
+        self,
+        context: PipelineContext,
+        obj: Mapping[str, Any],
+        valid_ids: set[str],
+        truncation: tuple[str, ...],
+    ) -> PlanningArtifact:
+        raw_briefs = list(obj.get("briefs") or [])
+        # The flag is set ONLY when the model itself returned an empty list — not
+        # when every brief was dropped as invalid (that keeps the legacy path).
+        model_returned_zero = len(raw_briefs) == 0
+        landscape_notes = str(obj.get("landscape_notes") or "").strip()
+
+        briefs: list[CandidateBrief] = []
+        drop_notes: list[str] = []
+        for index, raw in enumerate(raw_briefs, start=1):
+            if len(briefs) >= self.k_t:
+                drop_notes.append(f"dropped brief #{index}: K_t={self.k_t} cap reached")
+                continue
+            brief, note = self._map_brief(
+                context, raw, valid_ids, position=len(briefs) + 1
+            )
+            if brief is None:
+                drop_notes.append(note or f"dropped brief #{index}: invalid")
+                continue
+            briefs.append(brief)
+            if note:
+                drop_notes.append(note)
+
+        notes: list[str] = ["llm_planner (paper §4.3 AEGIS Planner role; prompt OURS)"]
+        if landscape_notes:
+            notes.append(landscape_notes)
+        notes.extend(truncation)
+        notes.extend(drop_notes)
+        if len(notes) == 1:  # only the provenance tag
+            notes.append(
+                "llm_planner: model reported an empty mutation landscape (briefs=0)"
+                if model_returned_zero
+                else "llm_planner: mutation landscape emitted"
+            )
+        return PlanningArtifact(
+            target_variant=context.target_variant,
+            briefs=tuple(briefs),
+            notes=tuple(notes),
+            empty_landscape=model_returned_zero,
+        )
+
+    def _map_brief(
+        self,
+        context: PipelineContext,
+        raw: Any,
+        valid_ids: set[str],
+        *,
+        position: int,
+    ) -> tuple[CandidateBrief | None, str | None]:
+        if not isinstance(raw, Mapping):
+            return None, f"dropped brief #{position}: not a JSON object"
+        raw_buckets = raw.get("buckets") or []
+        if isinstance(raw_buckets, str):
+            raw_buckets = [raw_buckets]
+        buckets: list[str] = []
+        for item in raw_buckets:
+            value = str(item).strip().lower()
+            if value in _PAPER_EDIT_CLASSES and value not in buckets:
+                buckets.append(value)
+        if not buckets:
+            return None, (
+                f"dropped brief #{position}: no valid edit class in "
+                f"buckets={raw.get('buckets')!r} (allowed: {list(_PAPER_EDIT_CLASSES)})"
+            )
+        rationale = str(raw.get("rationale") or "").strip()
+        if not rationale:
+            return None, f"dropped brief #{position}: empty rationale"
+        raw_ids = raw.get("task_ids") or []
+        if isinstance(raw_ids, str):
+            raw_ids = [raw_ids]
+        kept_ids: list[str] = []
+        unknown_ids: list[str] = []
+        for item in raw_ids:
+            value = str(item).strip()
+            if not value:
+                continue
+            if value in valid_ids:
+                if value not in kept_ids:
+                    kept_ids.append(value)
+            elif value not in unknown_ids:
+                unknown_ids.append(value)
+        brief_id = f"P-R{context.round_idx}-{position:02d}"
+        brief = CandidateBrief(
+            brief_id=brief_id,
+            buckets=tuple(buckets),
+            task_ids=tuple(kept_ids),
+            rationale=rationale,
+        )
+        note = None
+        if unknown_ids:
+            note = (
+                f"{brief_id}: dropped unknown task_ids {unknown_ids} "
+                "(not in this round's digests)"
+            )
+        return brief, note
+
+    # -- LLM plumbing / fallback ---------------------------------------------
+
+    async def _complete(self, prompt: str) -> str:
+        # Plain async completion on the recipe's meta provider — the same seam A1
+        # uses. Temperature is left at the provider default.
+        from harnessx.core.events import Message
+
+        response = await self.provider.complete(
+            [Message(role="user", content=prompt)], []
+        )
+        return str(getattr(response, "content", "") or "")
+
+    async def _wholesale_fallback(
+        self,
+        context: PipelineContext,
+        digests: tuple[TaskDigest, ...],
+        reason: str,
+    ) -> PlanningArtifact:
+        base = await self.fallback.plan(context=context, digests=digests)
+        return PlanningArtifact(
+            target_variant=base.target_variant,
+            briefs=base.briefs,
+            notes=(f"llm_planner_fell_back: {reason}; ", *base.notes),
+            # A fallback is NOT an empty landscape: leave the flag False so the
+            # deterministic empty-briefs path (short_circuit="empty_landscape")
+            # stays byte-identical to the deterministic arm.
+            empty_landscape=False,
+        )
+
+
+# ---------------------------------------------------------------------------
 # The recipe
 # ---------------------------------------------------------------------------
 
@@ -1851,6 +2299,14 @@ class VariantPoolRecipe:
             raise ValueError(
                 f"aegis_digester must be one of {AEGIS_DIGESTER_MODES}, "
                 f"got {self.aegis_digester!r}"
+            )
+        # --aegis-planner: Phase A2. ``deterministic`` (default) keeps the
+        # byte-identical _DeterministicPlanner; ``llm`` model-backs the Planner role.
+        self.aegis_planner = str(getattr(args, "aegis_planner", DEFAULT_AEGIS_PLANNER))
+        if self.aegis_planner not in AEGIS_PLANNER_MODES:
+            raise ValueError(
+                f"aegis_planner must be one of {AEGIS_PLANNER_MODES}, "
+                f"got {self.aegis_planner!r}"
             )
         self.target_strategy = str(
             getattr(
@@ -2188,6 +2644,36 @@ class VariantPoolRecipe:
             else "deterministic_evidence_store_fallback"
         )
 
+    def _make_planner(self) -> PlannerStage:
+        """The active Planner adapter (--aegis-planner).
+
+        ``deterministic`` (default) returns the byte-identical
+        :class:`_DeterministicPlanner`. ``llm`` returns the model-backed
+        :class:`_LLMPlanner`, sharing the recipe's meta provider
+        (``meta_agent.inner_model``'s ``main`` role — the same provider the
+        Digester and evolve calls use) and keeping the deterministic adapter as
+        its wholesale fallback so a revert is byte-identical to the deterministic
+        arm.
+        """
+        deterministic = _DeterministicPlanner(self.candidates_per_round)
+        if self.aegis_planner != "llm":
+            return deterministic
+        provider = self.meta_agent.inner_model.get("main")
+        return _LLMPlanner(
+            provider=provider,
+            k_t=self.candidates_per_round,
+            fallback=deterministic,
+        )
+
+    @property
+    def _planner_adapter_name(self) -> str:
+        """Truthful pipeline-audit name for the active Planner role."""
+        return (
+            "MetaModel_llm_planner"
+            if self.aegis_planner == "llm"
+            else "deterministic_failure_cluster_fallback"
+        )
+
     async def _run_paper_candidate_pipeline(
         self,
         variant: Any,
@@ -2203,7 +2689,7 @@ class VariantPoolRecipe:
             )
         output_root = self.run_dir / f"R{round_idx}" / vid / "pipeline"
         digester = self._make_digester()
-        planner = _DeterministicPlanner(self.candidates_per_round)
+        planner = self._make_planner()
 
         async def _producer(
             *,
@@ -2465,11 +2951,12 @@ class VariantPoolRecipe:
             "target_variant": target_variant,
             "adapter": {
                 "digester": self._digester_adapter_name,
-                "planner": "deterministic_failure_cluster_fallback",
+                "planner": self._planner_adapter_name,
                 "evolver": "MetaAgent_isolated_slots",
                 "critic": "deterministic_portfolio_fallback",
                 # Stays False until ALL THREE roles (Digester/Planner/Critic) are
-                # LLM; A1 only model-backs the Digester (per-role name above).
+                # LLM; A1/A2 model-back the Digester and Planner (per-role names
+                # above), but the Critic is still deterministic.
                 "llm_aegis_reproduction": False,
             },
             "digests": [digest.to_dict() for digest in pipeline_result.digests],
@@ -3919,6 +4406,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "F+1 meta calls for F failures. Prompts are OURS. Planner/Critic stay "
             "deterministic, so llm_aegis_reproduction stays False; only the audit's "
             "per-role Digester name flips to MetaModel_llm_digester."
+        ),
+    )
+    parser.add_argument(
+        "--aegis-planner",
+        choices=AEGIS_PLANNER_MODES,
+        default=DEFAULT_AEGIS_PLANNER,
+        help=(
+            "LLM-AEGIS Planner role (paper section 4.3; REPRO-COMPLETION-PLAN "
+            "Phase A2). deterministic (default) = the byte-identical "
+            "_DeterministicPlanner failure-cluster grouping. llm = one meta-model "
+            "call builds the mutation landscape (who fails / what was tried / "
+            "which edit classes are untried) from the round's digests + "
+            "prior-ship history and emits up to K_t bucket-diversified candidate "
+            "briefs; a model-declared empty landscape short-circuits the round. "
+            "Prompts are OURS. Critic stays deterministic, so "
+            "llm_aegis_reproduction stays False; only the audit's per-role "
+            "Planner name flips to MetaModel_llm_planner."
         ),
     )
     parser.add_argument(
