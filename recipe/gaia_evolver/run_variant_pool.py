@@ -68,6 +68,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -125,6 +126,7 @@ from experiments.variant_pool.candidate_pipeline import (
     CandidatePipeline,
     CandidateSlot,
     DigesterRoundArtifact,
+    DigesterStage,
     IsolatedEvolverAdapter,
     OURS_ACTIONABILITY_THRESHOLD_PROVENANCE,
     outward_candidate_id,
@@ -196,6 +198,18 @@ FORCE_GATE_MODES = ("off", "apply", "fork")
 #: :func:`_l2_certifying_gate`.
 L2_CERT_MODES = ("auto", "off")
 DEFAULT_L2_CERT = "auto"
+
+#: --aegis-digester — Phase A1 of the LLM-AEGIS reconstruction
+#: (experiments/docs/REPRO-COMPLETION-PLAN.md). The paper's Digester (§4.3) is
+#: LLM-driven; our current adapter is a deterministic approximation.
+#: ``deterministic`` (default) keeps the byte-identical :class:`_EvidenceDigester`
+#: fallback; ``llm`` routes every FAILED task through one meta-model
+#: interpretation call and derives round-level actionability from a further call.
+#: Planner and Critic stay deterministic until A2/A3, so the audit's
+#: ``llm_aegis_reproduction`` flag stays ``False`` in both modes — only the
+#: per-role Digester name flips.
+AEGIS_DIGESTER_MODES = ("deterministic", "llm")
+DEFAULT_AEGIS_DIGESTER = "deterministic"
 
 # B4 — the repo's own hard requirement, quoted from ``agent.py`` L926-937's
 # DECISION_REQUIRED notice, front-loaded into our injected brief so the
@@ -1126,6 +1140,37 @@ class PoolCandidate:
     is_baseline: bool = False
 
 
+def _latest_settled_digests(
+    evidence: EvidenceStore,
+    pool: VariantPool,
+    context: PipelineContext,
+) -> tuple[TaskDigest, ...] | None:
+    """The latest settled per-task digest for the target's routed tasks.
+
+    Shared enumeration behind BOTH Digester adapters. Reusing it is what makes
+    the ``llm`` arm read exactly the tasks and (n_pass, n_att) outcomes the
+    deterministic :class:`_EvidenceDigester` does: the LLM only *interprets*
+    failures, it never re-derives the outcome (which comes from the harness).
+    Returns ``None`` when the selected target is no longer in the pool (the same
+    condition the deterministic adapter reports as "no longer active").
+    """
+    variant = pool.variants.get(context.target_variant)
+    if variant is None:
+        return None
+    routed = set(variant.routed_tasks)
+    latest: dict[str, TaskDigest] = {}
+    for digest in evidence.iter_digests():
+        if digest.round_idx >= context.round_idx or digest.task_id not in routed:
+            continue
+        previous = latest.get(digest.task_id)
+        if previous is None or (digest.round_idx, digest.variant_id) > (
+            previous.round_idx,
+            previous.variant_id,
+        ):
+            latest[digest.task_id] = digest
+    return tuple(latest[task_id] for task_id in sorted(latest))
+
+
 @dataclass
 class _EvidenceDigester:
     """Deterministic EvidenceStore adapter used by paper candidate mode.
@@ -1139,25 +1184,13 @@ class _EvidenceDigester:
     pool: VariantPool
 
     async def digest(self, *, context: PipelineContext) -> DigesterRoundArtifact:
-        variant = self.pool.variants.get(context.target_variant)
-        if variant is None:
+        digests = _latest_settled_digests(self.evidence, self.pool, context)
+        if digests is None:
             return DigesterRoundArtifact(
                 digests=(),
                 actionability=0.0,
                 rationale="selected target is no longer active",
             )
-        routed = set(variant.routed_tasks)
-        latest: dict[str, TaskDigest] = {}
-        for digest in self.evidence.iter_digests():
-            if digest.round_idx >= context.round_idx or digest.task_id not in routed:
-                continue
-            previous = latest.get(digest.task_id)
-            if previous is None or (digest.round_idx, digest.variant_id) > (
-                previous.round_idx,
-                previous.variant_id,
-            ):
-                latest[digest.task_id] = digest
-        digests = tuple(latest[task_id] for task_id in sorted(latest))
         unsolved = sum(1 for digest in digests if not digest.solved)
         return DigesterRoundArtifact(
             digests=digests,
@@ -1167,6 +1200,518 @@ class _EvidenceDigester:
                 f"least one settled task is unsolved (count={unsolved}), else 0.0; "
                 "threshold is OURS"
             ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# A1 — LLM Digester (first LLM-AEGIS role; paper §4.3)
+# ---------------------------------------------------------------------------
+#
+# The paper's Digester "compresses each task's traces into a structured per-task
+# summary: binary outcome, failure category (if any), implicated component
+# identifiers, and supporting evidence excerpts" (§4.3 p.10). This adapter makes
+# that step model-backed while keeping the deterministic gate and engine
+# untouched (REPRO-COMPLETION-PLAN Phase A; SPEC §4.3 principle: the shipping
+# authority stays deterministic). The prompts are OURS — a reconstruction of the
+# withheld §4.3/appendix F.1 role description, recorded as such.
+
+#: [OURS] Trajectory windowing. A single GAIA trajectory can reach ~350k tokens;
+#: failures concentrate at the end, so the window is tail-heavy. We send the
+#: frontmatter block (capped), the first HEAD chars and the last TAIL chars of
+#: the trajectory body — never the whole file — keeping every per-task call well
+#: under ~40k chars.
+_LLM_DIGESTER_HEAD_CHARS = 12_000
+_LLM_DIGESTER_TAIL_CHARS = 20_000
+_LLM_DIGESTER_FRONTMATTER_CHARS = 4_000
+
+#: [OURS] Digester per-task prompt. Frozen/audited later, so it is a module
+#: constant carrying the instruction + inline JSON schema; the per-task evidence
+#: is appended at call time. The outcome is handed in as ground truth — the model
+#: interprets, it does not re-judge pass/fail.
+_LLM_DIGESTER_TASK_PROMPT = (
+    "You are the Digester in a self-improving agent harness (the AEGIS Digester "
+    "role, paper section 4.3). A GAIA task was executed by the agent and the "
+    "harness scored it as FAILED. That pass/fail outcome is GROUND TRUTH given to "
+    "you below — do NOT re-judge whether the task passed. Your job is to INTERPRET "
+    "the failure from the trajectory evidence and compress it into a structured "
+    "per-task summary.\n"
+    "\n"
+    "Output ONLY a JSON object (no prose, no markdown fences, no code block) with "
+    "EXACTLY these four keys:\n"
+    "{\n"
+    '  "failure_category": "<short free-form label, e.g. blocked_source, '
+    'reasoning_error, tool_output_dropped, scope_ambiguity>",\n'
+    '  "implicated_components": ["<0+ identifiers from THIS vocabulary ONLY: '
+    'tools/<name>, processor/<name>, prompt/<section>, environment, '
+    'model_capability>"],\n'
+    '  "evidence_anchors": ["<0+ SHORT verbatim quotes or step references copied '
+    'from the trajectory that justify the category>"],\n'
+    '  "notes": "<one short sentence of extra context, or empty string>"\n'
+    "}\n"
+    "\n"
+    "Rules: base every field ONLY on the evidence shown; never invent tool names, "
+    "steps, or quotes; keep each quote to a line or less; keep the whole object "
+    "small. Return the JSON object and nothing else."
+)
+
+#: [OURS] Digester round-level prompt. Produces Algorithm 1's actionability a_t
+#: from the per-task summaries. The deterministic fallback made a_t binary; the
+#: LLM version is the real semantics ("is there at least one addressable failure
+#: with usable evidence").
+_LLM_DIGESTER_ROUND_PROMPT = (
+    "You are the Digester in a self-improving agent harness (the AEGIS Digester "
+    "role, paper section 4.3), now emitting the ROUND-LEVEL actionability signal "
+    "a_t for Algorithm 1's selective invocation. Below are the per-task failure "
+    "summaries you just produced for this round's target variant.\n"
+    "\n"
+    "Decide a_t in [0, 1]: is there AT LEAST ONE addressable failure with usable "
+    "evidence that a harness edit could plausibly fix this round? Score high when "
+    "yes; score low or zero when the failures are unaddressable (e.g. pure "
+    "model_capability limits, or no usable evidence) or there is nothing to fix.\n"
+    "\n"
+    "Output ONLY a JSON object (no prose, no markdown fences, no code block) with "
+    "EXACTLY these two keys:\n"
+    "{\n"
+    '  "actionability": <a number between 0 and 1 inclusive>,\n'
+    '  "rationale": "<one or two sentences justifying the value; must be '
+    'non-empty>"\n'
+    "}\n"
+    "\n"
+    "Return the JSON object and nothing else."
+)
+
+
+class _DigesterWholesaleFallback(Exception):
+    """Signal that the whole LLM Digester round must revert to deterministic.
+
+    Carries the human-readable ``reason`` that is prefixed onto the returned
+    rationale (fallback policy, task ruling 4).
+    """
+
+
+def _first_json_object(text: str) -> str | None:
+    """The first balanced ``{...}`` block in ``text`` (string-aware), or ``None``.
+
+    A brace scanner rather than a greedy first-``{``/last-``}`` slice so trailing
+    prose after a valid object (a common LLM habit) does not defeat the strict
+    ``json.loads`` the caller then runs on the returned block.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_str:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_str = False
+        elif char == '"':
+            in_str = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
+_TRAJECTORY_FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n?", re.DOTALL)
+
+
+def _split_trajectory_frontmatter(text: str) -> tuple[str, str]:
+    """Split a trajectory ``.md`` into ``(frontmatter, body)``.
+
+    The recipe writes ``<frontmatter>\\n\\n<body>`` where the frontmatter is the
+    ``---``-delimited YAML block (:func:`recipe.gaia_evolver.run.
+    _render_trajectory_frontmatter`). When no frontmatter is present the whole
+    text is the body.
+    """
+    match = _TRAJECTORY_FRONTMATTER_RE.match(text)
+    if match is None:
+        return "", text
+    frontmatter = text[: match.end()].rstrip("\n")
+    body = text[match.end() :].lstrip("\n")
+    return frontmatter, body
+
+
+@dataclass
+class _LLMDigester:
+    """Model-backed Digester (paper §4.3), first of the three LLM-AEGIS roles.
+
+    Reads exactly the tasks/outcomes the deterministic :class:`_EvidenceDigester`
+    does (:func:`_latest_settled_digests`) and splits them by outcome:
+
+    * **PASSED tasks** keep the compact deterministic digest verbatim with **no
+      LLM call**. [OURS] declared cost choice: a passing task carries no failure
+      to interpret, so spending a meta-model call on it buys nothing; only
+      failures are worth the tokens. The call model per round is therefore
+      ``F failed tasks -> F + 1`` calls (one interpretation per failure, plus one
+      round-level actionability call when ``F >= 1``; ``F == 0`` makes zero calls
+      and a_t = 0.0).
+    * **FAILED tasks** each get ONE meta-model call returning structured JSON
+      (failure_category / implicated_components / evidence_anchors / notes) which
+      is mapped onto :class:`TaskDigest`. The harness-decided ``outcome`` and the
+      cross-round ``prior_history`` are preserved untouched.
+
+    Robustness (task rulings 3-4): a per-task parse/validation failure retries
+    once with the error fed back, then falls back to the deterministic digest for
+    THAT task only; a provider error or a round-level double-failure reverts the
+    WHOLE round to what :class:`_EvidenceDigester` would return, with the
+    rationale prefixed ``llm_digester_fell_back:``. A round never dies here.
+
+    Audit route (task ruling 3): the pipeline builds its ``AuditRecord`` list from
+    the returned :class:`DigesterRoundArtifact` alone — a stage cannot push into
+    that list — so per-task and wholesale fallbacks are recorded inside the round
+    ``rationale`` string (phrased ``digester_fallback(disposition=fallback): ...``)
+    rather than as separate audit records. The active-mode adapter name is set
+    truthfully by the recipe (``MetaModel_llm_digester``); ``llm_aegis_reproduction``
+    stays ``False`` until the Planner and Critic are LLM too.
+    """
+
+    evidence: EvidenceStore
+    pool: VariantPool
+    provider: Any
+    tasks_by_id: Mapping[str, Any]
+    run_dir: Path
+    fallback: _EvidenceDigester
+
+    async def digest(self, *, context: PipelineContext) -> DigesterRoundArtifact:
+        base = _latest_settled_digests(self.evidence, self.pool, context)
+        if base is None:
+            # Target gone from the pool: identical to the deterministic result,
+            # not a fallback — return it unprefixed.
+            return await self.fallback.digest(context=context)
+        try:
+            return await self._digest_llm(context, base)
+        except _DigesterWholesaleFallback as exc:
+            return await self._wholesale_fallback(context, str(exc))
+        except Exception as exc:  # noqa: BLE001 - provider/other error must not kill the round
+            return await self._wholesale_fallback(
+                context, f"{type(exc).__name__}: {exc}"
+            )
+
+    async def _digest_llm(
+        self,
+        context: PipelineContext,
+        base: tuple[TaskDigest, ...],
+    ) -> DigesterRoundArtifact:
+        passed = [digest for digest in base if digest.solved]
+        failed = [digest for digest in base if not digest.solved]
+
+        out_digests: list[TaskDigest] = list(passed)
+        fallback_notes: list[str] = []
+        interpreted = 0
+        for digest in failed:
+            new_digest, note = await self._interpret_failed_task(context, digest)
+            out_digests.append(new_digest)
+            if note is None:
+                interpreted += 1
+            else:
+                fallback_notes.append(note)
+
+        if not failed:
+            actionability = 0.0
+            core = (
+                "llm_digester: no settled routed task is unsolved; no addressable "
+                "failure this round, so a_t=0.0 (derived locally, no LLM call)"
+            )
+        else:
+            actionability, round_rationale = await self._round_actionability(
+                context, out_digests
+            )
+            core = f"llm_digester: {round_rationale}"
+
+        rationale = self._compose_rationale(
+            core=core,
+            n_passed=len(passed),
+            n_failed=len(failed),
+            interpreted=interpreted,
+            fallback_notes=fallback_notes,
+        )
+        return DigesterRoundArtifact(
+            digests=tuple(out_digests),
+            actionability=actionability,
+            rationale=rationale,
+        )
+
+    async def _interpret_failed_task(
+        self,
+        context: PipelineContext,
+        digest: TaskDigest,
+    ) -> tuple[TaskDigest, str | None]:
+        """One failed task -> (mapped TaskDigest, None) or (deterministic, note).
+
+        Provider exceptions propagate (they are wholesale). Only parse/validation
+        failures are handled here: retry once with the error appended, then fall
+        back to the deterministic digest for this task and return an audit note.
+        """
+        window = self._trajectory_window(digest)
+        if window is None:
+            return digest, (
+                f"{digest.task_id}: no readable trajectory to interpret; kept "
+                "deterministic digest"
+            )
+        frontmatter, head, tail = window
+        question = self._question_for(digest.task_id)
+
+        error: str | None = None
+        for _attempt in range(2):
+            prompt = self._build_task_prompt(
+                digest=digest,
+                question=question,
+                frontmatter=frontmatter,
+                head=head,
+                tail=tail,
+                retry_error=error,
+            )
+            text = await self._complete(prompt)
+            parsed, error = self._parse_task_json(text)
+            if parsed is not None:
+                return self._map_task_digest(digest, parsed), None
+        return digest, (
+            f"{digest.task_id}: LLM interpretation failed twice ({error}); kept "
+            "deterministic digest"
+        )
+
+    async def _round_actionability(
+        self,
+        context: PipelineContext,
+        out_digests: Sequence[TaskDigest],
+    ) -> tuple[float, str]:
+        summary = self._round_summary(out_digests)
+        error: str | None = None
+        for _attempt in range(2):
+            prompt = self._build_round_prompt(summary, retry_error=error)
+            text = await self._complete(prompt)
+            parsed, error = self._parse_round_json(text)
+            if parsed is not None:
+                return parsed
+        raise _DigesterWholesaleFallback(
+            f"round actionability failed twice ({error})"
+        )
+
+    # -- prompt assembly ------------------------------------------------------
+
+    def _build_task_prompt(
+        self,
+        *,
+        digest: TaskDigest,
+        question: str,
+        frontmatter: str,
+        head: str,
+        tail: str,
+        retry_error: str | None,
+    ) -> str:
+        n_pass, n_att = digest.outcome
+        parts = [
+            _LLM_DIGESTER_TASK_PROMPT,
+            f"\n\nTASK ID: {digest.task_id}",
+            f"\nTASK OUTCOME (harness ground truth, do not re-derive): FAILED "
+            f"(n_pass={n_pass} of n_att={n_att})",
+            f"\n\nTASK QUESTION:\n{question}" if question else "",
+            f"\n\n--- TRAJECTORY FRONTMATTER ---\n{frontmatter}" if frontmatter else "",
+            f"\n\n--- TRAJECTORY HEAD (first {_LLM_DIGESTER_HEAD_CHARS} chars) ---\n{head}",
+            f"\n\n--- TRAJECTORY TAIL (last {_LLM_DIGESTER_TAIL_CHARS} chars) ---\n{tail}"
+            if tail
+            else "",
+        ]
+        if retry_error:
+            parts.append(
+                "\n\nYour previous response was rejected: "
+                f"{retry_error}. Return ONLY a single valid JSON object with the "
+                "four required keys and nothing else."
+            )
+        return "".join(parts)
+
+    def _build_round_prompt(self, summary: str, *, retry_error: str | None) -> str:
+        parts = [
+            _LLM_DIGESTER_ROUND_PROMPT,
+            f"\n\nPER-TASK FAILURE SUMMARIES THIS ROUND:\n{summary}",
+        ]
+        if retry_error:
+            parts.append(
+                "\n\nYour previous response was rejected: "
+                f"{retry_error}. Return ONLY a single valid JSON object with the "
+                "two required keys and nothing else."
+            )
+        return "".join(parts)
+
+    @staticmethod
+    def _round_summary(out_digests: Sequence[TaskDigest]) -> str:
+        lines: list[str] = []
+        for digest in out_digests:
+            if digest.solved:
+                continue
+            components = ", ".join(digest.implicated_components) or "none"
+            has_evidence = "yes" if digest.evidence_anchors else "no"
+            lines.append(
+                f"- {digest.task_id}: category={digest.failure_category or 'unknown'}; "
+                f"components=[{components}]; has_evidence={has_evidence}"
+            )
+        return "\n".join(lines) if lines else "(no unsolved tasks)"
+
+    # -- parsing / validation -------------------------------------------------
+
+    def _parse_task_json(self, text: str) -> tuple[dict | None, str | None]:
+        block = _first_json_object(text)
+        if block is None:
+            return None, "no JSON object found in response"
+        try:
+            obj = json.loads(block)
+        except (ValueError, TypeError) as exc:
+            return None, f"json.loads failed: {exc}"
+        if not isinstance(obj, dict):
+            return None, "top-level JSON value is not an object"
+        category = obj.get("failure_category")
+        if not isinstance(category, str) or not category.strip():
+            return None, "failure_category must be a non-empty string"
+        return obj, None
+
+    def _parse_round_json(
+        self, text: str
+    ) -> tuple[tuple[float, str] | None, str | None]:
+        block = _first_json_object(text)
+        if block is None:
+            return None, "no JSON object found in response"
+        try:
+            obj = json.loads(block)
+        except (ValueError, TypeError) as exc:
+            return None, f"json.loads failed: {exc}"
+        if not isinstance(obj, dict):
+            return None, "top-level JSON value is not an object"
+        raw = obj.get("actionability")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None, "actionability must be a number in [0, 1]"
+        value = float(raw)
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            return None, f"actionability {raw!r} is out of range [0, 1]"
+        rationale = obj.get("rationale")
+        if not isinstance(rationale, str) or not rationale.strip():
+            return None, "rationale must be a non-empty string"
+        return (value, rationale.strip()), None
+
+    def _map_task_digest(self, digest: TaskDigest, obj: Mapping[str, Any]) -> TaskDigest:
+        category = str(obj.get("failure_category") or "").strip() or (
+            digest.failure_category or "uncategorized_failure"
+        )
+        components = [
+            str(item).strip()
+            for item in (obj.get("implicated_components") or [])
+            if str(item).strip()
+        ]
+        model_anchors = [
+            str(item).strip()
+            for item in (obj.get("evidence_anchors") or [])
+            if str(item).strip()
+        ]
+        # Keep the trajectory path anchor like the deterministic digest does,
+        # then the model's anchors, then the free-form ``notes`` (TaskDigest has
+        # no notes field; folding it into evidence_anchors keeps the LLM's
+        # interpretation auditable — [OURS] mapping choice).
+        anchors: list[str] = list(digest.evidence_anchors)
+        for anchor in model_anchors:
+            if anchor not in anchors:
+                anchors.append(anchor)
+        notes = str(obj.get("notes") or "").strip()
+        if notes:
+            anchors.append(f"note: {notes}")
+        return TaskDigest(
+            task_id=digest.task_id,
+            round_idx=digest.round_idx,
+            variant_id=digest.variant_id,
+            outcome=digest.outcome,
+            failure_category=category,
+            implicated_components=components,
+            evidence_anchors=anchors,
+            prior_history=list(digest.prior_history),
+        )
+
+    # -- trajectory windowing -------------------------------------------------
+
+    def _trajectory_window(self, digest: TaskDigest) -> tuple[str, str, str] | None:
+        """``(frontmatter, head, tail)`` for a failed task, or ``None`` if unreadable."""
+        text = self._trajectory_text(digest)
+        if text is None:
+            return None
+        frontmatter, body = _split_trajectory_frontmatter(text)
+        frontmatter = frontmatter[:_LLM_DIGESTER_FRONTMATTER_CHARS]
+        if len(body) <= _LLM_DIGESTER_HEAD_CHARS + _LLM_DIGESTER_TAIL_CHARS:
+            # Short enough to send whole (no overlap between head and tail).
+            return frontmatter, body, ""
+        head = body[:_LLM_DIGESTER_HEAD_CHARS]
+        tail = body[-_LLM_DIGESTER_TAIL_CHARS:]
+        return frontmatter, head, tail
+
+    def _trajectory_text(self, digest: TaskDigest) -> str | None:
+        for anchor in digest.evidence_anchors:
+            path_part = str(anchor).split("#", 1)[0].strip()
+            if not path_part:
+                continue
+            path = Path(path_part)
+            if not path.is_absolute():
+                path = self.run_dir / path_part
+            if path.is_file():
+                try:
+                    return path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+        return None
+
+    def _question_for(self, task_id: str) -> str:
+        task = self.tasks_by_id.get(task_id)
+        if task is None:
+            return ""
+        return str(getattr(task, "question", "") or getattr(task, "description", "") or "")
+
+    # -- LLM plumbing / fallback ---------------------------------------------
+
+    async def _complete(self, prompt: str) -> str:
+        # Plain async completion on the recipe's meta provider — NOT
+        # MetaAgent.evolve. Temperature is left at the provider default.
+        from harnessx.core.events import Message
+
+        response = await self.provider.complete(
+            [Message(role="user", content=prompt)], []
+        )
+        return str(getattr(response, "content", "") or "")
+
+    @staticmethod
+    def _compose_rationale(
+        *,
+        core: str,
+        n_passed: int,
+        n_failed: int,
+        interpreted: int,
+        fallback_notes: Sequence[str],
+    ) -> str:
+        parts = [
+            core,
+            (
+                f" [llm_digester bookkeeping: passed={n_passed} kept deterministic "
+                f"(no LLM), failed={n_failed}, llm_interpreted={interpreted}, "
+                f"per_task_fallbacks={len(fallback_notes)}]"
+            ),
+        ]
+        for note in fallback_notes:
+            parts.append(f" digester_fallback(disposition=fallback): {note};")
+        return "".join(parts)
+
+    async def _wholesale_fallback(
+        self, context: PipelineContext, reason: str
+    ) -> DigesterRoundArtifact:
+        base = await self.fallback.digest(context=context)
+        return DigesterRoundArtifact(
+            digests=base.digests,
+            actionability=base.actionability,
+            rationale=f"llm_digester_fell_back: {reason}; " + base.rationale,
+            contract_mode=base.contract_mode,
         )
 
 
@@ -1288,6 +1833,14 @@ class VariantPoolRecipe:
         if self.l2_cert not in L2_CERT_MODES:
             raise ValueError(
                 f"l2_cert must be one of {L2_CERT_MODES}, got {self.l2_cert!r}"
+            )
+        # --aegis-digester: Phase A1. ``deterministic`` (default) keeps the
+        # byte-identical _EvidenceDigester; ``llm`` model-backs the Digester role.
+        self.aegis_digester = str(getattr(args, "aegis_digester", DEFAULT_AEGIS_DIGESTER))
+        if self.aegis_digester not in AEGIS_DIGESTER_MODES:
+            raise ValueError(
+                f"aegis_digester must be one of {AEGIS_DIGESTER_MODES}, "
+                f"got {self.aegis_digester!r}"
             )
         self.target_strategy = str(
             getattr(
@@ -1593,6 +2146,38 @@ class VariantPoolRecipe:
         self._round_candidates[cand.candidate_id] = cand
         return cand
 
+    def _make_digester(self) -> DigesterStage:
+        """The active Digester adapter (--aegis-digester).
+
+        ``deterministic`` (default) returns the byte-identical
+        :class:`_EvidenceDigester`. ``llm`` returns the model-backed
+        :class:`_LLMDigester`, sharing the recipe's meta provider
+        (``meta_agent.inner_model``'s ``main`` role — the same provider the
+        meta calls use) and keeping the deterministic adapter as its fallback so
+        a wholesale revert is byte-identical to the deterministic arm.
+        """
+        deterministic = _EvidenceDigester(self.evidence, self.pool)
+        if self.aegis_digester != "llm":
+            return deterministic
+        provider = self.meta_agent.inner_model.get("main")
+        return _LLMDigester(
+            evidence=self.evidence,
+            pool=self.pool,
+            provider=provider,
+            tasks_by_id=self.tasks_by_id,
+            run_dir=self.run_dir,
+            fallback=deterministic,
+        )
+
+    @property
+    def _digester_adapter_name(self) -> str:
+        """Truthful pipeline-audit name for the active Digester role."""
+        return (
+            "MetaModel_llm_digester"
+            if self.aegis_digester == "llm"
+            else "deterministic_evidence_store_fallback"
+        )
+
     async def _run_paper_candidate_pipeline(
         self,
         variant: Any,
@@ -1607,7 +2192,7 @@ class VariantPoolRecipe:
                 f"paper candidate round R{round_idx} has no settled trajectories for {vid}"
             )
         output_root = self.run_dir / f"R{round_idx}" / vid / "pipeline"
-        digester = _EvidenceDigester(self.evidence, self.pool)
+        digester = self._make_digester()
         planner = _DeterministicPlanner(self.candidates_per_round)
 
         async def _producer(
@@ -1869,10 +2454,12 @@ class VariantPoolRecipe:
             "round": round_idx,
             "target_variant": target_variant,
             "adapter": {
-                "digester": "deterministic_evidence_store_fallback",
+                "digester": self._digester_adapter_name,
                 "planner": "deterministic_failure_cluster_fallback",
                 "evolver": "MetaAgent_isolated_slots",
                 "critic": "deterministic_portfolio_fallback",
+                # Stays False until ALL THREE roles (Digester/Planner/Critic) are
+                # LLM; A1 only model-backs the Digester (per-role name above).
                 "llm_aegis_reproduction": False,
             },
             "digests": [digest.to_dict() for digest in pipeline_result.digests],
@@ -2901,7 +3488,12 @@ class VariantPoolRecipe:
                     else "legacy ablation: all active routed variants"
                 ),
                 "candidate_pipeline_adapter": (
-                    "deterministic Digester/Planner/Critic fallbacks + MetaAgent Evolver"
+                    (
+                        "LLM Digester (A1) + deterministic Planner/Critic fallbacks "
+                        "+ MetaAgent Evolver"
+                        if self.aegis_digester == "llm"
+                        else "deterministic Digester/Planner/Critic fallbacks + MetaAgent Evolver"
+                    )
                     if self.candidate_mode == "paper"
                     else "legacy MetaAgent single proposal"
                 ),
@@ -3074,7 +3666,11 @@ def _build_experiment_lock(
             ),
             candidate_limit=candidate_limit if paper_mode else 1,
             candidate_pipeline_adapter=(
-                "deterministic_evidence_digester_planner_critic+llm_metaagent_evolver"
+                (
+                    "llm_digester+deterministic_planner_critic+llm_metaagent_evolver"
+                    if str(getattr(args, "aegis_digester", DEFAULT_AEGIS_DIGESTER)) == "llm"
+                    else "deterministic_evidence_digester_planner_critic+llm_metaagent_evolver"
+                )
                 if paper_mode
                 else "legacy_metaagent_single_proposal_per_active_variant"
             ),
@@ -3297,6 +3893,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "the output does not survive. Only fires for --manifest-mode repo paper "
             "candidates; the paper manifest arm is untouched. off = today's built-in "
             "declared-only stage 4, byte-identical. Recorded as deviation M-22."
+        ),
+    )
+    parser.add_argument(
+        "--aegis-digester",
+        choices=AEGIS_DIGESTER_MODES,
+        default=DEFAULT_AEGIS_DIGESTER,
+        help=(
+            "LLM-AEGIS Digester role (paper section 4.3; REPRO-COMPLETION-PLAN "
+            "Phase A1). deterministic (default) = the byte-identical "
+            "_EvidenceDigester fallback. llm = each FAILED task gets one meta-model "
+            "interpretation call (structured failure_category/implicated_components/"
+            "evidence_anchors) and round actionability a_t comes from a further "
+            "call; PASSED tasks stay deterministic (no call), so a round costs "
+            "F+1 meta calls for F failures. Prompts are OURS. Planner/Critic stay "
+            "deterministic, so llm_aegis_reproduction stays False; only the audit's "
+            "per-role Digester name flips to MetaModel_llm_digester."
         ),
     )
     parser.add_argument(
