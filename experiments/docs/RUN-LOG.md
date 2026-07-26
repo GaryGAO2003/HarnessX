@@ -176,8 +176,21 @@
   的初判正在被推翻,更准确口径="撑得起,但契约必须把 schema 词表逐项挑明"——本身
   即 §7.7 开源 meta 观察点。
 
+### a1smoke — LLM Digester 首次实战:全绿 + 首次真实触发选择性调用短路
+- 配置:calib6 / rounds 2 / pass@1 / repo 模式 / `--aegis-digester llm`(其余角色确定性)
+- **Digester 判决:全绿**——审计如实 `MetaModel_llm_digester`;失败任务归因高质量
+  (search_failure→[tools/WebSearch, model_capability] / budget_exceeded→
+  [processor/TokenBudgetProcessor] / unretrievable_media→[tools/WebSearch,WebFetch],
+  受控词表);通过任务零 LLM 调用;实值 a_t=0.9 + 论证式 rationale;零回退。
+- **意外首触发**:a_t=0.9 < α=1.0 → `selective_invocation no_op` 整轮跳过——
+  EXP-E07 前半(α 门)首次真实开火,但暴露**阈值默认错配**:recipe CLI 默认 α=1.0
+  (二值 digester 时代校准),库层 OURS 默认=0.5。→ 修法排队(llm 模式默认 0.5,
+  显式传参覆盖;等 A3 落地,同文件纪律);a1smoke2 用显式 0.5 复验全链。
+- 时序纪律:A3 coder 在 run_variant_pool.py 施工期间**冻结一切 live run**
+  (启动会导入半成品代码)。
+
 ### 会话成本合计(实测)
-¥194.14 → ¥173.64(至 paper1 止 **¥20.50**;paper2/paper3/a1smoke 待收口后回填)
+¥194.14 → ¥168.94(**¥25.20**:十个 run;paper2+paper3+a1smoke 合计 ¥7.55)
 
 ### 本日提交索引(全部已推 lab)
 | commit | 内容 |
