@@ -139,8 +139,27 @@
   organic1(含)之前无桥接;此后的 run 带桥接**。ffmpeg 仍缺(记录在案,pilot 校准时
   与 whisper 一并定)。冻结时环境清单进 lock。
 
+### paper1 — 忠实臂首考:阴性,但死因反转
+- 配置:calib6 / rounds 2 / pass@1 / K_t=2 / `--manifest-mode paper`;成本 ¥2.85
+  (176.49→173.64);R0 基线 4/6 pass@1(桥接+守则环境下最高 R0,单点不作声明)
+- 判决:两候选 ×(首发+retry)**四次尝试全部** PIPELINE_PROPOSAL(不写 config.yaml),
+  零候选达门。P1 修复生效确认(报告出现 applied/forked 行)。
+- **死因反转**:并非"Table 9 负担过重"——四次全都写出了接近合法的 manifest.yaml
+  (candidate_id 用外向别名 C-0101 ✓、双 capability_evidence 带真实代码行引证、
+  结构化 file_changes/predicted_impact/attribution_signature)+ candidates.md,
+  **唯独没写 config.yaml 和声明的工具文件**——"分析完不提交"老病根在 paper 负担下
+  100% 复发(同模型在 repo 模式多数轮能写)。注:该 manifest 即便有 config 也会死
+  在第 4 关(tools 桶无 'Level 2' claim;paper 模式无机器兜底,按设计)。
+- **意外收获(真 harness 缺陷,meta 发现)**:WebFetch 经 html2text
+  `ignore_images=True`(harnessx/tools/builtin/web_fetch.py:35)**主动丢弃图像**,
+  媒体任务只见 alt-text 是我们自己的抓取配置所致——**留作演化食物,不手修**。
+- 后续:①paper 契约补"写作顺序"条款(先 config.yaml+工具文件、后 manifest/
+  candidates;"描述了未写出的 config 的 manifest = 自动失败轮")+ tools 桶 L2 claim
+  提醒——**等 A1 coder 落地后再改**(同文件并发冲突);→ paper2 复验(~¥4);
+  ②若复验仍阴性 → 论文口径:"忠实臂需更强 meta(原文 Opus 4.6),n=6 证据"。
+
 ### 会话成本合计(实测,最终)
-¥194.14 → ¥176.49(**¥17.65**:七个 run + 全部 meta 调用;organic1 单跑 ¥6.18)
+¥194.14 → ¥173.64(**¥20.50**:八个 run + 全部 meta 调用;organic1 ¥6.18、paper1 ¥2.85)
 
 ### 本日提交索引(全部已推 lab)
 | commit | 内容 |
