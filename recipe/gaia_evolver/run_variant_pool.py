@@ -72,7 +72,7 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -143,7 +143,7 @@ from experiments.variant_pool.experiment_lock import (
     UNRESOLVED,
     sha256_file,
 )
-from experiments.variant_pool.gate import Decision
+from experiments.variant_pool.gate import Decision, GateResult, TaskEval, run_gate
 from experiments.variant_pool.ledger import SuccessLedger
 from experiments.variant_pool.manifest import (
     CandidateArtifact,
@@ -179,6 +179,12 @@ MANIFEST_MODES = ("repo", "paper")
 DEFAULT_MANIFEST_MODE = "repo"
 #: One Critic-style revision is allowed on a no-config outcome (paper §4.3).
 DEFAULT_EVOLVE_RETRY = 1
+
+#: --force-gate — TEMPORARY plumbing-probe modes. ``off`` is the default and
+#: keeps the deterministic gate byte-identical; ``apply``/``fork`` override the
+#: gate's final decision so the settlement chain runs on real data. See
+#: :func:`_forced_gate`.
+FORCE_GATE_MODES = ("off", "apply", "fork")
 
 # B4 — the repo's own hard requirement, quoted from ``agent.py`` L926-937's
 # DECISION_REQUIRED notice, front-loaded into our injected brief so the
@@ -240,6 +246,148 @@ REPO_MANIFEST_SCHEMA_BRIEF = (
     "`hypothesis_id`. Just write `config.yaml` and your usual journal entry; you do "
     "not need to supply `capability_evidence` or a paper `attribution_signature`."
 )
+
+
+# ---------------------------------------------------------------------------
+# --force-gate plumbing probe (TEMPORARY, default-off)
+# ---------------------------------------------------------------------------
+#
+# The deterministic gate's APPLY/FORK settlement branches (engine._settle_round)
+# had never been exercised by real data: organic candidates so far only produced
+# REJECT or no-op. This switch overrides the gate's *final* decision so the whole
+# downstream settlement chain (pool.fork / journal inheritance / next-round
+# multi-variant routing / reporting) runs end-to-end on a real run. It is a
+# plumbing probe, NOT a measurement: a forced APPLY/FORK ships a candidate the
+# gate did not actually clear, so any score from a forced run is tainted — and
+# every artefact says so (pool_report.md banner + experiment.lock.json warning).
+# The gate callable is injected into the engine (VariantPoolEngine(..., gate=...)),
+# so this lives entirely in the recipe layer; nothing under experiments/ or
+# harnessx/ is modified.
+
+
+def _forced_gate(
+    mode: str,
+    real_gate: Callable[..., GateResult] = run_gate,
+) -> Callable[..., GateResult]:
+    """Wrap ``run_gate`` so its final decision can be forced to APPLY/FORK.
+
+    ``mode="off"`` returns ``real_gate`` **unchanged** (identity, not a copy), so
+    a normal run's gate path is byte-identical. For ``apply``/``fork`` the
+    returned callable mirrors
+    :func:`experiments.variant_pool.gate.run_gate`'s signature exactly, always
+    runs the real gate first (keeping its full result for the audit), and
+    overrides the outcome **only** when the real gate reached stage 5
+    (``real.decision is not None``). A candidate that died at stages 1-4
+    (manifest incompleteness, canonicalize/smoke/round-trip) is returned
+    untouched: a probe must never ship a candidate that failed an integrity
+    check.
+    """
+    if mode not in FORCE_GATE_MODES:
+        raise ValueError(f"force_gate mode must be one of {FORCE_GATE_MODES}, got {mode!r}")
+    if mode == "off":
+        return real_gate
+
+    def _gate(
+        candidate: Any,
+        parent_config: Any,
+        ledger: Any,
+        tk_results: Iterable[TaskEval],
+        *,
+        min_fork: tuple[int, int] = DEFAULT_MIN_FORK,
+        check_manifest: Callable[[Any], list[str]] | None = None,
+        check_canonicalize: Callable[[Any, Any], tuple[bool, str]] | None = None,
+        check_smoke: Callable[[Any], tuple[bool, str]] | None = None,
+        check_roundtrip: Callable[[Any], tuple[bool, str]] | None = None,
+    ) -> GateResult:
+        # tk_results may be a one-shot iterable; materialise once so the real
+        # gate and any synthesis see the same task evals.
+        evals = list(tk_results)
+        real = real_gate(
+            candidate,
+            parent_config,
+            ledger,
+            evals,
+            min_fork=min_fork,
+            check_manifest=check_manifest,
+            check_canonicalize=check_canonicalize,
+            check_smoke=check_smoke,
+            check_roundtrip=check_roundtrip,
+        )
+        # Stages 1-4 failed (integrity check) -> never override, never ship.
+        if real.decision is None:
+            return real
+        if mode == "fork":
+            return _force_to_fork(real, evals)
+        return _force_to_apply(real)
+
+    return _gate
+
+
+def _force_to_fork(real: GateResult, evals: list[TaskEval]) -> GateResult:
+    """Rewrite a stage-5 result into FORK, synthesising ``improved`` if empty.
+
+    The engine feeds ``gate_result.improved`` to ``pool.fork(parent, improved,
+    round)`` as the forked child's task assignment (engine.py:480-487), so a
+    forced FORK with an empty ``improved`` would spawn a task-less child. When
+    the real gate found no improved task, synthesise the assignment from the
+    tasks whose after-state is failed (``n_pass == 0``); if none are failed,
+    fall back to all evaluated task ids. The synthesised set is echoed in
+    ``archive_reason`` so the fabrication is auditable. ``regressed`` is kept
+    from the real result.
+    """
+    if real.decision is Decision.FORK:
+        return real
+    if real.improved:
+        improved = frozenset(real.improved)
+        synthesized: list[str] | None = None
+    else:
+        failed = {ev.task_id for ev in evals if ev.after[0] == 0}
+        if not failed:
+            failed = {ev.task_id for ev in evals}
+        improved = frozenset(failed)
+        synthesized = sorted(improved)
+    archive_reason = (
+        f"FORCED_GATE(fork): real_decision={real.decision.value}; "
+        f"synthesized_improved={synthesized or None}; {real.archive_reason}"
+    )
+    return GateResult(
+        passed=True,
+        failed_stage=None,
+        decision=Decision.FORK,
+        archive_reason=archive_reason,
+        improved=improved,
+        regressed=frozenset(real.regressed),
+    )
+
+
+def _force_to_apply(real: GateResult) -> GateResult:
+    """Rewrite a stage-5 result into APPLY, keeping the real improved/regressed."""
+    if real.decision is Decision.APPLY:
+        return real
+    archive_reason = (
+        f"FORCED_GATE(apply): real_decision={real.decision.value}; {real.archive_reason}"
+    )
+    return GateResult(
+        passed=True,
+        failed_stage=None,
+        decision=Decision.APPLY,
+        archive_reason=archive_reason,
+        improved=frozenset(real.improved),
+        regressed=frozenset(real.regressed),
+    )
+
+
+def _forced_gate_banner(mode: str) -> str:
+    """One-line pool_report.md taint banner; empty string when ``off``.
+
+    Empty when off so a normal run's report is byte-identical.
+    """
+    if mode == "off":
+        return ""
+    return (
+        f"> ⚠ FORCED GATE MODE: {mode} — plumbing probe; decisions are "
+        "overridden, results are NOT measurements."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +855,14 @@ class VariantPoolRecipe:
         self.evolve_retry = int(getattr(args, "evolve_retry", DEFAULT_EVOLVE_RETRY))
         if self.evolve_retry < 0:
             raise ValueError(f"evolve_retry must be >= 0, got {self.evolve_retry}")
+        # --force-gate: TEMPORARY plumbing probe. ``off`` keeps the gate
+        # byte-identical (the engine receives the real ``run_gate``); ``apply``/
+        # ``fork`` override the final decision to exercise the settlement chain.
+        self.force_gate = str(getattr(args, "force_gate", "off"))
+        if self.force_gate not in FORCE_GATE_MODES:
+            raise ValueError(
+                f"force_gate must be one of {FORCE_GATE_MODES}, got {self.force_gate!r}"
+            )
         self.target_strategy = str(
             getattr(
                 args,
@@ -797,6 +953,9 @@ class VariantPoolRecipe:
             self.router,
             evaluate=self._evaluate,
             evolve=self._evolve,
+            # off -> _forced_gate returns run_gate itself (identity), so the gate
+            # path is byte-identical; apply/fork inject the override wrapper.
+            gate=_forced_gate(self.force_gate, run_gate),
             evidence=self.evidence,
             patience=patience,
             min_fork=min_fork,
@@ -2191,6 +2350,9 @@ class VariantPoolRecipe:
         """Write the RunReport (final+peak+curve+by-level), pool axis, comparison.json."""
         try:
             md = self.report.to_markdown(level_map=self.level_map)
+            banner = _forced_gate_banner(self.force_gate)
+            if banner:
+                md = f"{banner}\n\n{md}"
             md += "\n" + self._manifest_mode_report_section()
             (self.run_dir / "pool_report.md").write_text(md, encoding="utf-8")
             (self.run_dir / "pool_report.json").write_text(
@@ -2370,6 +2532,20 @@ def _build_experiment_lock(
             "worst_first" if paper_mode else "all_active_variants",
         )
     )
+
+    # --force-gate taint. Hyperparams is a frozen dataclass with no free-form
+    # field and experiment_lock.py must not be modified, so the honest,
+    # least-invasive record is a provenance warning (persisted in the lock and
+    # surfaced by every reader). Only emitted when the probe is on, so an
+    # ``off`` run's lock stays byte-identical.
+    force_gate_mode = str(getattr(args, "force_gate", "off"))
+    if force_gate_mode != "off":
+        warnings.append(
+            f"force_gate={force_gate_mode} ENABLED (run_variant_pool plumbing probe): "
+            "the deterministic gate's final APPLY/FORK decision was overridden, so the "
+            "settlement chain ran on real data but the resulting scores are NOT "
+            "measurements"
+        )
 
     return ExperimentLock(
         experiment_id=run_tag,
@@ -2601,6 +2777,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "missing rather than fabricating them; paper = inject the Table 9 "
             "schema + a filled C-R10-02 example into our recipe brief and require "
             "strict paper-shaped manifest.yaml. Neither modifies harnessx/."
+        ),
+    )
+    parser.add_argument(
+        "--force-gate",
+        choices=FORCE_GATE_MODES,
+        default="off",
+        help=(
+            "TEMPORARY plumbing probe (default off). Overrides the deterministic "
+            "gate's FINAL decision so the APPLY/FORK settlement chain (pool.fork / "
+            "journal inheritance / next-round multi-variant routing / reporting) "
+            "runs end-to-end on a real run. This TAINTS results: a forced run is "
+            "NOT a measurement — the pool_report.md banner and experiment.lock.json "
+            "say so. off keeps the gate byte-identical. Stage 1-4 integrity "
+            "failures are never overridden. fork works best with --pool-k >= 2; at "
+            "K=1 the engine legitimately downgrades an infeasible fork to REJECT "
+            "(that downgrade path is itself worth exercising, so K=1 is allowed)."
         ),
     )
     parser.add_argument(
