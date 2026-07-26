@@ -52,6 +52,32 @@ POOL_EVENT_KINDS = ("fork", "retire")
 IMPLICIT_VARIANT = "H0"
 
 
+def _validate_attempt_counts(
+    *,
+    label: str,
+    n_att: int,
+    n_pass: int,
+    infra_failures: int,
+    budget_exhaustions: int,
+) -> None:
+    """Validate mutually exclusive attempt outcomes.
+
+    Infrastructure errors and runtime budget exhaustion are different failure
+    modes.  Both remain inside ``n_att`` (and therefore score as failures), but
+    an attempt cannot be counted in both buckets or also be a pass.
+    """
+    if min(n_att, n_pass, infra_failures, budget_exhaustions) < 0:
+        raise ValueError(f"{label}: negative counts")
+    if n_pass > n_att:
+        raise ValueError(f"{label}: n_pass={n_pass} exceeds n_att={n_att}")
+    classified_failures = infra_failures + budget_exhaustions
+    if classified_failures > n_att - n_pass:
+        raise ValueError(
+            f"{label}: {classified_failures} classified failures cannot coexist with "
+            f"{n_pass} passes in {n_att} attempts — a failed attempt is still an attempt"
+        )
+
+
 @dataclass
 class TaskResult:
     """One task's rollouts in one round: ``n_att`` attempts, ``n_pass`` passes.
@@ -74,17 +100,16 @@ class TaskResult:
     n_pass: int
     variant_id: str | None = None
     infra_failures: int = 0
+    budget_exhaustions: int = 0
 
     def __post_init__(self) -> None:
-        if self.n_att < 0 or self.n_pass < 0 or self.infra_failures < 0:
-            raise ValueError(f"{self.task_id}: negative counts in {self}")
-        if self.n_pass > self.n_att:
-            raise ValueError(f"{self.task_id}: n_pass={self.n_pass} exceeds n_att={self.n_att}")
-        if self.infra_failures > self.n_att - self.n_pass:
-            raise ValueError(
-                f"{self.task_id}: {self.infra_failures} infra failures cannot coexist with "
-                f"{self.n_pass} passes in {self.n_att} attempts — a failed attempt is still an attempt (A.3)"
-            )
+        _validate_attempt_counts(
+            label=self.task_id,
+            n_att=self.n_att,
+            n_pass=self.n_pass,
+            infra_failures=self.infra_failures,
+            budget_exhaustions=self.budget_exhaustions,
+        )
 
     @property
     def solved(self) -> bool:
@@ -104,6 +129,59 @@ class TaskResult:
             "n_pass": self.n_pass,
             "variant_id": self.variant_id,
             "infra_failures": self.infra_failures,
+            "budget_exhaustions": self.budget_exhaustions,
+        }
+
+
+@dataclass
+class CandidateTaskResult:
+    """One candidate-gate measurement, never a deployed-pool score.
+
+    ``target_variant_id`` identifies the variant the edit was proposed for. It
+    is deliberately not called ``variant_id``: after a FORK the measured edit
+    is deployed by the child, after a REJECT it is deployed by nobody, and
+    conflating either case with the active carrier corrupts routing and final
+    score diagnostics.
+    """
+
+    task_id: str
+    round_idx: int
+    candidate_id: str
+    target_variant_id: str
+    n_att: int
+    n_pass: int
+    decision: str | None = None
+    infra_failures: int = 0
+    budget_exhaustions: int = 0
+    failed_stage: str | None = None
+    archive_reason: str = ""
+    skipped_reason: str | None = None
+    evaluated: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_attempt_counts(
+            label=f"{self.candidate_id}:{self.task_id}",
+            n_att=self.n_att,
+            n_pass=self.n_pass,
+            infra_failures=self.infra_failures,
+            budget_exhaustions=self.budget_exhaustions,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "round_idx": self.round_idx,
+            "candidate_id": self.candidate_id,
+            "target_variant_id": self.target_variant_id,
+            "n_att": self.n_att,
+            "n_pass": self.n_pass,
+            "decision": self.decision,
+            "infra_failures": self.infra_failures,
+            "budget_exhaustions": self.budget_exhaustions,
+            "failed_stage": self.failed_stage,
+            "archive_reason": self.archive_reason,
+            "skipped_reason": self.skipped_reason,
+            "evaluated": self.evaluated,
         }
 
 
@@ -144,8 +222,16 @@ class RunReport:
     can never be quoted without its configuration.
     """
 
+    #: Settled, deployed active-pool measurements. All headline/process metrics
+    #: consume this stream and no other.
     results: list[TaskResult] = field(default_factory=list)
+    #: Pre-settlement candidate gate measurements, diagnostics only.
+    candidate_results: list[CandidateTaskResult] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
+    #: Per-round measurement contract (candidate count, fixed denominator,
+    #: completeness). Kept separate from results so no-candidate rounds remain
+    #: explicit even though they still have a full active-pool score.
+    round_metadata: dict[int, dict[str, Any]] = field(default_factory=dict)
     run_name: str = ""
     lock_sha256: str | None = None
     #: Main metric of the run. pass@2 is the paper's (§6.1 p.15).
@@ -157,6 +243,33 @@ class RunReport:
 
     def add(self, result: TaskResult) -> None:
         self.results.append(result)
+
+    def add_candidate(self, result: CandidateTaskResult) -> None:
+        """Add a gate measurement without exposing it to headline metrics."""
+        self.candidate_results.append(result)
+
+    def record_round(
+        self,
+        *,
+        round_idx: int,
+        candidate_count: int,
+        evaluated_task_denominator: int,
+        active_variant_count: int,
+    ) -> None:
+        """Record the fixed active-pool measurement contract for one round."""
+        if min(round_idx, candidate_count, evaluated_task_denominator, active_variant_count) < 0:
+            raise ValueError("round metadata counts must be non-negative")
+        rows = self.results_in(round_idx)
+        task_ids = {row.task_id for row in rows}
+        self.round_metadata[round_idx] = {
+            "round": round_idx,
+            "candidate_count": candidate_count,
+            "no_candidate": candidate_count == 0,
+            "active_variant_count": active_variant_count,
+            "evaluated_tasks": len(task_ids),
+            "evaluated_task_denominator": evaluated_task_denominator,
+            "complete": len(rows) == len(task_ids) == evaluated_task_denominator,
+        }
 
     def add_event(self, *, round_idx: int, kind: str, variant_id: str, **extra: Any) -> None:
         """Record a fork or a retirement on the pool's time axis."""
@@ -296,6 +409,17 @@ class RunReport:
             return None
         return sum(result.infra_failures for result in scope) / attempts
 
+    def budget_exhaustion_count(self, *, round_idx: int | None = None) -> int:
+        """Attempts stopped by the runtime cost/token budget (not infra)."""
+        return sum(result.budget_exhaustions for result in self._scope(round_idx))
+
+    def budget_exhaustion_rate(self, *, round_idx: int | None = None) -> float | None:
+        scope = self._scope(round_idx)
+        attempts = sum(result.n_att for result in scope)
+        if attempts == 0:
+            return None
+        return sum(result.budget_exhaustions for result in scope) / attempts
+
     # ------------------------------------------------------------------
     # variant-pool process data — ours (SPEC §6.7); the paper reports none
     # ------------------------------------------------------------------
@@ -334,6 +458,141 @@ class RunReport:
         selected = [event for event in self.events if event.get("kind") in POOL_EVENT_KINDS]
         return sorted(selected, key=lambda event: (event["round_idx"], event["kind"], event.get("variant_id", "")))
 
+    def round_diagnostics(self) -> list[dict[str, Any]]:
+        """Active-pool denominators and no-candidate status, round by round."""
+        diagnostics: list[dict[str, Any]] = []
+        for round_idx in self.rounds():
+            explicit = self.round_metadata.get(round_idx)
+            if explicit is not None:
+                diagnostics.append(dict(explicit))
+                continue
+            rows = self.results_in(round_idx)
+            task_ids = {row.task_id for row in rows}
+            candidate_ids = {
+                row.candidate_id for row in self.candidate_results if row.round_idx == round_idx
+            }
+            diagnostics.append(
+                {
+                    "round": round_idx,
+                    "candidate_count": len(candidate_ids),
+                    "no_candidate": not candidate_ids,
+                    "active_variant_count": len({row.variant for row in rows}),
+                    "evaluated_tasks": len(task_ids),
+                    "evaluated_task_denominator": len(task_ids),
+                    "complete": len(rows) == len(task_ids),
+                }
+            )
+        return diagnostics
+
+    def candidate_diagnostics(self, *, k: int | None = None) -> dict[str, Any]:
+        """Candidate-only audit stream; never folded into final/peak/curve."""
+        k = self.k if k is None else k
+        by_round: list[dict[str, Any]] = []
+        candidate_rounds = sorted({row.round_idx for row in self.candidate_results})
+        for round_idx in candidate_rounds:
+            rows = [row for row in self.candidate_results if row.round_idx == round_idx]
+            by_round.append({"round": round_idx, **self._candidate_summary(rows, k)})
+        summary = self._candidate_summary(self.candidate_results, k)
+        return {
+            "measurement_scope": "candidate_gate",
+            **summary,
+            "by_round": by_round,
+            "results": [row.to_dict() for row in self.candidate_results],
+        }
+
+    def _candidate_summary(
+        self,
+        rows: Sequence[CandidateTaskResult],
+        k: int,
+    ) -> dict[str, Any]:
+        """Candidate-level counts plus the evaluated task denominator.
+
+        Counts are over ``(round, candidate_id)`` so a replayed identifier in a
+        later round cannot collapse two attempts into one. Rejected candidates
+        may also be evaluated; skipped candidates are those with no evaluated
+        task rows. These categories are intentionally not forced to sum to the
+        attempted denominator.
+        """
+        grouped: dict[tuple[int, str], list[CandidateTaskResult]] = {}
+        for row in rows:
+            grouped.setdefault((row.round_idx, row.candidate_id), []).append(row)
+
+        candidate_summaries: list[dict[str, Any]] = []
+        evaluated_keys: set[tuple[int, str]] = set()
+        rejected_keys: set[tuple[int, str]] = set()
+        skipped_keys: set[tuple[int, str]] = set()
+        evaluated_rows = [row for row in rows if row.evaluated]
+
+        for key in sorted(grouped):
+            candidate_rows = grouped[key]
+            scored_rows = [row for row in candidate_rows if row.evaluated]
+            evaluated = bool(scored_rows)
+            rejected = any(
+                row.decision == "reject"
+                or row.failed_stage is not None
+                or bool(row.archive_reason)
+                for row in candidate_rows
+            )
+            skipped = not evaluated
+            if evaluated:
+                evaluated_keys.add(key)
+            if rejected:
+                rejected_keys.add(key)
+            if skipped:
+                skipped_keys.add(key)
+
+            candidate_summaries.append(
+                {
+                    "round": key[0],
+                    "candidate_id": key[1],
+                    "target_variant_id": candidate_rows[0].target_variant_id,
+                    "evaluated": evaluated,
+                    "rejected": rejected,
+                    "skipped": skipped,
+                    "decision": next(
+                        (row.decision for row in candidate_rows if row.decision is not None),
+                        None,
+                    ),
+                    "failed_stage": next(
+                        (row.failed_stage for row in candidate_rows if row.failed_stage is not None),
+                        None,
+                    ),
+                    "archive_reason": next(
+                        (row.archive_reason for row in candidate_rows if row.archive_reason),
+                        "",
+                    ),
+                    "skipped_reason": next(
+                        (row.skipped_reason for row in candidate_rows if row.skipped_reason is not None),
+                        None,
+                    ),
+                    "evaluated_task_denominator": len(scored_rows),
+                    "attempts": sum(row.n_att for row in scored_rows),
+                    f"pass_at_{k}": self._mean_estimate(scored_rows, k) if scored_rows else None,
+                }
+            )
+
+        attempted = len(grouped)
+        evaluated = len(evaluated_keys)
+        return {
+            # ``candidate_count`` / ``evaluated_tasks`` are retained for older
+            # report readers. The explicit names remove their old ambiguity.
+            "candidate_count": attempted,
+            "attempted_candidate_count": attempted,
+            "evaluated_candidate_count": evaluated,
+            "rejected_candidate_count": len(rejected_keys),
+            "skipped_candidate_count": len(skipped_keys),
+            "candidate_denominator": attempted,
+            "evaluation_denominator": attempted,
+            "evaluated_candidate_rate": evaluated / attempted if attempted else None,
+            "evaluated_tasks": len(evaluated_rows),
+            "evaluated_task_denominator": len(evaluated_rows),
+            "attempts": sum(row.n_att for row in evaluated_rows),
+            f"pass_at_{k}": self._mean_estimate(evaluated_rows, k) if evaluated_rows else None,
+            "infra_failures": sum(row.infra_failures for row in evaluated_rows),
+            "budget_exhaustions": sum(row.budget_exhaustions for row in evaluated_rows),
+            "candidates": candidate_summaries,
+        }
+
     # ------------------------------------------------------------------
     # rendering
     # ------------------------------------------------------------------
@@ -345,12 +604,17 @@ class RunReport:
         payload: dict[str, Any] = {
             "run_name": self.run_name,
             "lock_sha256": self.lock_sha256,
+            "measurement_scope": "settled_active_pool",
             "k": k,
             "rounds": rounds,
             "tasks": len({result.task_id for result in self.results}),
             "attempts": sum(result.n_att for result in self.results),
             "infra_failures": self.infra_failure_count(),
             "infra_failure_rate": self.infra_failure_rate(),
+            "budget_exhaustions": self.budget_exhaustion_count(),
+            "budget_exhaustion_rate": self.budget_exhaustion_rate(),
+            "round_diagnostics": self.round_diagnostics(),
+            "candidate_diagnostics": self.candidate_diagnostics(k=k),
             "variant_count_curve": self.variant_count_curve(),
             "routing_hit_rate": self.routing_hit_rate(),
             "coverage_per_variant": self.coverage_per_variant(),
@@ -396,7 +660,7 @@ class RunReport:
 
         peak_round, peak_score = self.peak(k)
         lines += [
-            "## Headline",
+            "## Active-pool headline",
             "",
             "| metric | value |",
             "|---|---|",
@@ -406,7 +670,9 @@ class RunReport:
             f"| final pass@1 | {self.pass_at_1():.4f} |",
             f"| final per-attempt rate | {self.per_attempt_rate():.4f} |",
             f"| pass@{k} - pass@1 (masking gap, §7.1) | {self.masking_gap(k=k):.4f} |",
-            f"| attempts / infra failures | {sum(r.n_att for r in self.results)} / {self.infra_failure_count()} |",
+            f"| attempts / infra failures / budget exhaustion | "
+            f"{sum(r.n_att for r in self.results)} / {self.infra_failure_count()} / "
+            f"{self.budget_exhaustion_count()} |",
             "",
             "> The peak is selected on the same task set the run evolved on, with",
             "> no held-out split (§7.7). It is reported next to the final score,",
@@ -415,16 +681,20 @@ class RunReport:
             "",
             "## Per-round curve",
             "",
-            f"| round | pass@{k} | pass@1 | per-attempt | variants |",
-            "|---|---|---|---|---|",
+            f"| round | pass@{k} | pass@1 | per-attempt | tasks/denominator | variants | candidate |",
+            "|---|---|---|---|---|---|---|",
         ]
         counts = self.variant_count_curve()
+        diagnostics = {row["round"]: row for row in self.round_diagnostics()}
         for index, round_idx in enumerate(rounds):
+            diag = diagnostics[round_idx]
             lines.append(
                 f"| {round_idx} | {self.pass_at_k(k, round_idx=round_idx):.4f} "
                 f"| {self.pass_at_1(round_idx=round_idx):.4f} "
                 f"| {self.per_attempt_rate(round_idx=round_idx):.4f} "
-                f"| {counts[index]} |"
+                f"| {diag['evaluated_tasks']}/{diag['evaluated_task_denominator']} "
+                f"| {counts[index]} "
+                f"| {'none' if diag['no_candidate'] else diag['candidate_count']} |"
             )
         lines.append("")
 
@@ -454,6 +724,23 @@ class RunReport:
         else:
             lines += ["- fork/retire events: none"]
         lines.append("")
+
+        candidate = self.candidate_diagnostics(k=k)
+        lines += [
+            "## Candidate-gate diagnostics",
+            "",
+            "> Candidate measurements are pre-settlement diagnostics. Rejected",
+            "> candidates never contribute to the active-pool headline or curve.",
+            "",
+            f"- candidates attempted (denominator): {candidate['attempted_candidate_count']}",
+            f"- candidates evaluated: {candidate['evaluated_candidate_count']}",
+            f"- candidates rejected: {candidate['rejected_candidate_count']}",
+            f"- candidates skipped: {candidate['skipped_candidate_count']}",
+            f"- candidate task evaluations: {candidate['evaluated_tasks']}",
+            f"- candidate infra failures: {candidate['infra_failures']}",
+            f"- candidate budget exhaustions: {candidate['budget_exhaustions']}",
+            "",
+        ]
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -487,6 +774,7 @@ def report_from_rows(rows: Iterable[Mapping[str, Any]], **kwargs: Any) -> RunRep
                 n_pass=int(row["n_pass"]),
                 variant_id=row.get("variant_id"),
                 infra_failures=int(row.get("infra_failures", 0)),
+                budget_exhaustions=int(row.get("budget_exhaustions", 0)),
             )
         )
     return report

@@ -19,6 +19,7 @@ import json
 import pytest
 
 from variant_pool.reporting import (
+    CandidateTaskResult,
     IMPLICIT_VARIANT,
     RunReport,
     TaskResult,
@@ -233,6 +234,20 @@ def test_infra_failure_rate_is_none_without_attempts() -> None:
     assert RunReport().infra_failure_rate() is None
 
 
+def test_budget_exhaustion_is_not_reported_as_infrastructure() -> None:
+    report = _report(
+        _result("infra", 0, 0, infra_failures=1),
+        _result("budget", 0, 0, budget_exhaustions=1),
+    )
+    assert report.infra_failure_count() == 1
+    assert report.budget_exhaustion_count() == 1
+    assert report.infra_failure_rate() == pytest.approx(1 / 4)
+    assert report.budget_exhaustion_rate() == pytest.approx(1 / 4)
+    payload = report.to_dict()
+    assert payload["infra_failures"] == 1
+    assert payload["budget_exhaustions"] == 1
+
+
 @pytest.mark.parametrize("kwargs", [{"n_pass": 3, "n_att": 2}, {"n_pass": -1, "n_att": 2}])
 def test_impossible_results_are_rejected(kwargs) -> None:
     with pytest.raises(ValueError):
@@ -297,6 +312,174 @@ def test_to_dict_pairs_final_with_peak() -> None:
     assert payload["curve"] == pytest.approx([0.25, 0.75, 0.25])
     assert payload["final_pass_at_1"] == pytest.approx(0.25)
     assert payload["curve_pass_at_1"] == pytest.approx([0.25, 0.625, 0.25])
+
+
+def test_rejected_candidate_is_diagnostics_only() -> None:
+    report = _report(_result("a", 0, 0, variant_id="V0"))
+    report.add_candidate(
+        CandidateTaskResult(
+            task_id="a",
+            round_idx=0,
+            candidate_id="C-R0-V0",
+            target_variant_id="V0",
+            n_att=2,
+            n_pass=2,
+            decision="reject",
+            failed_stage="SEESAW_REGRESSION",
+            archive_reason="regressed a previously solved task",
+        )
+    )
+    report.record_round(
+        round_idx=0,
+        candidate_count=1,
+        evaluated_task_denominator=1,
+        active_variant_count=1,
+    )
+
+    assert report.final() == 0.0
+    assert report.pass_at_1() == 0.0
+    assert report.routing_hit_rate() == 0.0
+    payload = report.to_dict()
+    diagnostics = payload["candidate_diagnostics"]
+    assert diagnostics["by_round"][0]["pass_at_2"] == 1.0
+    assert diagnostics["attempted_candidate_count"] == 1
+    assert diagnostics["evaluated_candidate_count"] == 1
+    assert diagnostics["rejected_candidate_count"] == 1
+    assert diagnostics["skipped_candidate_count"] == 0
+    assert diagnostics["candidate_denominator"] == 1
+    assert diagnostics["candidates"][0]["failed_stage"] == "SEESAW_REGRESSION"
+    assert diagnostics["candidates"][0]["archive_reason"] == "regressed a previously solved task"
+    assert payload["final_pass_at_2"] == 0.0
+
+
+def test_no_candidate_round_still_has_a_complete_active_denominator() -> None:
+    report = _report(_result("a", 3, 2, variant_id="V0"), _result("b", 3, 0, variant_id="V0"))
+    report.record_round(
+        round_idx=3,
+        candidate_count=0,
+        evaluated_task_denominator=2,
+        active_variant_count=1,
+    )
+    diagnostic = report.to_dict()["round_diagnostics"][0]
+    assert diagnostic == {
+        "round": 3,
+        "candidate_count": 0,
+        "no_candidate": True,
+        "active_variant_count": 1,
+        "evaluated_tasks": 2,
+        "evaluated_task_denominator": 2,
+        "complete": True,
+    }
+
+
+def test_candidate_result_old_construction_defaults_remain_compatible() -> None:
+    # All pre-extension positional fields remain in their original order.
+    result = CandidateTaskResult("a", 0, "C0", "V0", 2, 1, "apply", 0, 0)
+    assert result.failed_stage is None
+    assert result.archive_reason == ""
+    assert result.skipped_reason is None
+    assert result.evaluated is True
+
+
+def test_candidate_result_serializes_gate_and_skip_diagnostics() -> None:
+    result = CandidateTaskResult(
+        task_id="a",
+        round_idx=4,
+        candidate_id="C4",
+        target_variant_id="V2",
+        n_att=0,
+        n_pass=0,
+        failed_stage="DIGESTER_ACTIONABILITY",
+        archive_reason="",
+        skipped_reason="actionability 0.2 below threshold 0.5",
+        evaluated=False,
+    )
+    assert result.to_dict() == {
+        "task_id": "a",
+        "round_idx": 4,
+        "candidate_id": "C4",
+        "target_variant_id": "V2",
+        "n_att": 0,
+        "n_pass": 0,
+        "decision": None,
+        "infra_failures": 0,
+        "budget_exhaustions": 0,
+        "failed_stage": "DIGESTER_ACTIONABILITY",
+        "archive_reason": "",
+        "skipped_reason": "actionability 0.2 below threshold 0.5",
+        "evaluated": False,
+    }
+
+
+def test_skipped_candidate_does_not_pollute_any_active_metric() -> None:
+    report = _report(
+        _result("a", 0, 2, variant_id="V0"),
+        _result("b", 0, 0, variant_id="V0"),
+    )
+    baseline = {
+        "final": report.final(),
+        "peak": report.peak(),
+        "curve": report.curve(),
+        "drift": report.drift(),
+        "hit": report.routing_hit_rate(),
+    }
+    report.add_candidate(
+        CandidateTaskResult(
+            task_id="__candidate__",
+            round_idx=0,
+            candidate_id="C-skipped",
+            target_variant_id="V0",
+            n_att=0,
+            n_pass=0,
+            skipped_reason="planner returned an empty landscape",
+            evaluated=False,
+        )
+    )
+
+    assert report.final() == baseline["final"]
+    assert report.peak() == baseline["peak"]
+    assert report.curve() == baseline["curve"]
+    assert report.drift() == baseline["drift"]
+    assert report.routing_hit_rate() == baseline["hit"]
+
+    diagnostics = report.to_dict()["candidate_diagnostics"]
+    assert diagnostics["attempted_candidate_count"] == 1
+    assert diagnostics["evaluated_candidate_count"] == 0
+    assert diagnostics["rejected_candidate_count"] == 0
+    assert diagnostics["skipped_candidate_count"] == 1
+    assert diagnostics["evaluation_denominator"] == 1
+    assert diagnostics["evaluated_tasks"] == 0
+    assert diagnostics["pass_at_2"] is None
+    assert diagnostics["candidates"][0]["skipped_reason"] == "planner returned an empty landscape"
+
+
+def test_manifest_gate_failure_is_rejected_even_without_a_decision() -> None:
+    report = _report(_result("a", 0, 2, variant_id="V0"))
+    report.add_candidate(
+        CandidateTaskResult(
+            task_id="__candidate__",
+            round_idx=0,
+            candidate_id="C-invalid",
+            target_variant_id="V0",
+            n_att=0,
+            n_pass=0,
+            decision=None,
+            failed_stage="MANIFEST_COMPLETE",
+            archive_reason="manifest is missing change_summary",
+            skipped_reason="candidate failed before rollout evaluation",
+            evaluated=False,
+        )
+    )
+
+    diagnostics = report.to_dict()["candidate_diagnostics"]
+    assert diagnostics["attempted_candidate_count"] == 1
+    assert diagnostics["evaluated_candidate_count"] == 0
+    assert diagnostics["rejected_candidate_count"] == 1
+    assert diagnostics["skipped_candidate_count"] == 1
+    assert diagnostics["candidates"][0]["rejected"] is True
+    assert diagnostics["candidates"][0]["skipped"] is True
+    assert report.final() == 1.0
+    assert report.curve() == [1.0]
 
 
 def test_to_json_is_parseable_and_carries_the_level_table() -> None:

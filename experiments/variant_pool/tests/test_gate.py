@@ -10,6 +10,8 @@ tested in full.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from variant_pool.gate import (
@@ -24,7 +26,7 @@ from variant_pool.gate import (
     run_gate,
 )
 from variant_pool.ledger import SuccessLedger
-from variant_pool.manifest import ChangeManifest, check_level2_roundtrip
+from variant_pool.manifest import CandidateArtifact, ChangeManifest, check_level2_roundtrip
 
 
 # ---------------------------------------------------------------------------
@@ -193,18 +195,13 @@ def test_a_task_never_solved_by_anyone_is_not_a_regression() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_default_min_fork_is_two_two() -> None:
-    """Explicit test of an *our-default* knob."""
-    assert DEFAULT_MIN_FORK == (2, 2)
+def test_default_min_fork_is_paper_faithful_one_one() -> None:
+    """The paper forks every non-empty improve/regress conflict."""
+    assert DEFAULT_MIN_FORK == (1, 1)
 
 
-def test_a_one_one_conflict_does_not_earn_a_fork() -> None:
-    """One improvement against one regression is pass@2 noise, not a cluster.
-
-    The candidate is rejected rather than forked: a variant slot is not spent,
-    and the improvement cannot be applied either, because the seesaw forbids
-    regressing an ever-solved task.
-    """
+def test_a_one_one_conflict_forks_by_default() -> None:
+    """One improvement plus one regression meets the paper's literal rule."""
     ledger = _ledger("old")
     tk = [
         TaskEval("new", before=(0, 2), after=(2, 2)),
@@ -213,8 +210,17 @@ def test_a_one_one_conflict_does_not_earn_a_fork() -> None:
     improved, regressed = _classify(tk, ledger)
     assert (len(improved), len(regressed)) == (1, 1)
 
-    assert _seesaw_three_way(tk, ledger) is Decision.REJECT
-    assert _seesaw_three_way(tk, ledger, min_fork=(1, 1)) is Decision.FORK
+    assert _seesaw_three_way(tk, ledger) is Decision.FORK
+
+
+def test_two_two_remains_an_explicit_anti_noise_ablation() -> None:
+    ledger = _ledger("old")
+    tk = [
+        TaskEval("new", before=(0, 2), after=(2, 2)),
+        TaskEval("old", before=(2, 2), after=(0, 2)),
+    ]
+
+    assert _seesaw_three_way(tk, ledger, min_fork=(2, 2)) is Decision.REJECT
 
 
 def test_the_threshold_needs_both_sides() -> None:
@@ -225,7 +231,7 @@ def test_the_threshold_needs_both_sides() -> None:
         TaskEval("new2", before=(0, 2), after=(1, 2)),
         TaskEval("old", before=(2, 2), after=(0, 2)),
     ]
-    assert _seesaw_three_way(tk, ledger) is Decision.REJECT
+    assert _seesaw_three_way(tk, ledger, min_fork=(2, 2)) is Decision.REJECT
     assert _seesaw_three_way(tk, ledger, min_fork=(2, 1)) is Decision.FORK
 
 
@@ -349,7 +355,7 @@ def test_a_fork_result_carries_the_tasks_the_new_variant_serves() -> None:
         TaskEval("old1", before=(2, 2), after=(0, 2)),
         TaskEval("old2", before=(2, 2), after=(0, 2)),
     ]
-    result = run_gate("cand", "parent", ledger, tk)
+    result = run_gate("cand", "parent", ledger, tk, min_fork=(2, 2))
 
     assert result.passed is True
     assert result.decision is Decision.FORK
@@ -375,7 +381,7 @@ def test_a_below_threshold_rejection_says_so() -> None:
         TaskEval("new", before=(0, 2), after=(2, 2)),
         TaskEval("old", before=(2, 2), after=(0, 2)),
     ]
-    result = run_gate("cand", "parent", ledger, tk)
+    result = run_gate("cand", "parent", ledger, tk, min_fork=(2, 2))
 
     assert result.decision is Decision.REJECT
     assert "below fork threshold" in result.archive_reason
@@ -414,6 +420,65 @@ def test_a_complete_manifest_passes_stage_one_without_a_stub() -> None:
 
     assert result.passed is True
     assert result.decision is Decision.APPLY
+
+
+def test_candidate_artifact_is_unwrapped_for_manifest_checks(tmp_path) -> None:
+    manifest = _manifest()
+    artifact = CandidateArtifact(
+        config_path=tmp_path / "candidate.yaml",
+        manifest=manifest,
+        target_variant="V0",
+    )
+    seen: list[object] = []
+
+    result = run_gate(
+        artifact,
+        "parent",
+        _ledger(),
+        [TaskEval("db4fd70a", before=(0, 2), after=(2, 2))],
+        check_manifest=lambda subject: seen.append(subject) or [],
+    )
+
+    assert seen == [manifest]
+    assert result.decision is Decision.APPLY
+
+
+def test_incomplete_artifact_manifest_halts_before_the_seesaw(tmp_path) -> None:
+    class SeesawMustNotRun:
+        def is_ever_solved(self, task_id):  # noqa: ARG002
+            raise AssertionError("manifest failure reached the seesaw")
+
+    artifact = CandidateArtifact(
+        config_path=tmp_path / "candidate.yaml",
+        manifest=_manifest(target_variant=""),
+        target_variant="V0",
+    )
+    result = run_gate(
+        artifact,
+        "parent",
+        SeesawMustNotRun(),
+        [TaskEval("db4fd70a", before=(0, 2), after=(2, 2))],
+    )
+
+    assert result.passed is False
+    assert result.failed_stage is GateStage.MANIFEST_COMPLETE
+    assert result.decision is None
+    assert "target_variant" in result.archive_reason
+
+
+def test_object_with_invalid_manifest_never_falls_back_to_opaque_gate() -> None:
+    candidate = SimpleNamespace(manifest=None)
+    result = run_gate(
+        candidate,
+        "parent",
+        _ledger(),
+        [TaskEval("t", before=(0, 2), after=(2, 2))],
+    )
+
+    assert result.passed is False
+    assert result.failed_stage is GateStage.MANIFEST_COMPLETE
+    assert result.decision is None
+    assert ".manifest must be ChangeManifest" in result.archive_reason
 
 
 def test_an_incomplete_manifest_fails_stage_one_for_real() -> None:

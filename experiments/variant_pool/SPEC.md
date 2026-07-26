@@ -1,5 +1,43 @@
 # 变体池实现蓝图 SPEC
 
+## ⚠️ CORRECTION / ERRATA INDEX（ERRATA_REVISION `2026-07-25`）
+
+> 本节是当前实现语义的权威 addendum。下方原 SPEC 原样保留，记录 Jul-23/24 的设计过程；凡与本节冲突均视为历史版本。论文未规定项统一标为我方工程选择，详见 [`../docs/PAPER-METHODOLOGY-DEVIATIONS.md`](../docs/PAPER-METHODOLOGY-DEVIATIONS.md)。
+
+| Errata | 被取代的历史段落 | 当前权威语义 |
+|---|---|---|
+| SPEC-E01 | 顶部 `SPEC_VERSION="2026-07-24"` 所代表的旧默认；**§2.4** 伪代码/默认；**§6.6** fork row；**§9.4** `(1,1)` 消融 | fork 默认是 `min_fork=(1,1)`。论文未给计数阈值；旧 `(2,2)` 是我方工程选择，现仅作为 ablation。日志已有 `1+1`、`2+1` mixed conflict，旧 `(2,2)` 直接将其拒绝。 |
+| SPEC-E02 | **§2.3 router** 中 routing-induced cluster 作为默认解释；**§6.6 cluster row** | 主路径支持并要求可审计的 `task_id -> cluster_id` 映射来表示真实 cluster；GAIA recipe 暂以 level 为代理。`task_tournament` 是明确命名的兼容/消融模式，不是 cluster 的同义词。routing-induced cluster 只能标作我方备选解释。 |
+| SPEC-E03 | **§2.2 ledger、§2.3 router、§6.6 estimator/window/cold-start/tie-break rows** 若被读成论文参数 | 论文只规定“estimated success rate”目标，没有给估计器、窗口、平滑、冷启动或 tie-break。当前全历史 cluster 聚合、确定性冷启动、`fewest_attempts` tie-break 均是可配置的 **我方工程选择**，正式运行必须写入 lock 并消融。 |
+| SPEC-E04 | **§2.1 fork/retire、§6.6 inherit/retire、§8.4 C1** 的单序列流程 | 当前引擎使用 two-phase settle：基于 prior-round frozen routing 完成候选评估/裁决，随后统一 reconcile APPLY/FORK/REJECT/retire；同轮结果不得反向改变本轮路由。退役支持 `task_macro`、`cluster_macro`、`raw`，默认 task-macro；这些比较口径均为我方选择。 |
+| SPEC-E05 | **§6.7 评测输出契约**中 final/peak 未限定状态边界；**§8.4** 中 gate 结果紧邻报告 | candidate gate diagnostic 与 settled active-pool score 必须分流。active pool 每轮在固定全任务集上评分；只有同配置、同 carrier、完整相同子集时可复用 rollout。REJECT 候选不得进入 final/peak/curve。旧 `forkprobe_p2` 把被拒 R3 候选 `0.6667` 报成 final，已判为报告错误。 |
+| SPEC-E06 | **§8.3/§8.4** 尚未出现的候选生产/Critic 完成状态 | CandidatePipeline/Critic 的结构化合约、候选隔离、确定性排序/去重、最多一次 revision 和 audit 已实现并测试。确定性 Critic 是 fallback，不等同论文完整 AEGIS；真实 LLM adapter 尚未接入 live GAIA recipe。 |
+| SPEC-E07 | **§9 实验设计**若被误读为已完成 | §9 仍是预注册计划。真实 LLM 端到端、Global vs Ensemble 正式对照、held-out，以及 `103 tasks × 15 rounds × 3 seeds` 均未运行；现有探针没有验证 Ensemble 效果。 |
+| SPEC-E08 | 顶部符号说明、**§2.1、§6.6** 中 `K=8` | `K` 仍为论文缺失参数；`K=8` 只是旧我方默认，不得称为论文设置。`K_t=4` 仅是 Table 8 的每轮候选数，不能推出池容量。正式运行必须分别锁定两者并做容量敏感性分析。 |
+| SPEC-E09 | **§8.3/§8.4** 按每个 freeze-time variant 调用 evolve/queue；全文对 `K_t=4` 的实现暗示 | Algorithm 1 L15 的 `K_t` 是一个 round 的候选集合。当前 queue limit 是 per target/variant，遍历全池时可达 `4 × active_variant_count`；它不能冒充 round-global `K_t=4`。论文也未规定 target selector。正式主臂仍需“一轮一个预注册 target、全局至多 4 个候选”的 coordinator。 |
+| SPEC-E10 | **§2.4** 首个过门者胜出；候选/Critic 的 ship_ranking 描述 | Algorithm 1 L21–25 支持 first-pass single-ship 读法，但 Appendix B.1 p.34 明写按 ship_ranking ship 所有 bucket-disjoint candidates。当前 first-pass-wins 只是按主文作出的工程裁决；Appendix multi-ship 尚未实现，必须单列消融。 |
+| SPEC-E11 | **§6.1/§8.3** Digester/CandidatePipeline 完成状态 | Algorithm 1 的 actionability `a_t < α` / empty-landscape selective short-circuit 尚未进入当前合约：Digester 只返回 digests，空 briefs 仍可能继续调用 Evolver。不得声称 selective invocation 已实现；需在 Planner/Evolver 前增加可审计 no-op gate。 |
+
+### 当前规范流程
+
+```text
+prior-round evidence
+  → freeze routing
+  → produce/evaluate candidate(s) on scoped routed tasks
+  → gate candidate diagnostics
+  → settle + reconcile APPLY/FORK/REJECT/retire
+  → score the settled active pool on the fixed full task set
+  → publish active-pool final/peak separately from candidate diagnostics
+```
+
+这条状态边界是报告正确性的硬约束：候选测量回答“这个候选过门了吗”，active-pool 测量回答“本轮最终部署的组合表现如何”，二者不得混用。
+
+### 验收状态
+
+- **Implemented / tested**：默认 `(1,1)`、真实 cluster API、`task_tournament` 兼容、task/cluster macro retirement、two-phase settle、独立 active-pool scoring、CandidatePipeline/Critic 的结构化/隔离合约，以及当前 per-variant first-pass queue 行为；不含 selective invocation。
+- **Integrated but not live-tested**：GAIA recipe 的 level cluster、cluster routing、settled active-pool scorer、错误分类与 provenance lock；当前接线仍可能每个 active variant 各取 queue，不能称为 round-global `K_t=4` 论文主臂。
+- **Not yet run / not yet implemented**：actionability/empty-landscape 前置 short-circuit、round-global target selector/`K_t≤4` coordinator、Appendix bucket-disjoint multi-ship 分臂、真实 LLM AEGIS adapters、正式 Global/Ensemble 对照、held-out、各方法学消融及 `103 × 15 × 3`。
+
 > **定位(修正 Jul-23,吸收 Codex 批判):这是"按论文附录重建的、论文启发的跨模型复现(paper-informed re-implementation)",不是"照抄论文"。** 论文未开源(仅承诺未来开源),且我方用 DeepSeek V4 替换了论文的 Opus 4.6 / Sonnet 4.6 / GPT-5.4 内外环模型。⇒ **不得对照论文的绝对分数**;所有未被论文规定的设计选择必须显式记录(§6.6 留白契约表)。冲突处采论文;论文没给的自定并标注,作为贡献面。
 > 完整机制依据:`experiments/docs/HarnessX_VariantPool_TheoryFast_Report`(精读报告,全文逐字);工作项表:`experiments/docs/HARNESSX-IMPL-CHECKLIST.md`。
 > 论文页码指 arXiv 2606.14249v2。

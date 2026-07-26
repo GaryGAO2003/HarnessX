@@ -110,12 +110,14 @@ from .manifest import DEFAULT_LEVEL2_LABEL, ChangeManifest, check_level2_roundtr
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
     from .ledger import SuccessLedger
 
-#: Minimum ``(improved, regressed)`` sizes before a conflict is worth a fork.
-#: Ours (SPEC §2.4/§6.6): pass@2 still leaves residual noise, and a one-task
-#: flip in each direction is as likely to be noise as a real cluster conflict.
-#: Forking on it would fill the pool with variants that specialise on nothing.
-#: Ablation {(1, 1), (2, 2)}.
-DEFAULT_MIN_FORK = (2, 2)
+#: Minimum ``(improved, regressed)`` sizes before a conflict forks.
+#:
+#: ``(1, 1)`` is the paper-faithful default: §4.5 says an edit that improves a
+#: subset while regressing others forks, without adding a minimum cardinality.
+#: ``(2, 2)`` remains an explicit anti-noise ablation. The paper neither
+#: specifies nor evaluates such a threshold, so making it the default would
+#: silently replace the published state transition with an engineering choice.
+DEFAULT_MIN_FORK = (1, 1)
 
 
 class GateStage(Enum):
@@ -313,9 +315,10 @@ def run_gate(
     Parameters
     ----------
     candidate:
-        A :class:`.manifest.ChangeManifest`, which switches stages 1 and 4 to
-        their real implementations, or anything opaque, which leaves them to
-        the injected checks.
+        A :class:`.manifest.ChangeManifest`, an artifact exposing one through
+        ``.manifest``, or an opaque legacy candidate. Structured artifacts are
+        unwrapped for stages 1 and 4 but otherwise remain intact for injected
+        checks and later engine settlement.
     parent_config:
         The target variant's config; opaque here, forwarded to
         ``check_canonicalize``.
@@ -324,7 +327,7 @@ def run_gate(
     check_manifest:
         Returns the list of missing manifest fields (empty = complete), i.e.
         the signature of ``ChangeManifest.validate_complete``. Defaults to that
-        method when ``candidate`` is a manifest.
+        method when ``candidate`` is, or wraps, a manifest.
     check_canonicalize, check_smoke, check_roundtrip:
         Return ``(passed, reason)``. ``check_roundtrip`` defaults to the
         manifest's declared Level-2 evidence; build a live one with
@@ -336,14 +339,54 @@ def run_gate(
     """
     _validate_min_fork(min_fork)
 
+    manifest_candidate: ChangeManifest | None = None
+    missing_manifest = object()
+    manifest_attr: Any = missing_manifest
     if isinstance(candidate, ChangeManifest):
+        manifest_candidate = candidate
+    else:
+        try:
+            manifest_attr = getattr(candidate, "manifest", manifest_attr)
+        except Exception as exc:  # noqa: BLE001 - malformed structured candidate
+            return GateResult(
+                passed=False,
+                failed_stage=GateStage.MANIFEST_COMPLETE,
+                decision=None,
+                archive_reason=(
+                    "MANIFEST_COMPLETE: structured candidate manifest could not be read: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            )
+        if isinstance(manifest_attr, ChangeManifest):
+            manifest_candidate = manifest_attr
+
+    # An object that advertises ``.manifest`` is structured and must never fall
+    # back to the opaque/no-op gate path. CandidateArtifact is intentionally
+    # duck-typed here to avoid coupling the deterministic gate to the pipeline.
+    if (
+        not isinstance(candidate, ChangeManifest)
+        and manifest_attr is not missing_manifest
+        and not isinstance(manifest_attr, ChangeManifest)
+    ):
+        return GateResult(
+            passed=False,
+            failed_stage=GateStage.MANIFEST_COMPLETE,
+            decision=None,
+            archive_reason=(
+                "MANIFEST_COMPLETE: structured candidate .manifest must be "
+                f"ChangeManifest, got {type(manifest_attr).__name__}"
+            ),
+        )
+
+    if manifest_candidate is not None:
         if check_manifest is None:
             check_manifest = _manifest_complete
         if check_roundtrip is None:
             check_roundtrip = _declared_level2
 
     if check_manifest is not None:
-        missing = list(check_manifest(candidate))
+        check_subject = manifest_candidate if manifest_candidate is not None else candidate
+        missing = list(check_manifest(check_subject))
         if missing:
             return GateResult(
                 passed=False,
@@ -360,7 +403,11 @@ def run_gate(
     for stage, check, args in (
         (GateStage.CANONICALIZE, check_canonicalize, (candidate, parent_config)),
         (GateStage.BUILD_SMOKE_L1, check_smoke, (candidate,)),
-        (GateStage.ROUNDTRIP_L2, check_roundtrip, (candidate,)),
+        (
+            GateStage.ROUNDTRIP_L2,
+            check_roundtrip,
+            (manifest_candidate if manifest_candidate is not None else candidate,),
+        ),
     ):
         if check is None:
             continue

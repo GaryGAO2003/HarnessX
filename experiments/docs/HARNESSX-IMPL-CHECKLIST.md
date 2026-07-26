@@ -1,5 +1,44 @@
 # HarnessX 变体池施工清单 v2 —— 论文优先版
 
+## ⚠️ CORRECTION / ERRATA INDEX（2026-07-25）
+
+> 本文主体是 Jul-23/24 的历史施工计划，保留原文用于追踪决策演进；它不再单独代表当前实现或方法学裁决。完整 gap ledger 与验收门见 [`PAPER-METHODOLOGY-DEVIATIONS.md`](./PAPER-METHODOLOGY-DEVIATIONS.md)。
+
+| Errata | 被取代的历史段落 | 当前权威裁决 |
+|---|---|---|
+| CHK-E01 | **§1** 将 `±5%` 称为 noise threshold；**§7** 建议以 `(2,2)` 控 fork noise | 论文没有定义 fork 的任务计数门槛，也没有说明 `±5%` 如何映射到 seesaw/fork。`(2,2)` 是我方旧工程选择，且实际挡住了 `1+1`、`2+1` mixed conflict。当前默认 `(1,1)`；`(2,2)` 仅作消融。 |
+| CHK-E02 | **§3 W7** 的三种“簇”解释与 routed/self-cluster 裁决 | cluster 构造仍属论文空白。当前主接口要求注入真实 `task_id -> cluster_id` 映射，GAIA recipe 暂用 level 作为可审计代理；`task_tournament` 是单独的兼容/消融模式，不是 cluster 定义。 |
+| CHK-E03 | **§4 W4** 对 full-set 与 scoped gate 复用的未决描述 | 候选只在 scoped routed tasks 上 gate；settled active pool 必须在固定全任务集上独立计分。只有同配置、同 carrier、完整相同子集时可安全复用；REJECT 候选结果绝不能进入 final/peak。 |
+| CHK-E04 | **§2 主施工表、§6 里程碑、§9 摩擦点**中的待建/接线状态 | 默认 `(1,1)`、cluster API、task/cluster macro retirement、两阶段 settle、独立 active-pool scoring、CandidatePipeline/Critic 契约均已实现并有测试。旧工作表继续保留，但状态需按下方“当前实现状态”读取。 |
+| CHK-E05 | **§7** 对 pass@2 的正当化若被读成充分指标 | pass@2 是论文评估要求，但会掩盖单次成功概率下降。正式报告必须并列 pass@1、底层 rollout 计数、逐任务 paired outcome 和分母。 |
+| CHK-E06 | **§11 开放缺口**以及全文中“按论文来”的强表述 | `K`、cluster、估计器/窗口/冷启动/tie-break、fork noise、继承/退役/孤儿/freeze、跨 cluster 退役可比性、新任务路由等仍没有唯一论文答案。所有补全项必须标为 **我方工程选择**，写入 lock，并经预注册 ablation；不得写成论文参数。 |
+| CHK-E07 | **§0/§1/§2 W12** 将 `K_t=4` 直接映射为当前多候选实现 | Algorithm 1 L15 的 `K_t` 是整个 round 的候选集合。当前 API 的 queue limit 是 per target/variant，遍历活跃池可膨胀到 `4 × active_variant_count`，不能冒充论文设置。论文又未给 target selector；正式主臂仍需“一轮一个预注册 target、全局至多 4 个候选”的 coordinator。 |
+| CHK-E08 | **§0、§2 W16** 的 Critic/ship_ranking 与 **SPEC §2.4** 首过者语义 | Algorithm 1 L21–25 的 first-pass single-ship 与 Appendix B.1 p.34 的 bucket-disjoint multi-ship 相互冲突。当前 first-pass-wins 只是按主文作出的工程裁决；Appendix multi-ship 未实现，必须作为独立消融。 |
+| CHK-E09 | **§2 W12/W16、§6** 若把 CandidatePipeline 完成状态读成完整 selective invocation | Algorithm 1 的 actionability `a_t < α` / empty-landscape 前置 short-circuit 尚未实现：当前 Digester 无 round-level actionability artifact，空 briefs 也可能继续进入 Evolver。结构化 pipeline 合约已测试，但不得据此声称这一调用策略已完成。 |
+
+### 当前实现状态
+
+**Implemented / tested**
+
+- fork 默认 `(1,1)`；真实 cluster API 与 `task_tournament` 兼容分臂。
+- task-macro / cluster-macro / raw retirement；prior-round routing freeze 与两阶段 settle。
+- candidate gate 与 settled active-pool 全任务评分分离，REJECT 不污染 headline。
+- CandidatePipeline/Critic 的结构化候选、隔离、确定性去重/排序、最多一次 revision 与 audit 契约；当前 per-variant first-pass queue 行为已有测试，但不含 actionability selective short-circuit。
+
+**Integrated but not live-tested**
+
+- GAIA recipe 的 level cluster、cluster routing、独立 active-pool scorer、分母/错误分类和 provenance lock 已接线并通过自动化测试，但尚未完成真实 provider 的端到端 smoke；接线仍缺 round-global target selector / `K_t≤4` coordinator，不能标作完整论文主臂。
+
+**Not yet run**
+
+- 真实 LLM Digester/Planner/Evolver/Critic adapter 的 live recipe 接入与运行。
+- actionability artifact/threshold 与 empty-landscape 前置 no-op gate。
+- round-global target selector / `K_t≤4` coordinator，以及 Algorithm first-pass 与 Appendix bucket-disjoint multi-ship 两个分臂。
+- 预注册 Global vs Ensemble 对照、held-out 验证，以及论文规模 `103 tasks × 15 rounds × 3 seeds`。
+- cluster、估计器/窗口、fork threshold、retirement、pass@1/pass@2 和 live-web/replay 的正式消融。
+
+> 下一步逐项验收 checklist 见方法学台账 §5。以下原施工表均按“历史计划”阅读。
+
 > **设计原则(用户裁定 Jul-23):一切按论文来。凡我方设计与论文冲突,一律采用论文的方法。**
 > 依据:PDF 逐字精读(正文 §4–§6 + 附录 A/B.1/B.3/C)+ 本地仓 `D:\PycharmProj\HarnessX` 逐文件核验。所有判断带 `文件:行号` 或 `PDF 页码`。
 > 前置事实:论文变体池机制在官方 repo **零实现**;repo 真实现 = 单谱系 best-so-far 爬山环 ≈ 论文 Table 5 的 **Global 对照臂**。

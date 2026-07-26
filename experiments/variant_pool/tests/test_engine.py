@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import pytest
 
-from variant_pool.engine import DEFAULT_PATIENCE, RoundResult, VariantPoolEngine
-from variant_pool.gate import Decision
+from variant_pool.engine import DEFAULT_MIN_FORK, DEFAULT_PATIENCE, RoundResult, VariantPoolEngine
+from variant_pool.gate import Decision, GateStage
 from variant_pool.ledger import SuccessLedger
+from variant_pool.manifest import CandidateArtifact, ChangeManifest
 from variant_pool.pool import VariantPool
 from variant_pool.router import Router, RoutingFreezeError
 
@@ -66,6 +67,57 @@ class Scripted:
         return {task: full[task] for task in t_k}
 
 
+class QueueScripted:
+    """A Critic-ranked queue with candidate-specific deterministic outcomes."""
+
+    def __init__(
+        self,
+        candidates,
+        outcomes: dict[str, dict[str, tuple[int, int]]],
+    ) -> None:
+        self.candidates = candidates
+        self.outcomes = outcomes
+        self.evolve_calls: list[tuple[str, int]] = []
+        self.evaluate_calls: list[str] = []
+
+    def evolve(self, variant, round_idx):
+        self.evolve_calls.append((variant.variant_id, round_idx))
+        return self.candidates
+
+    def evaluate(self, candidate, t_k, round_idx):  # noqa: ARG002 - scripted round
+        self.evaluate_calls.append(candidate.candidate_id)
+        full = self.outcomes[candidate.candidate_id]
+        return {task: full[task] for task in t_k}
+
+
+def _artifact(tmp_path, candidate_id: str, *, target_variant: str = "V0") -> CandidateArtifact:
+    """A complete prompt-only artifact suitable for the real manifest gate."""
+    candidate_dir = tmp_path / candidate_id
+    candidate_dir.mkdir()
+    config_path = candidate_dir / "config.yaml"
+    config_path.write_text(f"candidate: {candidate_id}\n", encoding="utf-8")
+    manifest = ChangeManifest.model_validate(
+        {
+            "candidate_id": candidate_id,
+            "bucket": ["prompt"],
+            "file_changes": [
+                {
+                    "path": "gaia_agent.md",
+                    "action": "modify",
+                    "diff_summary": f"apply {candidate_id}",
+                }
+            ],
+            "predicted_impact": {"tasks_will_unlock": ["new"]},
+            "target_variant": target_variant,
+        }
+    )
+    return CandidateArtifact(
+        config_path=config_path,
+        manifest=manifest,
+        target_variant=target_variant,
+    )
+
+
 class SpyPool(VariantPool):
     """A pool that records every fork / retire / reassign it is asked to do."""
 
@@ -94,6 +146,7 @@ class SpyRouter(Router):
     """Captures each freeze: the round, the ledger age it saw, and the map."""
 
     def __init__(self, *args, events=None, **kwargs) -> None:
+        kwargs.setdefault("routing_mode", "task_tournament")
         super().__init__(*args, **kwargs)
         self.events = events if events is not None else []
         self.freeze_log: list[tuple[int, int]] = []
@@ -126,6 +179,11 @@ def _first_pos(events, item):
 def _pass_fraction(outcomes: dict[str, tuple[int, int]]) -> float:
     solved = sum(1 for n_pass, _ in outcomes.values() if n_pass >= 1)
     return solved / len(outcomes)
+
+
+def _task_router(**kwargs) -> Router:
+    """Legacy task tournament for tests whose fixture partitions per task."""
+    return Router(routing_mode="task_tournament", **kwargs)
 
 
 # ===========================================================================
@@ -326,6 +384,15 @@ def test_a_seesaw_conflict_forks_a_new_variant() -> None:
     # and the new variant carries the candidate's results for those tasks
     assert ledger.cell("V1", "c").passes == 2
     assert ledger.cell("V1", "d").passes == 2
+    # ...plus the failures from the rest of the evaluated T_k. Omitting these
+    # would give the child an optimistic routing/retirement prior.
+    assert ledger.cell("V1", "a").attempts == 2
+    assert ledger.cell("V1", "a").passes == 0
+    assert ledger.cell("V1", "b").attempts == 2
+    assert ledger.cell("V1", "b").passes == 0
+    # Candidate outcomes are never credited to the unchanged parent.
+    assert ledger.cell("V0", "a").attempts == 2
+    assert ledger.cell("V0", "b").attempts == 2
 
 
 def test_fork_narrows_evaluation_to_the_forking_variants_tasks() -> None:
@@ -389,8 +456,10 @@ def test_a_full_pool_retires_and_reassigns_before_forking() -> None:
     assert "V1" not in pool.variants
     assert len(pool) <= pool.K == 2               # never exceeds capacity
     assert pool.variants["V2"].routed_tasks == {"e", "f"}
-    # V1 was retired before its turn in the loop, so it was never evolved
-    assert ("V1", 1) not in scripted.evolve_calls
+    # Two-phase semantics: V1 was still evolved against the common freeze-time
+    # snapshot; it returned no candidate, then retirement happened at settle.
+    assert ("V1", 1) in scripted.evolve_calls
+    assert all(call[0] != "V1" for call in scripted.evaluate_calls)
 
 
 def test_weakest_variant_is_the_one_retired() -> None:
@@ -409,6 +478,131 @@ def test_weakest_variant_is_the_one_retired() -> None:
     engine = VariantPoolEngine(pool, ledger, router, evaluate=scripted.evaluate, evolve=scripted.evolve)
 
     assert engine._weakest_other("V0") == "V2"  # not V0 (parent), not V1 (stronger)
+
+
+def test_retirement_defaults_to_task_macro_but_keeps_raw_compatibility() -> None:
+    pool = VariantPool(K=3)
+    pool.add_root("cfg/V0.yaml", "j/V0.md", tasks=set())
+    pool.fork("V0", set(), 0)  # V1
+    pool.fork("V0", set(), 0)  # V2
+    ledger = SuccessLedger()
+    ledger.record("V1", "easy", 100, 100, 0)
+    ledger.record("V1", "hard", 0, 2, 0)  # task-macro .5, raw .98
+    ledger.record("V2", "a", 3, 4, 0)
+    ledger.record("V2", "b", 3, 4, 0)     # task-macro/raw .75
+    scripted = Scripted({})
+
+    macro = VariantPoolEngine(
+        pool,
+        ledger,
+        Router(),
+        evaluate=scripted.evaluate,
+        evolve=scripted.evolve,
+    )
+    raw = VariantPoolEngine(
+        pool,
+        ledger,
+        Router(),
+        evaluate=scripted.evaluate,
+        evolve=scripted.evolve,
+        retirement_metric="raw",
+    )
+
+    assert macro._weakest_other("V0") == "V1"
+    assert raw._weakest_other("V0") == "V2"
+
+
+def test_two_phase_settlement_handles_multiple_full_pool_forks_deterministically() -> None:
+    """Both candidates are gated before one planned retire/reassign/fork batch."""
+    ledger = SuccessLedger()
+    router = Router()
+    pool = SpyPool(K=4)
+    pool.add_root(
+        "cfg/V0.yaml",
+        "j/V0.md",
+        tasks={"new0", "old0", "new1", "old1", "orphan2", "orphan3"},
+    )
+    pool.fork("V0", {"new1", "old1"}, 0)   # V1
+    pool.fork("V0", {"orphan2"}, 0)        # V2
+    pool.fork("V0", {"orphan3"}, 0)        # V3
+    pool.fork_calls.clear()
+
+    ledger.record("V0", "old0", 2, 2, 0)
+    ledger.record("V1", "old1", 2, 2, 0)
+    ledger.record("V2", "orphan2", 2, 2, 0)
+    ledger.record("V3", "orphan3", 2, 2, 0)
+    scripted = Scripted(
+        {
+            ("V0", 1): {"new0": (2, 2), "old0": (0, 2)},
+            ("V1", 1): {"new1": (2, 2), "old1": (0, 2)},
+        }
+    )
+    engine = VariantPoolEngine(
+        pool,
+        ledger,
+        router,
+        evaluate=scripted.evaluate,
+        evolve=scripted.evolve,
+    )
+
+    result = engine.run_round(
+        1,
+        {"new0", "old0", "new1", "old1", "orphan2", "orphan3"},
+    )
+
+    assert result.decisions["V0"] is Decision.FORK
+    assert result.decisions["V1"] is Decision.FORK
+    assert result.retired == ["V2", "V3"]
+    assert result.forked == ["V4", "V5"]
+    assert pool.reassign_calls == [{"orphan2", "orphan3"}]
+    assert pool.fork_calls == [
+        ("V0", {"new0"}, 1),
+        ("V1", {"new1"}, 1),
+    ]
+    assert set(pool.variants) == {"V0", "V1", "V4", "V5"}
+    assert len(pool) == pool.K
+    # Both freeze-time parents were evaluated before either retire occurred.
+    assert ("V0", frozenset({"new0", "old0"}), 1) in scripted.evaluate_calls
+    assert ("V1", frozenset({"new1", "old1"}), 1) in scripted.evaluate_calls
+
+
+def test_two_phase_settlement_protects_apply_and_fork_parents() -> None:
+    ledger = SuccessLedger()
+    router = Router()
+    pool = SpyPool(K=3)
+    pool.add_root(
+        "cfg/V0.yaml",
+        "j/V0.md",
+        tasks={"apply", "kept", "new", "old", "orphan"},
+    )
+    pool.fork("V0", {"new", "old"}, 0)  # V1
+    pool.fork("V0", {"orphan"}, 0)      # V2
+    pool.fork_calls.clear()
+    ledger.record("V0", "kept", 2, 2, 0)
+    ledger.record("V1", "old", 2, 2, 0)
+    ledger.record("V2", "orphan", 2, 2, 0)
+
+    scripted = Scripted(
+        {
+            ("V0", 1): {"apply": (2, 2), "kept": (2, 2)},
+            ("V1", 1): {"new": (2, 2), "old": (0, 2)},
+        }
+    )
+    result = VariantPoolEngine(
+        pool,
+        ledger,
+        router,
+        evaluate=scripted.evaluate,
+        evolve=scripted.evolve,
+    ).run_round(1, {"apply", "kept", "new", "old", "orphan"})
+
+    assert result.decisions == {"V0": Decision.APPLY, "V1": Decision.FORK}
+    assert result.retired == ["V2"]
+    assert result.forked == ["V3"]
+    assert set(pool.variants) == {"V0", "V1", "V3"}
+    assert ledger.cell("V0", "apply").passes == 2
+    assert ledger.cell("V3", "new").passes == 2
+    assert ledger.cell("V3", "old").passes == 0
 
 
 # ===========================================================================
@@ -461,6 +655,10 @@ def test_default_patience_matches_the_paper() -> None:
     assert DEFAULT_PATIENCE == 3
 
 
+def test_default_fork_threshold_matches_the_paper() -> None:
+    assert DEFAULT_MIN_FORK == (1, 1)
+
+
 # ===========================================================================
 # 6. Narrowed evaluation — evolve/evaluate only touch each variant's T_k
 # ===========================================================================
@@ -469,7 +667,7 @@ def test_default_patience_matches_the_paper() -> None:
 def test_evolve_and_evaluate_stay_within_each_variants_tk() -> None:
     """Two variants with disjoint clusters; a third that carries nothing is skipped."""
     ledger = SuccessLedger()
-    router = Router()
+    router = _task_router()
     pool = VariantPool(K=8)
     pool.add_root("cfg/V0.yaml", "j/V0.md", tasks={"a", "b", "c", "d"})
     pool.fork("V0", set(), 0)  # V1
@@ -517,13 +715,138 @@ def test_a_variant_with_no_candidate_contributes_only_to_idle() -> None:
     assert scripted.evolve_calls == [("V0", 0)]
     assert scripted.evaluate_calls == []       # never evaluated
     assert result.decisions == {}
+    assert result.no_candidate_variants == ["V0"]
+    assert result.candidate_diagnostics == {}
     assert result.shipped is False
     assert result.idle == 1
     assert ledger.cell("V0", "a") is None      # nothing recorded
 
 
 # ===========================================================================
-# 7. RoundResult shape and evidence side effects
+# 7. Ranked candidate queues
+# ===========================================================================
+
+
+def test_ranked_queue_rejects_then_applies_in_the_supplied_order(tmp_path) -> None:
+    """Critic order is preserved; a rejection advances to the next candidate."""
+    from variant_pool.evidence import EvidenceStore
+
+    ledger = SuccessLedger()
+    ledger.record("V0", "old", 2, 2, 0)
+    pool = VariantPool(K=2)
+    pool.add_root("cfg/V0.yaml", "j/V0.md", tasks={"old", "new"})
+    evidence = EvidenceStore(tmp_path / "run")
+
+    # Deliberately reverse lexical id order: Critic rank, not id sorting, owns
+    # the evaluation queue.
+    rejected = _artifact(tmp_path, "C-R1-02")
+    applied = _artifact(tmp_path, "C-R1-01")
+    scripted = QueueScripted(
+        (rejected, applied),
+        {
+            rejected.candidate_id: {"old": (2, 2), "new": (0, 2)},
+            applied.candidate_id: {"old": (2, 2), "new": (2, 2)},
+        },
+    )
+    settled: list[tuple[str, CandidateArtifact]] = []
+    engine = VariantPoolEngine(
+        pool,
+        ledger,
+        Router(),
+        evaluate=scripted.evaluate,
+        evolve=scripted.evolve,
+        evidence=evidence,
+    )
+    engine._apply_candidate = lambda variant, candidate: settled.append(  # type: ignore[method-assign]
+        (variant.variant_id, candidate)
+    )
+
+    result = engine.run_round(1, {"old", "new"})
+
+    assert scripted.evaluate_calls == ["C-R1-02", "C-R1-01"]
+    assert result.decisions == {"V0": Decision.APPLY}
+    assert result.selected_candidate_ids == {"V0": "C-R1-01"}
+    assert result.per_variant_pass["V0"] == {"new": (2, 2), "old": (2, 2)}
+    assert settled == [("V0", applied)]  # settlement keeps the artifact, not only its manifest
+
+    first = result.candidate_diagnostics["C-R1-02"]
+    second = result.candidate_diagnostics["C-R1-01"]
+    assert first.decision is Decision.REJECT
+    assert first.failed_stage is GateStage.SEESAW_REGRESSION
+    assert first.evaluation == {"new": (0, 2), "old": (2, 2)}
+    assert second.decision is Decision.APPLY
+    assert second.failed_stage is None
+
+    archived = evidence.rejected_candidates()
+    assert [item["candidate_id"] for item in archived] == ["C-R1-02"]
+    assert archived[0]["failed_stage"] == "SEESAW_REGRESSION"
+    assert "no task improved" in archived[0]["archive_reason"]
+
+
+def test_first_fork_skips_the_rest_and_settles_the_original_artifact(tmp_path) -> None:
+    ledger = SuccessLedger()
+    ledger.record("V0", "old", 2, 2, 0)
+    pool = VariantPool(K=2)
+    pool.add_root("cfg/V0.yaml", "j/V0.md", tasks={"old", "new"})
+
+    forked = _artifact(tmp_path, "C-R1-01")
+    skipped = _artifact(tmp_path, "C-R1-02")
+    scripted = QueueScripted(
+        [forked, skipped],
+        {
+            forked.candidate_id: {"old": (0, 2), "new": (2, 2)},
+            skipped.candidate_id: {"old": (2, 2), "new": (2, 2)},
+        },
+    )
+    settled: list[tuple[str, CandidateArtifact]] = []
+    engine = VariantPoolEngine(
+        pool,
+        ledger,
+        Router(),
+        evaluate=scripted.evaluate,
+        evolve=scripted.evolve,
+    )
+    engine._apply_candidate = lambda variant, candidate: settled.append(  # type: ignore[method-assign]
+        (variant.variant_id, candidate)
+    )
+
+    result = engine.run_round(1, {"old", "new"})
+
+    assert scripted.evaluate_calls == ["C-R1-01"]
+    assert result.decisions == {"V0": Decision.FORK}
+    assert result.selected_candidate_ids == {"V0": "C-R1-01"}
+    assert result.forked == ["V1"]
+    assert settled == [("V1", forked)]
+    assert result.candidate_diagnostics["C-R1-01"].decision is Decision.FORK
+    skipped_diagnostic = result.candidate_diagnostics["C-R1-02"]
+    assert skipped_diagnostic.decision is None
+    assert skipped_diagnostic.evaluation == {}
+    assert "earlier candidate C-R1-01 selected fork" == skipped_diagnostic.skipped_reason
+
+
+def test_legacy_single_candidate_return_remains_compatible() -> None:
+    ledger = SuccessLedger()
+    pool = VariantPool(K=1)
+    pool.add_root("cfg/V0.yaml", "j/V0.md", tasks={"a"})
+    scripted = Scripted({("V0", 0): {"a": (2, 2)}})
+    engine = VariantPoolEngine(
+        pool,
+        ledger,
+        Router(),
+        evaluate=scripted.evaluate,
+        evolve=scripted.evolve,
+    )
+
+    result = engine.run_round(0, {"a"})
+
+    assert result.decisions == {"V0": Decision.APPLY}
+    assert result.per_variant_pass == {"V0": {"a": (2, 2)}}
+    assert result.selected_candidate_ids == {"V0": "C-R0-V0"}
+    assert result.candidate_diagnostics["C-R0-V0"].decision is Decision.APPLY
+
+
+# ===========================================================================
+# 8. RoundResult shape and evidence side effects
 # ===========================================================================
 
 
@@ -575,8 +898,50 @@ def test_evidence_store_receives_digests_and_rejections(tmp_path) -> None:
     assert rejected[0]["variant_id"] == "V0"
 
 
+@pytest.mark.parametrize(
+    ("outcomes", "expected_decision"),
+    [
+        ({"old": (2, 2), "new": (2, 2)}, Decision.APPLY),
+        ({"old": (0, 2), "new": (2, 2)}, Decision.FORK),
+    ],
+)
+def test_selected_gate_results_can_be_left_for_external_settled_scoring(
+    tmp_path,
+    outcomes,
+    expected_decision,
+) -> None:
+    """Paper-mode full-set scoring can own the round's sole ledger write."""
+    from variant_pool.evidence import EvidenceStore
+
+    ledger = SuccessLedger()
+    ledger.record("V0", "old", 2, 2, 0)
+    pool = VariantPool(K=2)
+    pool.add_root("cfg/V0.yaml", "j/V0.md", tasks={"old", "new"})
+    evidence = EvidenceStore(tmp_path / "run")
+    scripted = Scripted({("V0", 1): outcomes})
+    engine = VariantPoolEngine(
+        pool,
+        ledger,
+        Router(),
+        evaluate=scripted.evaluate,
+        evolve=scripted.evolve,
+        evidence=evidence,
+        record_selected_results=False,
+    )
+
+    result = engine.run_round(1, {"old", "new"})
+
+    assert result.decisions == {"V0": expected_decision}
+    assert result.shipped is True
+    assert result.per_variant_pass == {"V0": outcomes}
+    assert ledger.cell("V0", "new") is None
+    assert ledger.cell("V0", "old").last_round == 0
+    assert all(ledger.cell("V1", task) is None for task in ("old", "new"))
+    assert list(evidence.iter_digests()) == []
+
+
 # ===========================================================================
-# 8. Constructor validation
+# 9. Constructor validation
 # ===========================================================================
 
 

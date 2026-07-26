@@ -192,7 +192,9 @@ def test_paper_mode_injects_table9_schema_and_the_c_r10_02_example() -> None:
     assert "C-R10-02" in brief["manifest_instructions"]
     # B4 decision-contract emphasis is present in both modes.
     assert "did not commit to a final decision" in brief["decision_contract_requirement"]
-    assert contract["suggested_candidate_id"] == "C-R1-01"
+    # The contract carries the repo-gate-safe alias of the slot id, never the
+    # paper shape: validate_workflow's evidence gate only accepts `C-\d+`.
+    assert contract["suggested_candidate_id"] == "C-0101"
     assert contract["target_variant"] == "V0"
 
 

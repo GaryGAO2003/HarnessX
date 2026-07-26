@@ -17,6 +17,7 @@ wiring the recipe adds on top of the C1 engine:
 from __future__ import annotations
 
 import collections
+import json
 import sys
 from pathlib import Path
 
@@ -30,7 +31,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from recipe.gaia_evolver import run_variant_pool as rvp  # noqa: E402
-from experiments.variant_pool.gate import Decision  # noqa: E402
+from experiments.variant_pool.engine import RoundResult  # noqa: E402
+from experiments.variant_pool.gate import Decision, GateResult  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +62,23 @@ class _Args:
         self.model = "task-model"
         self.meta_model = "meta-model"
         self.max_tasks = 0
+        self.max_steps = 20
+        self.provider_id = "provider"
+        self.api_base = None
+        self.data_path = None
+        self.seed = 0
+        self.estimator = "laplace"
+        self.cluster_mode = "routed"
+        self.routing_mode = "cluster"
+        self.routing_window = None
+        self.retirement_metric = "task_macro"
+        self.candidate_mode = "legacy_single"
+        self.candidates_per_round = 4
+        self.actionability_threshold = 1.0
+        self.target_strategy = "all_active_variants"
+        self.patience = 3
+        self.planned_seeds = (0, 1, 2)
+        self.evolve_steps = 200
         self.__dict__.update(overrides)
 
 
@@ -144,7 +163,16 @@ def _patch_seams(monkeypatch):
     monkeypatch.setattr(rvp, "_prepare_round_config", lambda config_path, journal: _DummyConfig())
 
 
-def _make_recipe(tmp_path, *, args, tasks, meta, baseline_bytes=b"baseline: true\n"):
+def _make_recipe(
+    tmp_path,
+    *,
+    args,
+    tasks,
+    meta,
+    baseline_bytes=b"baseline: true\n",
+    active_pool_evaluator=None,
+    min_fork=(1, 1),
+):
     baseline = tmp_path / "baseline.yaml"
     baseline.write_bytes(baseline_bytes)
     return rvp.VariantPoolRecipe(
@@ -155,6 +183,8 @@ def _make_recipe(tmp_path, *, args, tasks, meta, baseline_bytes=b"baseline: true
         pipeline_eval=None,
         run_dir=tmp_path / "run",
         baseline_config_path=baseline,
+        active_pool_evaluator=active_pool_evaluator,
+        min_fork=min_fork,
     )
 
 
@@ -168,9 +198,9 @@ def test_pool_k1_single_lineage_never_forks(tmp_path, monkeypatch):
     # solve one more task each round, then plateau.
     fake_pass = FakePassK(
         {
-            "a": [(2, 2), (2, 2), (2, 2), (2, 2)],
-            "b": [(0, 2), (2, 2), (2, 2), (2, 2)],
-            "c": [(0, 2), (0, 2), (2, 2), (2, 2)],
+            "a": [(2, 2), (2, 2), (2, 2), (2, 2), (2, 2)],
+            "b": [(0, 2), (2, 2), (2, 2), (2, 2), (2, 2)],
+            "c": [(0, 2), (0, 2), (2, 2), (2, 2), (2, 2)],
         }
     )
     monkeypatch.setattr(rvp, "_run_task_pass_k", fake_pass)
@@ -199,8 +229,10 @@ def test_pool_k1_single_lineage_never_forks(tmp_path, monkeypatch):
     # V0 once, from the config it currently holds.
     assert len(meta.calls) == 3
     assert meta.calls[0]["current_config"] == (tmp_path / "baseline.yaml")
-    # and every round evaluated all three tasks (3 tasks x 4 rounds).
-    assert len(fake_pass.seen) == 12
+    # Candidate measurements are safely reused for the three deployed APPLY
+    # rounds. The rejected R3 candidate is not reusable, so the still-active
+    # baseline config receives one separate full score (3 extra task calls).
+    assert len(fake_pass.seen) == 15
     assert {tid for tid, _ in fake_pass.seen} == {"a", "b", "c"}
     # pass_k threaded through to the evaluator.
     assert all(pk == 2 for _, pk in fake_pass.seen)
@@ -231,7 +263,15 @@ def test_pool_k1_reconciles_config_forward_on_apply(tmp_path, monkeypatch):
     evolved = tmp_path / "run" / "R1" / "V0" / "evolve" / "config.yaml"
     assert recipe.pool.variants["V0"].config_path == evolved
     # and the trajectories the next evolve would read advanced to R1's.
-    assert recipe._last_traj_dir["V0"] == tmp_path / "run" / "R1" / "V0" / "trajectories"
+    assert recipe._last_traj_dir["V0"] == (
+        tmp_path
+        / "run"
+        / "R1"
+        / "V0"
+        / "candidate_gate"
+        / "C-R1-V0"
+        / "trajectories"
+    )
 
 
 # ===========================================================================
@@ -299,7 +339,7 @@ def test_evolve_returns_none_on_noop(tmp_path, monkeypatch):
         recipe.close()
 
     assert candidate is None
-    assert recipe._round_candidates["V0"] is None
+    assert recipe._round_candidates == {}
     assert len(meta.calls) == 1  # the meta-agent was called, and its output was a no-op
 
 
@@ -347,3 +387,228 @@ def test_candidate_carries_target_variant(tmp_path, monkeypatch):
     assert evolved.candidate_id == "C-R1-V0"
     # config_path points at the freshly evolved YAML, not the parent's.
     assert evolved.config_path == tmp_path / "run" / "R1" / "V0" / "evolve" / "config.yaml"
+
+
+# ===========================================================================
+# (e) candidate gate and settled active-pool measurement are separate
+# ===========================================================================
+
+
+def _forced(decision: Decision, *, improved=(), regressed=()):
+    return lambda *args, **kwargs: GateResult(
+        passed=decision is not Decision.REJECT,
+        failed_stage=None,
+        decision=decision,
+        archive_reason=f"forced {decision.value}",
+        improved=frozenset(improved),
+        regressed=frozenset(regressed),
+    )
+
+
+def test_rejected_candidate_cannot_move_final_or_pass_at_1(tmp_path, monkeypatch):
+    tasks = [_Task("a")]
+    monkeypatch.setattr(rvp, "_run_task_pass_k", FakePassK({"a": [(2, 2)]}))
+    active_calls = []
+
+    def active(variant, task_ids, round_idx):
+        active_calls.append((variant.variant_id, set(task_ids), round_idx))
+        return {"a": (0, 2)}
+
+    recipe = _make_recipe(
+        tmp_path,
+        args=_Args(num_rounds=1),
+        tasks=tasks,
+        meta=FakeMeta(),
+        active_pool_evaluator=active,
+    )
+    recipe.engine.gate = _forced(Decision.REJECT)
+    try:
+        recipe.run()
+    finally:
+        recipe.close()
+
+    assert active_calls == [("V0", {"a"}, 0)]
+    assert recipe.report.final() == 0.0
+    assert recipe.report.pass_at_1() == 0.0
+    candidate = recipe.report.candidate_diagnostics()
+    assert candidate["by_round"][0]["pass_at_2"] == 1.0
+    assert candidate["results"][0]["decision"] == "reject"
+
+
+def test_no_candidate_round_still_scores_the_fixed_full_task_set(tmp_path, monkeypatch):
+    tasks = [_Task("a"), _Task("b")]
+    monkeypatch.setattr(
+        rvp,
+        "_run_task_pass_k",
+        FakePassK({"a": [(0, 2)], "b": [(0, 2)]}),
+    )
+    calls = []
+
+    def active(variant, task_ids, round_idx):
+        calls.append((variant.variant_id, set(task_ids), round_idx))
+        return {task_id: ((2, 2) if task_id == "a" else (0, 2)) for task_id in task_ids}
+
+    recipe = _make_recipe(
+        tmp_path,
+        args=_Args(num_rounds=2),
+        tasks=tasks,
+        meta=FakeMeta(mode="noop"),
+        active_pool_evaluator=active,
+    )
+    try:
+        recipe.run()
+    finally:
+        recipe.close()
+
+    assert calls == [("V0", {"a", "b"}, 0), ("V0", {"a", "b"}, 1)]
+    diagnostics = recipe.report.round_diagnostics()
+    assert diagnostics[1]["no_candidate"] is True
+    assert diagnostics[1]["evaluated_tasks"] == diagnostics[1]["evaluated_task_denominator"] == 2
+    assert len(recipe.report.results_in(1)) == 2
+
+
+def test_fork_scores_parent_and_child_under_their_deployed_ids(tmp_path, monkeypatch):
+    tasks = [_Task("a"), _Task("b")]
+    monkeypatch.setattr(
+        rvp,
+        "_run_task_pass_k",
+        FakePassK(
+            {
+                "a": [(2, 2), (0, 2)],
+                "b": [(0, 2), (2, 2)],
+            }
+        ),
+    )
+    calls = []
+
+    def active(variant, task_ids, round_idx):
+        calls.append((variant.variant_id, set(task_ids), round_idx))
+        return {task_id: (2, 2) for task_id in task_ids}
+
+    recipe = _make_recipe(
+        tmp_path,
+        args=_Args(pool_k=2, num_rounds=2),
+        tasks=tasks,
+        meta=FakeMeta(mode="change"),
+        active_pool_evaluator=active,
+        min_fork=(1, 1),
+    )
+    try:
+        results = recipe.run()
+    finally:
+        recipe.close()
+
+    assert results[1].decisions["V0"] is Decision.FORK
+    assert ("V0", {"a"}, 1) in calls
+    assert ("V1", {"b"}, 1) in calls
+    carriers = {row.task_id: row.variant_id for row in recipe.report.results_in(1)}
+    assert carriers == {"a": "V0", "b": "V1"}
+
+
+def test_reconcile_apply_then_retire_is_explicit_and_keyerror_free(tmp_path):
+    recipe = _make_recipe(
+        tmp_path,
+        args=_Args(pool_k=2),
+        tasks=[_Task("a"), _Task("b")],
+        meta=FakeMeta(),
+        active_pool_evaluator=lambda variant, tasks, round_idx: {
+            task: (0, 2) for task in tasks
+        },
+    )
+    child = recipe.pool.fork("V0", {"b"}, at_round=0)
+    candidate_path = tmp_path / "candidate.yaml"
+    candidate_path.write_text("changed: true\n", encoding="utf-8")
+    recipe._round_candidates = {
+        "C-R1-V0": rvp.PoolCandidate("C-R1-V0", "V0", candidate_path),
+    }
+    traj_dir = tmp_path / "candidate-trajectories"
+    traj_dir.mkdir()
+    recipe._round_traj_dir = {"C-R1-V0": traj_dir}
+    recipe.pool.retire("V0")
+    result = RoundResult(
+        round_idx=1,
+        variant_count=1,
+        decisions={"V0": Decision.APPLY},
+        selected_candidate_ids={"V0": "C-R1-V0"},
+        retired=["V0"],
+    )
+
+    try:
+        recipe._reconcile(result)
+    finally:
+        recipe.close()
+
+    assert child.variant_id in recipe.pool.variants
+    assert recipe._reconcile_status["V0"] == "applied_then_retired"
+    assert "V0" not in recipe._last_traj_dir
+
+
+def test_variant_recipe_cli_defaults_match_the_paper_run(monkeypatch) -> None:
+    monkeypatch.delenv("HARNESSX_PROVIDER_ID", raising=False)
+    args = rvp.build_arg_parser().parse_args([])
+    assert (args.pass_k, args.num_rounds, args.patience, args.concurrency) == (2, 15, 3, 10)
+    assert args.routing_mode == "cluster"
+    assert args.provider_id is None  # an unresolved provider is never silently runnable
+
+
+def test_lock_records_runtime_values_and_resolved_provenance(tmp_path):
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text("harness: frozen\n", encoding="utf-8")
+    prompt = tmp_path / "prompt.j2"
+    prompt.write_text("You are the deployed GAIA agent.", encoding="utf-8")
+    data = tmp_path / "tasks.json"
+    data.write_text(
+        json.dumps([{"task_id": "a", "Question": "q", "answer": "a", "Level": 2}]),
+        encoding="utf-8",
+    )
+
+    class _Registry:
+        @staticmethod
+        def list_names():
+            return ["WebFetch", "WebSearch"]
+
+    class _Base:
+        tool_registry = _Registry()
+        processors = [
+            {
+                "_target_": "harnessx.processors.context.system_prompt.SystemPromptProcessor",
+                "system_builder": {"template_path": str(prompt)},
+            }
+        ]
+
+    args = _Args(
+        pool_k=3,
+        pass_k=2,
+        num_rounds=7,
+        concurrency=6,
+        patience=4,
+        seed=19,
+        provider_id="provider-live",
+        api_base=None,
+        data_path=str(data),
+        routing_mode="cluster",
+        routing_window=5,
+        retirement_metric="cluster_macro",
+    )
+    lock = rvp._build_experiment_lock(
+        args=args,
+        run_tag="runtime-lock",
+        baseline_config_path=baseline,
+        original_base=_Base(),
+    )
+
+    assert lock.git_sha not in ("", "unresolved")
+    assert lock.h0.system_prompt_sha256 == rvp.sha256_file(prompt)
+    assert lock.models.provider == "provider-live"
+    assert lock.models.api_base == "unresolved"
+    assert lock.env.seed == 19
+    assert lock.hyperparams.candidates_per_round == "one_per_active_variant"
+    assert lock.hyperparams.target_strategy == "all_active_variants"
+    assert lock.hyperparams.routing_mode == "cluster"
+    assert lock.hyperparams.routing_window == 5
+    assert lock.hyperparams.retirement_metric == "cluster_macro"
+    assert lock.hyperparams.planned_seeds == (0, 1, 2)
+    assert "models.api_base unresolved" in lock.provenance_warnings
+    rendered = lock.to_json()
+    assert '""' not in rendered
+    assert "YOUR_PROVIDER_ID" not in rendered

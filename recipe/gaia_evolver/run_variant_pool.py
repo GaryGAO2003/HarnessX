@@ -126,6 +126,7 @@ from experiments.variant_pool.candidate_pipeline import (
     DigesterRoundArtifact,
     IsolatedEvolverAdapter,
     OURS_ACTIONABILITY_THRESHOLD_PROVENANCE,
+    outward_candidate_id,
     PipelineContext,
     PipelineResult,
     PlanningArtifact,
@@ -332,7 +333,12 @@ def _build_candidate_contract(
             "explicit `cp` no-op.\n\n" + decision_feedback
         )
     return {
-        "suggested_candidate_id": suggested_candidate_id,
+        # The id the meta-agent must use verbatim is the repo-gate-safe ALIAS
+        # of our paper-shape slot id: the repo's own validate_workflow scans
+        # candidates.md for `C-\d+` (digits only) and rejected `C-R1-01`
+        # outright (runs/smoke_hard). Everything on our side stays keyed by
+        # the slot id; the manifest intake maps an echoed alias back.
+        "suggested_candidate_id": outward_candidate_id(suggested_candidate_id),
         "target_variant": target_variant,
         "planner_brief": brief,
     }
@@ -1126,6 +1132,16 @@ class VariantPoolRecipe:
                 candidate_id=slot_id,
                 target_variant=context.target_variant,
             )
+
+        # The contract hands the meta-agent the repo-gate-safe ALIAS of the
+        # slot id, so a manifest echoing that alias is OUR candidate under its
+        # outward name, not a disagreement. Map it back so every internal
+        # artefact (gate, ledger, reports) keys on the paper-shape slot id;
+        # the alias itself stays in the audit record.
+        alias = outward_candidate_id(slot_id)
+        if manifest.candidate_id == alias and alias != slot_id:
+            meta["repo_candidate_id"] = alias
+            manifest = manifest.model_copy(update={"candidate_id": slot_id})
 
         meta["provenance"] = manifest.provenance
         meta["paper_only_gaps"] = list(manifest.paper_only_gaps())

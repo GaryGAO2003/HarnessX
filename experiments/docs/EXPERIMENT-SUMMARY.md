@@ -1,5 +1,21 @@
 # HarnessX 变体池复现 · 实验总结
 
+## ⚠️ CORRECTION / ERRATA INDEX（2026-07-25）
+
+> 本索引是本文的当前权威读法。下列历史文字为保留实验演进记录而不删除，但已被明确纠正。完整的方法学缺口、我方工程选择和验证要求见 [`PAPER-METHODOLOGY-DEVIATIONS.md`](./PAPER-METHODOLOGY-DEVIATIONS.md)。
+
+| Errata | 被取代的历史段落 | 纠正 |
+|---|---|---|
+| EXP-E01 | **§0 一句话结论**；**§4 核心结果**中“没有 mixed conflict，所以 fork 未触发”；**§5** 对该原因的判断 | 日志明确包含 mixed conflict：`forkprobe` R2 为 `1 improved + 1 regressed`；`forkprobe_p2` R2 为 `1+1`、R3 为 `2+1`。这些已观察 conflict 没有产生 fork 的直接原因是旧工程门槛 `min_fork=(2,2)` 将它们 REJECT，**不是没有 mixed conflict**。 |
+| EXP-E02 | **§4** 中把两个探针都描述为“12 tasks × 5 rounds”及等价完整运行 | `forkprobe_p2` 不是五个完整 scored rounds：状态只有 R0–R3，R1 的 `evaluated_tasks=0`，报告曲线只有 R0/R2/R3。它最多提供三个 scored checkpoints，不能作为五轮完整实验解释。 |
+| EXP-E03 | **§2.3、§4** 将 `forkprobe_p2` 的 R3 分数作为 final/peak；**§5** 基于该 final 的推断 | R2/R3 候选均被 REJECT。旧 reporter 错把被拒候选 R3 的 `0.6667` 报成 active-pool final/peak。该数只能保留为 candidate diagnostic，不能代表 settled pool 的最终结果。 |
+| EXP-E04 | **§0、§5** 中“链路正确”与 fork/Ensemble 负结果的结论性表述 | 单元/集成测试证明的是实现契约，不是机制效果。已有探针既没有获得有效 fork 后的 Ensemble 池，也没有可靠的 settled active-pool final，故**尚未验证 Ensemble，不能据此判断 Ensemble 优于、等于或劣于 Global**。 |
+| EXP-E05 | **§6 下一步**中把 `(1,1)` 仅列为未来想法；本文各处隐含的旧实现状态 | 当前默认已改为 `(1,1)`；已有真实 cluster API、`task_tournament` 兼容分臂、task/cluster macro retirement、两阶段 settle、独立 active-pool scoring，以及 CandidatePipeline/Critic 契约。当前候选 queue 上限仍是 per target/variant，不是论文 round-global `K_t=4`；真实 LLM adapter 和正式 `103 × 15 × 3` 实验仍未运行。 |
+| EXP-E06 | **§2.1/§2.2** 对多候选、Critic 与 shipping “建成”的概括 | Algorithm 1 的 round-global `K_t` coordinator/target selector 尚未实现；当前 first-pass-wins 是按主文 Algorithm 作出的工程裁决，而 Appendix B.1 明述的 ranked bucket-disjoint multi-ship 尚未实现。两种 shipping 语义必须作为分臂，不能宣称已有唯一论文实现。 |
+| EXP-E07 | **§2.1/§2.2** 对 Digester/AEGIS 调用链“建成”的概括 | CandidatePipeline 的结构化合约已测试，但 actionability `a_t < α` / empty-landscape 前置 short-circuit 尚未实现；空 briefs 仍可能进入 Evolver。故不得宣称 Algorithm 1 selective invocation 已完成。 |
+
+**纠正后的唯一可支持结论：**旧探针暴露了 fork 门槛与报告边界缺陷；它们没有构成 Ensemble 效果实验。本文以下旧结论仅作为历史记录阅读，不再作为当前证据。
+
 **日期**:2026-07-25  
 **定位**:论文启发的跨模型复现(paper-informed re-implementation)——在 HarnessX(arXiv 2606.14249)官方开源仓上,用 DeepSeek V4(flash 内环 / pro 外环)替换论文的 GPT-5.4 / Opus 4.6,复现其 §4.5 变体池 / Ensemble routing 机制。
 

@@ -15,9 +15,10 @@ Real rollouts and real ``meta_agent.evolve`` are batch C. Here ``evaluate`` and
 ``evolve`` are constructor callbacks so the whole engine is exercised offline
 with deterministic stubs (SPEC §8.3/§8.4):
 
-* ``evolve(variant, round_idx) -> candidate | None`` — the round's proposed edit
-  for one variant, carrying its own ``target_variant`` when it is a
-  :class:`.manifest.ChangeManifest`; ``None`` means "no candidate this round".
+* ``evolve(variant, round_idx) -> candidate | Sequence[candidate] | None``
+  returns one proposed edit or a Critic-ranked gate queue for that variant.
+  ``None`` or an empty sequence means "no candidate this round". Queue order is
+  preserved, and the first deterministic APPLY/FORK wins.
 * ``evaluate(candidate, T_k, round_idx) -> {task: (n_pass, n_att)}`` — the
   candidate's pass@2 outcome on **only** the tasks routed to its variant
   (§4.5 "tested only against tasks routed to k").
@@ -31,9 +32,10 @@ One round, in order (SPEC §8.4)
    engine enforces it structurally — freeze is the first thing it does and the
    ledger is written only at step 5 — and the router enforces it again by
    refusing to run when the ledger already holds this round.
-2. For each variant with a non-empty ``T_k``: ``evolve`` it, and if a candidate
-   comes back, ``evaluate`` that candidate on ``T_k`` (the narrowed evaluation).
-3. ``gate`` the candidate: APPLY / FORK / REJECT.
+2. For each variant with a non-empty ``T_k``: ``evolve`` it, and evaluate its
+   ranked candidates on ``T_k`` in the supplied order (the narrowed evaluation).
+3. ``gate`` each attempted candidate: a REJECT is archived and advances the
+   queue; the first APPLY/FORK is selected and the rest are skipped.
 4. Apply the decision to the pool: APPLY merges into the variant; FORK branches a
    new variant (retiring the weakest first if the pool is full, then re-routing
    the orphans); REJECT leaves the variant and archives the reason.
@@ -66,11 +68,12 @@ and marks the ship without touching harness files.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
-from .gate import Decision, GateResult, TaskEval, run_gate
+from .gate import Decision, GateResult, GateStage, TaskEval, run_gate
+from .ledger import ROLLUP_MODES
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
     from .evidence import EvidenceStore
@@ -81,10 +84,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
 #: Default early-stop patience P (Table 8 / §6.1: 15 rounds, patience 3).
 DEFAULT_PATIENCE = 3
 
-#: Default fork minimum ``(improved, regressed)`` sizes (SPEC §6.6), mirroring
-#: :data:`.gate.DEFAULT_MIN_FORK`. Kept as its own constant so the engine's
-#: default is visible without importing the gate's.
-DEFAULT_MIN_FORK = (2, 2)
+#: Paper-faithful fork minimum, mirroring :data:`.gate.DEFAULT_MIN_FORK`.
+#: ``(2, 2)`` is still accepted as an explicit anti-noise ablation.
+DEFAULT_MIN_FORK = (1, 1)
+
+#: Defensive bound for one ``evolve`` return value. This is deliberately not
+#: the paper's global per-round K_t: CandidatePipeline/recipe owns that cap.
+#: The engine bound only prevents a custom callback from returning an
+#: unexpectedly large per-variant queue.
+DEFAULT_MAX_CANDIDATES = 4
 
 #: pass@2 attempt count used to encode the ledger-derived before-state of a task
 #: (SPEC §6.1 p.15). ``(2, 2)`` = the variant already solves it, ``(0, 2)`` = it
@@ -93,27 +101,61 @@ _PASS_AT = 2
 
 
 @dataclass
+class CandidateDiagnostic:
+    """Per-candidate audit emitted by :class:`RoundResult`.
+
+    ``decision`` is the deterministic gate decision (or ``None`` when an
+    earlier gate stage failed / the candidate was skipped). ``evaluation`` is
+    always scoped to the target variant's frozen ``T_k``.
+    """
+
+    candidate_id: str
+    variant_id: str
+    evaluation: dict[str, tuple[int, int]] = field(default_factory=dict)
+    decision: Decision | None = None
+    failed_stage: GateStage | None = None
+    archive_reason: str = ""
+    skipped_reason: str | None = None
+
+
+@dataclass
 class RoundResult:
     """What one round of :meth:`VariantPoolEngine.run_round` did.
 
-    ``per_variant_pass`` is keyed by the *evolved* variant (the one the round's
-    candidate targeted) and holds that candidate's pass@2 outcome on ``T_k`` —
-    the round's measurement, recorded whatever the gate decided, so a rejected
-    round still has a curve point. ``decisions`` carries only the variants a
-    candidate was actually gated for; a variant skipped for an empty ``T_k`` or
-    a ``None`` candidate has no entry. ``forked`` / ``retired`` are the pool
-    mutations, ``shipped`` is true iff any variant applied or forked, and
-    ``idle`` is the global counter *after* this round.
+    ``per_variant_pass`` preserves the legacy curve API: it holds the selected
+    candidate's scoped pass@2 outcome, or the final attempted outcome when the
+    whole queue rejects. ``candidate_diagnostics`` is the lossless audit keyed
+    by candidate id, including gate failures and skip reasons.
+    ``selected_candidate_ids`` names only candidates admitted to settlement;
+    ``no_candidate_variants`` distinguishes an explicit no-candidate result
+    from an empty routing cluster. ``decisions`` remains variant-keyed for
+    compatibility. ``forked`` / ``retired`` are pool mutations, ``shipped`` is
+    true iff any variant applied or forked, and ``idle`` is the global counter
+    after this round.
     """
 
     round_idx: int
     variant_count: int
     decisions: dict[str, Decision] = field(default_factory=dict)
     per_variant_pass: dict[str, dict[str, tuple[int, int]]] = field(default_factory=dict)
+    candidate_diagnostics: dict[str, CandidateDiagnostic] = field(default_factory=dict)
+    selected_candidate_ids: dict[str, str] = field(default_factory=dict)
+    no_candidate_variants: list[str] = field(default_factory=list)
     forked: list[str] = field(default_factory=list)
     retired: list[str] = field(default_factory=list)
     shipped: bool = False
     idle: int = 0
+
+
+@dataclass(frozen=True)
+class _PendingCandidate:
+    """A fully evaluated/gated candidate awaiting round settlement."""
+
+    variant_id: str
+    candidate_id: str
+    candidate: Any
+    gate_result: GateResult
+    tk_eval: Mapping[str, tuple[int, int]]
 
 
 class VariantPoolEngine:
@@ -137,11 +179,23 @@ class VariantPoolEngine:
         evidence: EvidenceStore | None = None,
         patience: int = DEFAULT_PATIENCE,
         min_fork: tuple[int, int] = DEFAULT_MIN_FORK,
+        retirement_metric: str = "task_macro",
+        max_candidates_per_variant: int = DEFAULT_MAX_CANDIDATES,
+        record_selected_results: bool = True,
     ) -> None:
         if patience < 1:
             raise ValueError(f"patience must be >= 1, got {patience}")
         if len(min_fork) != 2 or min_fork[0] < 1 or min_fork[1] < 1:
             raise ValueError(f"min_fork must be a pair of positive ints, got {min_fork!r}")
+        if retirement_metric not in ROLLUP_MODES:
+            raise ValueError(
+                f"retirement_metric must be one of {ROLLUP_MODES}, got {retirement_metric!r}"
+            )
+        if max_candidates_per_variant < 1:
+            raise ValueError(
+                "max_candidates_per_variant must be >= 1, "
+                f"got {max_candidates_per_variant}"
+            )
         self.pool = pool
         self.ledger = ledger
         self.router = router
@@ -151,6 +205,12 @@ class VariantPoolEngine:
         self.evidence = evidence
         self.patience = patience
         self.min_fork = tuple(min_fork)
+        self.retirement_metric = retirement_metric
+        self.max_candidates_per_variant = max_candidates_per_variant
+        # Paper-mode recipes score the settled active pool on the full task set
+        # and therefore suppress these narrower gate measurements. The default
+        # preserves the standalone engine's historical ledger behaviour.
+        self.record_selected_results = record_selected_results
         #: Global idle counter (SPEC §6.6: single idle, aligned with Algorithm 1).
         self._idle = 0
 
@@ -192,40 +252,126 @@ class VariantPoolEngine:
         self.pool.apply_routing(dict(frozen))
 
         result = RoundResult(round_idx=round_idx, variant_count=len(self.pool))
-        # snapshot the variants present at freeze time: a variant forked or
-        # retired mid-round is not itself evolved this round.
+        pending: list[_PendingCandidate] = []
+
+        # Phase 1 — evaluate and gate every freeze-time variant against exactly
+        # the same pool/ledger snapshot. No APPLY/FORK/retire/record mutation is
+        # allowed here, so variant-id order cannot contaminate another gate.
         for variant_id in self._variants_at_freeze(frozen):
-            if variant_id not in self.pool.variants:
-                continue  # retired earlier in this same round
             t_k = {task for task, carrier in frozen.items() if carrier == variant_id}
             if not t_k:
                 continue  # 2. empty cluster -> nothing to evolve or evaluate
 
             variant = self.pool.variants[variant_id]
-            candidate = self.evolve(variant, round_idx)
-            if candidate is None:
-                continue  # no candidate this round -> contributes to idle only
+            evolved = self.evolve(variant, round_idx)
+            queue, overflow = self._candidate_queue(evolved)
+            if not queue and not overflow:
+                result.no_candidate_variants.append(variant_id)
+                continue
 
-            # 2. narrowed evaluation: the candidate is measured on T_k alone.
-            tk_eval = self.evaluate(candidate, set(t_k), round_idx)
-            self._require_full_coverage(variant_id, t_k, tk_eval)
-            result.per_variant_pass[variant_id] = {task: tuple(tk_eval[task]) for task in t_k}
+            indexed = [
+                (self._candidate_id(candidate, variant_id, round_idx, index), candidate)
+                for index, candidate in enumerate((*queue, *overflow), start=1)
+            ]
+            admitted = indexed[: len(queue)]
+            overflow_indexed = indexed[len(queue) :]
+            for candidate_id, _ in overflow_indexed:
+                self._add_diagnostic(
+                    result,
+                    CandidateDiagnostic(
+                        candidate_id=candidate_id,
+                        variant_id=variant_id,
+                        skipped_reason=(
+                            "engine defensive candidate limit exceeded: "
+                            f"max_candidates_per_variant={self.max_candidates_per_variant}"
+                        ),
+                    ),
+                )
 
-            # 3. gate the candidate on T_k.
-            tk_results = [self._task_eval(variant_id, task, tk_eval[task]) for task in sorted(t_k)]
-            gate_result = self.gate(
-                candidate,
-                variant.config_path,
-                self.ledger,
-                tk_results,
-                min_fork=self.min_fork,
-            )
+            last_rejected_eval: dict[str, tuple[int, int]] | None = None
+            for position, (candidate_id, candidate) in enumerate(admitted):
+                # 2. narrowed evaluation: each ranked candidate is measured on
+                # the same frozen T_k, in the Critic-provided order.
+                tk_eval_raw = self.evaluate(candidate, set(t_k), round_idx)
+                self._require_full_coverage(variant_id, t_k, tk_eval_raw)
+                tk_eval = {
+                    task: tuple(tk_eval_raw[task])
+                    for task in sorted(t_k)
+                }
 
-            # 4. apply the decision to the pool.
-            decision = self._settle(variant_id, candidate, gate_result, tk_eval, round_idx, result)
-            result.decisions[variant_id] = decision
-            if decision in (Decision.APPLY, Decision.FORK):
-                result.shipped = True
+                # 3. Critic ranking is only a queue: every candidate still runs
+                # the complete deterministic gate.
+                tk_results = [
+                    self._task_eval(variant_id, task, tk_eval[task])
+                    for task in sorted(t_k)
+                ]
+                gate_result = self.gate(
+                    candidate,
+                    variant.config_path,
+                    self.ledger,
+                    tk_results,
+                    min_fork=self.min_fork,
+                )
+                self._add_diagnostic(
+                    result,
+                    CandidateDiagnostic(
+                        candidate_id=candidate_id,
+                        variant_id=variant_id,
+                        evaluation=tk_eval,
+                        decision=gate_result.decision,
+                        failed_stage=gate_result.failed_stage,
+                        archive_reason=gate_result.archive_reason,
+                    ),
+                )
+
+                if gate_result.decision in (Decision.APPLY, Decision.FORK):
+                    result.per_variant_pass[variant_id] = dict(tk_eval)
+                    result.selected_candidate_ids[variant_id] = candidate_id
+                    pending.append(
+                        _PendingCandidate(
+                            variant_id=variant_id,
+                            candidate_id=candidate_id,
+                            candidate=candidate,
+                            gate_result=gate_result,
+                            tk_eval=tk_eval,
+                        )
+                    )
+                    for skipped_id, _ in admitted[position + 1 :]:
+                        self._add_diagnostic(
+                            result,
+                            CandidateDiagnostic(
+                                candidate_id=skipped_id,
+                                variant_id=variant_id,
+                                skipped_reason=(
+                                    f"earlier candidate {candidate_id} selected "
+                                    f"{gate_result.decision.value}"
+                                ),
+                            ),
+                        )
+                    break
+
+                # A rejected candidate is fully archived, then the next ranked
+                # candidate gets its own scoped evaluation and gate.
+                last_rejected_eval = tk_eval
+                result.decisions[variant_id] = Decision.REJECT
+                self._archive_rejection(
+                    variant_id,
+                    candidate,
+                    gate_result,
+                    round_idx,
+                    downgraded=False,
+                    candidate_id=candidate_id,
+                )
+            else:
+                # Preserve the legacy single-candidate curve point: when every
+                # candidate rejects, expose the final attempted candidate here.
+                if last_rejected_eval is not None:
+                    result.per_variant_pass[variant_id] = dict(last_rejected_eval)
+
+        # Phase 2 — compute one deterministic capacity/retirement plan and only
+        # then mutate the pool and ledger. In particular, a full-pool fork can
+        # never retire an object that a later pending action still needs.
+        self._settle_round(pending, round_idx, result)
 
         # 6. idle: reset on any ship, otherwise advance one.
         self._idle = 0 if result.shipped else self._idle + 1
@@ -237,83 +383,175 @@ class VariantPoolEngine:
     # decision handling
     # ------------------------------------------------------------------
 
-    def _settle(
+    def _settle_round(
         self,
-        variant_id: str,
-        candidate: Any,
-        gate_result: GateResult,
-        tk_eval: Mapping[str, tuple[int, int]],
+        pending: Iterable[_PendingCandidate],
         round_idx: int,
         result: RoundResult,
-    ) -> Decision:
-        """Apply a gate outcome to the pool and ledger; return the final decision.
+    ) -> None:
+        """Settle a round transaction after all candidates have been gated.
 
-        The returned decision can differ from ``gate_result.decision`` only in
-        one case: a FORK the pool cannot honour (no variant other than the fork
-        parent to retire) is downgraded to REJECT, which is what makes a K=1 pool
-        provably fork-free.
+        The paper specifies per-candidate APPLY/FORK/REJECT but says nothing
+        about simultaneous ships or capacity conflicts. Our deterministic
+        engineering policy is:
+
+        * APPLY parents are protected and settle first;
+        * fork proposals are considered by parent id;
+        * only a feasible subset whose parents can remain beside their children
+          is admitted;
+        * required retirees are chosen once, by ``retirement_metric`` then id;
+        * all retirees leave and all orphans are reassigned before any child is
+          created.
+
+        This removes the former order pollution where the first fork could
+        retire a later variant before that variant was evaluated.
         """
-        decision = gate_result.decision
+        proposals = sorted(pending, key=lambda item: item.variant_id)
+        applies = [item for item in proposals if item.gate_result.decision is Decision.APPLY]
+        forks = [item for item in proposals if item.gate_result.decision is Decision.FORK]
+        rejected = [
+            item
+            for item in proposals
+            if item.gate_result.decision not in (Decision.APPLY, Decision.FORK)
+        ]
 
-        if decision is Decision.APPLY:
-            # 5. the variant now embodies the candidate -> record its results.
-            self._record(variant_id, tk_eval, round_idx)
-            self._apply_candidate(self.pool.variants[variant_id], candidate)
-            return Decision.APPLY
+        fork_winners, fork_losers, retirees = self._plan_forks(applies, forks)
 
-        if decision is Decision.FORK:
-            forked = self._fork(variant_id, gate_result, tk_eval, round_idx, result)
-            if forked is not None:
-                return Decision.FORK
-            # could not fork -> fall through and archive as a rejection.
-            self._archive_rejection(variant_id, candidate, gate_result, round_idx, downgraded=True)
-            return Decision.REJECT
+        # Gate rejects never mutate the ledger: their candidate is not embodied
+        # by any live variant.
+        for item in rejected:
+            result.decisions[item.variant_id] = Decision.REJECT
+            self._archive_rejection(
+                item.variant_id,
+                item.candidate,
+                item.gate_result,
+                round_idx,
+                downgraded=False,
+                candidate_id=item.candidate_id,
+            )
 
-        # REJECT: the variant is untouched; nothing is recorded (the ledger must
-        # keep reflecting the variant's real, unshipped state), only archived.
-        self._archive_rejection(variant_id, candidate, gate_result, round_idx, downgraded=False)
-        return Decision.REJECT
+        # Capacity-downgraded forks are also candidate-only measurements.
+        for item in fork_losers:
+            result.decisions[item.variant_id] = Decision.REJECT
+            diagnostic = result.candidate_diagnostics[item.candidate_id]
+            diagnostic.decision = Decision.REJECT
+            diagnostic.failed_stage = GateStage.SEESAW_REGRESSION
+            diagnostic.archive_reason = (
+                "FORK downgraded: round settlement could not preserve both "
+                f"parent and child within K={self.pool.K}; "
+                f"{item.gate_result.archive_reason}"
+            )
+            self._archive_rejection(
+                item.variant_id,
+                item.candidate,
+                item.gate_result,
+                round_idx,
+                downgraded=True,
+                candidate_id=item.candidate_id,
+                downgrade_reason=(
+                    "round settlement could not preserve both parent and child "
+                    f"within K={self.pool.K}"
+                ),
+            )
 
-    def _fork(
+        # Retire in one planned batch. Reassigning only after all removals keeps
+        # an orphan from being sent to another variant that is about to retire.
+        # This also happens before *any* current-round ledger write, so even a
+        # cold-start reassignment cannot leak an APPLY result into its own round.
+        orphans: set[str] = set()
+        for variant_id in retirees:
+            orphans.update(self.pool.retire(variant_id))
+            result.retired.append(variant_id)
+        if orphans:
+            self.pool.reassign(
+                sorted(orphans),
+                self.router,
+                self.ledger,
+                before_round=round_idx,
+            )
+
+        # APPLY parents were protected by the plan and therefore still exist.
+        for item in applies:
+            if self.record_selected_results:
+                self._record(item.variant_id, item.tk_eval, round_idx)
+            self._apply_candidate(self.pool.variants[item.variant_id], item.candidate)
+            result.decisions[item.variant_id] = Decision.APPLY
+
+        for item in fork_winners:
+            child = self.pool.fork(
+                item.variant_id,
+                item.gate_result.improved,
+                round_idx,
+            )
+            result.forked.append(child.variant_id)
+            result.decisions[item.variant_id] = Decision.FORK
+
+            # The child embodies the candidate evaluated on the entire T_k.
+            # Record successes *and failures* from that whole scoped evaluation.
+            # Recording only improved tasks gives a child an optimistic prior and
+            # inflates both routing and retirement rollups. The unchanged parent
+            # intentionally receives none of the candidate's measurements.
+            if self.record_selected_results:
+                self._record(child.variant_id, item.tk_eval, round_idx)
+            self._apply_candidate(child, item.candidate)
+
+        result.shipped = bool(applies or fork_winners)
+
+    def _plan_forks(
         self,
-        parent_id: str,
-        gate_result: GateResult,
-        tk_eval: Mapping[str, tuple[int, int]],
-        round_idx: int,
-        result: RoundResult,
-    ) -> str | None:
-        """Branch a new variant for the improved tasks; ``None`` if impossible.
+        applies: Iterable[_PendingCandidate],
+        forks: Iterable[_PendingCandidate],
+    ) -> tuple[list[_PendingCandidate], list[_PendingCandidate], list[str]]:
+        """Choose feasible forks and their retirees from the pre-settle state."""
+        apply_ids = {item.variant_id for item in applies}
+        active_ids = set(self.pool.variants)
+        active_count = len(active_ids)
+        winners: list[_PendingCandidate] = []
+        losers: list[_PendingCandidate] = []
 
-        A full pool first retires its weakest variant *other than the parent*
-        (paper §4.5: "retiring the lowest-performing variant if the pool is
-        full") and re-routes that variant's orphaned tasks under the routing
-        freeze. If the parent is the only variant (a full K=1 pool), there is
-        nothing to retire and the fork cannot proceed.
-        """
-        if self.pool.is_full():
-            retiree = self._weakest_other(parent_id)
-            if retiree is None:
-                return None
-            orphans = self.pool.retire(retiree)
-            result.retired.append(retiree)
-            if orphans:
-                self.pool.reassign(orphans, self.router, self.ledger, before_round=round_idx)
+        for item in sorted(forks, key=lambda proposal: proposal.variant_id):
+            trial = [*winners, item]
+            winner_ids = {proposal.variant_id for proposal in trial}
+            needed = max(0, active_count + len(trial) - self.pool.K)
+            retireable = active_ids - apply_ids - winner_ids
+            if len(retireable) >= needed:
+                winners.append(item)
+            else:
+                losers.append(item)
 
-        child = self.pool.fork(parent_id, gate_result.improved, round_idx)
-        result.forked.append(child.variant_id)
-        # 5. the new variant serves exactly the tasks it improved -> record those
-        #    outcomes under it. The parent is unchanged, so its tasks are not
-        #    re-recorded (that would credit the parent with the candidate's run).
-        improved_eval = {task: tk_eval[task] for task in gate_result.improved if task in tk_eval}
-        self._record(child.variant_id, improved_eval, round_idx)
-        return child.variant_id
+        winner_ids = {item.variant_id for item in winners}
+        needed = max(0, active_count + len(winners) - self.pool.K)
+        retireable = active_ids - apply_ids - winner_ids
+        retirees = sorted(
+            retireable,
+            key=lambda variant_id: (self._retirement_score(variant_id), variant_id),
+        )[:needed]
+        return winners, losers, retirees
+
+    def _retirement_score(self, variant_id: str) -> float:
+        """Score a retirement candidate under the configured macro/raw arm."""
+        assignments = getattr(self.router, "task_to_cluster", None)
+        if self.retirement_metric == "cluster_macro" and assignments is None:
+            # No external cluster map: use the frozen routing-induced partition.
+            # The paper does not define cluster-macro retirement; this fallback
+            # is a deterministic engineering choice rather than a paper claim.
+            assignments = {
+                task_id: carrier
+                for carrier, variant in self.pool.variants.items()
+                for task_id in variant.routed_tasks
+            }
+        return self.ledger.variant_rollup(
+            variant_id,
+            mode=self.retirement_metric,
+            task_clusters=assignments,
+        )
 
     def _weakest_other(self, keep_id: str) -> str | None:
-        """Lowest-rollup variant that is not ``keep_id`` (ties: lowest id)."""
+        """Lowest-ranked variant other than ``keep_id`` (ties: lowest id)."""
         others = sorted(vid for vid in self.pool.variants if vid != keep_id)
         if not others:
             return None
-        return min(others, key=self.ledger.variant_rollup)
+        return min(others, key=lambda variant_id: (self._retirement_score(variant_id), variant_id))
 
     def _apply_candidate(self, variant: Any, candidate: Any) -> None:
         """Merge an applied candidate into its variant (C1: outcome only).
@@ -352,17 +590,26 @@ class VariantPoolEngine:
         self.evidence.append_digest(self.evidence.attach_prior_history(digest))
 
     def _archive_rejection(
-        self, variant_id: str, candidate: Any, gate_result: GateResult, round_idx: int, *, downgraded: bool
+        self,
+        variant_id: str,
+        candidate: Any,
+        gate_result: GateResult,
+        round_idx: int,
+        *,
+        downgraded: bool,
+        candidate_id: str | None = None,
+        downgrade_reason: str | None = None,
     ) -> None:
         if self.evidence is None:
             return
         from .evidence import RejectedCandidate  # local: keep evidence optional
 
-        candidate_id = getattr(candidate, "candidate_id", "") or f"C-R{round_idx}-{variant_id}"
+        candidate_id = candidate_id or self._candidate_id(candidate, variant_id, round_idx, 1)
         failed_stage = gate_result.failed_stage.name if gate_result.failed_stage is not None else "SEESAW_REGRESSION"
         reason = gate_result.archive_reason
         if downgraded:
-            reason = f"FORK downgraded: no retireable variant besides {variant_id}; {reason}"
+            detail = downgrade_reason or f"no retireable variant besides {variant_id}"
+            reason = f"FORK downgraded: {detail}; {reason}"
         self.evidence.append_rejected(
             RejectedCandidate(
                 candidate_id=str(candidate_id),
@@ -376,6 +623,52 @@ class VariantPoolEngine:
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+
+    def _candidate_queue(self, evolved: Any) -> tuple[list[Any], list[Any]]:
+        """Normalise one ``evolve`` result without disturbing ranked order.
+
+        Text and bytes are legacy opaque single candidates despite implementing
+        ``Sequence``. The split is an engine-safety boundary only; the recipe's
+        CandidatePipeline remains responsible for the paper's global K_t cap.
+        """
+        if evolved is None:
+            candidates: list[Any] = []
+        elif isinstance(evolved, Sequence) and not isinstance(
+            evolved, (str, bytes, bytearray)
+        ):
+            candidates = list(evolved)
+        else:
+            candidates = [evolved]
+        limit = self.max_candidates_per_variant
+        return candidates[:limit], candidates[limit:]
+
+    @staticmethod
+    def _candidate_id(
+        candidate: Any,
+        variant_id: str,
+        round_idx: int,
+        position: int,
+    ) -> str:
+        """Return the declared id or a stable id for legacy opaque candidates."""
+        try:
+            declared = getattr(candidate, "candidate_id", "")
+        except Exception:  # noqa: BLE001 - diagnostics must survive bad metadata
+            declared = ""
+        if declared:
+            return str(declared)
+        return f"C-R{round_idx}-{variant_id}-{position:02d}"
+
+    @staticmethod
+    def _add_diagnostic(result: RoundResult, diagnostic: CandidateDiagnostic) -> None:
+        """Insert one globally keyed diagnostic, rejecting ambiguous ids."""
+        if diagnostic.candidate_id in result.candidate_diagnostics:
+            previous = result.candidate_diagnostics[diagnostic.candidate_id]
+            raise ValueError(
+                "candidate ids must be unique within a round: "
+                f"{diagnostic.candidate_id!r} appeared for "
+                f"{previous.variant_id!r} and {diagnostic.variant_id!r}"
+            )
+        result.candidate_diagnostics[diagnostic.candidate_id] = diagnostic
 
     def _task_eval(self, variant_id: str, task_id: str, after: tuple[int, int]) -> TaskEval:
         """Build the gate's per-task before/after pair.

@@ -12,16 +12,24 @@ the main arm.
 
 Cluster (W7)
 ------------
-Report §5.1 adjudicates three readings that the paper uses interchangeably and
-never bridges. We take **(a) the routing-induced partition** as the main arm:
-``cluster(x)`` is simply the variant currently carrying ``x``, which is the
-literal mechanism of "tested only against tasks routed to k" (§4.5 p.11) and
-costs nothing extra. Reading (b) (meta-agent failure-mode grouping) stays as a
-``cluster_mode`` hook for a batch-C ablation; reading (c) (semantic/domain
-clustering) is falsifiably excluded by p.18, which lists domain-aware
-clustering as a *different* pilot strategy. Because the partition is
-self-bootstrapping under (a), :meth:`Router.route` scores the ``(variant, task)``
-cell directly rather than averaging over a separately-defined cluster.
+Report §5.1 finds three readings that the paper uses interchangeably and never
+bridges. The default remains **(a) the routing-induced partition**:
+``cluster(x)`` is the variant that carried ``x`` in the previous frozen
+partition. Unlike the original stage-A implementation, routing now actually
+aggregates every task in that cluster and scores a true
+``(variant, cluster)`` cell.
+
+Callers can inject an authoritative ``task_id -> cluster_id`` mapping. This is
+the stable seam for failure-mode or level/domain clusters; an unmapped task is
+an *unknown cluster* and takes deterministic cold start rather than silently
+falling back to task-level evidence. Without a mapping, ``cluster_mode='routed'``
+is explicitly the routing-induced engineering choice. Other cluster modes need
+the mapping because the paper publishes no clustering algorithm.
+
+The old per-task tournament remains available as
+``routing_mode='task_tournament'``. It is a compatibility/ablation arm, not the
+paper-faithful default: calling a task a cluster without aggregation was the
+bug this module now avoids.
 
 Routing freeze (SPEC §6.2) — not a design choice
 ------------------------------------------------
@@ -52,12 +60,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
     from .ledger import SuccessLedger
     from .pool import VariantPool
 
-#: Cluster readings of report §5.1. Only "routed" (the main arm) is implemented
-#: in stage A; the other two are batch-C ablation hooks (SPEC §5).
+#: Cluster readings of report §5.1. ``failure`` and ``level`` are usable when
+#: the caller injects assignments; the paper does not publish their algorithm.
 CLUSTER_MODES = ("routed", "failure", "level")
 
+#: Estimator scope. ``cluster`` implements the paper's formula;
+#: ``task_tournament`` preserves the former per-task behavior for compatibility.
+ROUTING_MODES = ("cluster", "task_tournament")
+
 #: Tie-break policies for equal estimates (SPEC §6.6). Default: fewest attempts
-#: on that task, which spends ties on information rather than on incumbency.
+#: in that cluster, which spends ties on information rather than incumbency.
 TIE_BREAKS = ("fewest_attempts", "smallest_id", "random")
 
 
@@ -77,40 +89,76 @@ class Router:
         self,
         *,
         cluster_mode: str = "routed",
+        routing_mode: str = "cluster",
+        task_to_cluster: Mapping[str, str | int] | None = None,
         tie_break: str = "fewest_attempts",
         epsilon: float = 0.0,
         seed: int = 0,
+        window: int | None = None,
     ) -> None:
         if cluster_mode not in CLUSTER_MODES:
             raise ValueError(f"cluster_mode must be one of {CLUSTER_MODES}, got {cluster_mode!r}")
+        if routing_mode not in ROUTING_MODES:
+            raise ValueError(f"routing_mode must be one of {ROUTING_MODES}, got {routing_mode!r}")
         if tie_break not in TIE_BREAKS:
             raise ValueError(f"tie_break must be one of {TIE_BREAKS}, got {tie_break!r}")
         if not 0.0 <= epsilon <= 1.0:
             raise ValueError(f"epsilon must be in [0, 1], got {epsilon}")
+        if window is not None and window < 1:
+            raise ValueError(f"window must be >= 1, got {window}")
+        assignments = (
+            None
+            if task_to_cluster is None
+            else {task_id: str(cluster_id) for task_id, cluster_id in task_to_cluster.items()}
+        )
+        if assignments is not None:
+            invalid = sorted(
+                repr(task_id)
+                for task_id, cluster_id in assignments.items()
+                if not isinstance(task_id, str)
+                or not task_id
+                or not cluster_id
+            )
+            if invalid:
+                raise ValueError(f"task_to_cluster requires non-empty string ids; invalid tasks: {invalid}")
         self.cluster_mode = cluster_mode
+        self.routing_mode = routing_mode
+        self.task_to_cluster = None if assignments is None else MappingProxyType(assignments)
         self.tie_break = tie_break
         self.epsilon = epsilon
+        self.window = window
         self._rng = random.Random(seed)
 
     # ------------------------------------------------------------------
     # W7 — cluster
     # ------------------------------------------------------------------
 
-    def cluster_of(self, task_id: str, pool: VariantPool) -> str:
-        """Main arm: the cluster of a task is the variant carrying it.
+    def cluster_of(self, task_id: str, pool: VariantPool) -> str | None:
+        """Return the stable cluster id, or ``None`` when it is unknown.
 
-        Falls back to :meth:`cold_start` for a task nobody carries yet (round 0,
-        or a task whose carrier was just retired).
+        An injected mapping is authoritative: missing entries do not borrow a
+        carrier or masquerade as singleton clusters. Without a mapping, the
+        only implemented interpretation is the explicitly named
+        routing-induced partition.
         """
+        if self.task_to_cluster is not None:
+            return self.task_to_cluster.get(task_id)
         if self.cluster_mode != "routed":
             raise NotImplementedError(
-                f"cluster_mode {self.cluster_mode!r} is a batch-C ablation "
-                "(report §5.1 readings (b)/(c)); only 'routed' is implemented in stage A"
+                f"cluster_mode {self.cluster_mode!r} requires an injected "
+                "task_to_cluster mapping; the paper publishes no clustering algorithm"
             )
-        carrier = pool.carrier_of(task_id)
-        if carrier is not None:
-            return carrier
-        return self.cold_start(task_id, pool)
+        return pool.carrier_of(task_id)
+
+    def tasks_in_cluster(self, cluster_id: str, pool: VariantPool) -> frozenset[str]:
+        """Tasks belonging to ``cluster_id`` under the configured assignment."""
+        if self.task_to_cluster is not None:
+            return frozenset(
+                task_id for task_id, assigned in self.task_to_cluster.items() if assigned == cluster_id
+            )
+        if self.cluster_mode == "routed" and cluster_id in pool.variants:
+            return frozenset(pool.variants[cluster_id].routed_tasks)
+        return frozenset()
 
     # ------------------------------------------------------------------
     # routing freeze
@@ -140,7 +188,12 @@ class Router:
                 "before this round's rollouts; the ledger may only be updated afterwards, "
                 "for the next round."
             )
-        frozen = {task_id: self.route(task_id, pool, ledger, before_round=round_idx) for task_id in tasks}
+        # Sorting makes seeded exploration/random tie-breaks reproducible even
+        # when the caller supplies a set.
+        frozen = {
+            task_id: self.route(task_id, pool, ledger, before_round=round_idx)
+            for task_id in sorted(set(tasks))
+        }
         return MappingProxyType(frozen)
 
     # ------------------------------------------------------------------
@@ -148,30 +201,57 @@ class Router:
     # ------------------------------------------------------------------
 
     def route(self, task_id: str, pool: VariantPool, ledger: SuccessLedger, *, before_round: int) -> str:
-        """``argmax_v S_hat(v, task)`` over evidence strictly before ``before_round``.
+        """Route on evidence strictly before ``before_round``.
 
-        ``before_round`` is required, not optional: an unfrozen estimate is
-        never the right thing to route on.
+        The default is the paper's
+        ``argmax_v S_hat(v, cluster(task))``. ``task_tournament`` instead uses
+        the legacy singleton ``{task}``. ``before_round`` is required, not
+        optional: an unfrozen estimate is never the right thing to route on.
         """
         variant_ids = sorted(pool.variants)
         if not variant_ids:
             raise RuntimeError("cannot route on an empty pool")
 
+        if self.routing_mode == "task_tournament":
+            evidence_tasks = frozenset({task_id})
+        else:
+            cluster_id = self.cluster_of(task_id, pool)
+            if cluster_id is None:
+                return self.cold_start(task_id, pool, ledger, before_round=before_round)
+            evidence_tasks = self.tasks_in_cluster(cluster_id, pool)
+            if not evidence_tasks:
+                return self.cold_start(task_id, pool, ledger, before_round=before_round)
+
+        if not self._has_prior_evidence(evidence_tasks, pool, ledger, before_round):
+            return self.cold_start(task_id, pool, ledger, before_round=before_round)
+
         explored = self.explore(variant_ids)
         if explored is not None:
             return explored
 
-        if not self._has_prior_evidence(task_id, pool, ledger, before_round):
-            return self.cold_start(task_id, pool, ledger)
-
-        scores = {vid: ledger.estimate(vid, task_id, before_round=before_round) for vid in variant_ids}
+        scores = {
+            vid: ledger.estimate_cluster(
+                vid,
+                evidence_tasks,
+                before_round=before_round,
+                window=self.window,
+            )
+            for vid in variant_ids
+        }
         best = max(scores.values())
         tied = [vid for vid in variant_ids if scores[vid] == best]
         if len(tied) == 1:
             return tied[0]
-        return self._break_tie(tied, task_id, ledger)
+        return self._break_tie(tied, evidence_tasks, ledger, before_round)
 
-    def cold_start(self, task_id: str, pool: VariantPool, ledger: SuccessLedger | None = None) -> str:
+    def cold_start(
+        self,
+        task_id: str,
+        pool: VariantPool,
+        ledger: SuccessLedger | None = None,
+        *,
+        before_round: int | None = None,
+    ) -> str:
         """Route a task with no usable prior evidence.
 
         Ours (report §5 gap 3 — the paper gives no round-0 rule). With a single
@@ -183,15 +263,22 @@ class Router:
 
         ``ledger`` extends the SPEC signature so the rollup is available; the
         bare two-argument call (as in :meth:`VariantPool.reassign`) falls back
-        to V0. Reading the rollup is freeze-safe: during a freeze the ledger
-        provably holds nothing from the current round.
+        to V0. ``before_round`` also makes direct calls freeze-safe: current or
+        future cells cannot leak through this fallback branch.
         """
         variant_ids = sorted(pool.variants)
         if not variant_ids:
             raise RuntimeError("cannot cold-start route on an empty pool")
         if len(variant_ids) == 1 or ledger is None:
             return variant_ids[0]
-        return max(variant_ids, key=ledger.variant_rollup)
+        return max(
+            variant_ids,
+            key=lambda variant_id: ledger.variant_rollup(
+                variant_id,
+                before_round=before_round,
+                window=self.window,
+            ),
+        )
 
     def explore(self, variant_ids: Iterable[str]) -> str | None:
         """Optional epsilon-greedy escape hatch; ``None`` means "use argmax".
@@ -214,30 +301,48 @@ class Router:
     # internals
     # ------------------------------------------------------------------
 
-    @staticmethod
     def _has_prior_evidence(
-        task_id: str,
+        self,
+        task_ids: Iterable[str],
         pool: VariantPool,
         ledger: SuccessLedger,
-        before_round: int | None,
+        before_round: int,
     ) -> bool:
-        """Does any variant hold usable pre-``before_round`` evidence for this task?
+        """Does any variant hold usable evidence for this cluster/task?
 
-        Checked on the cells themselves rather than by comparing estimates to
-        the prior, so a cell that genuinely estimates to 0.5 is not mistaken
-        for an absent one.
+        Checked from aggregate denominators rather than by comparing estimates
+        to the prior, so a genuine 0.5 estimate is not mistaken for absence.
         """
         for variant_id in pool.variants:
-            cell = ledger.cell(variant_id, task_id)
-            if cell is None or cell.attempts == 0:
-                continue
-            if before_round is None or cell.last_round < before_round:
+            if ledger.attempts_on_cluster(
+                variant_id,
+                task_ids,
+                before_round=before_round,
+                window=self.window,
+            ):
                 return True
         return False
 
-    def _break_tie(self, tied: list[str], task_id: str, ledger: SuccessLedger) -> str:
+    def _break_tie(
+        self,
+        tied: list[str],
+        task_ids: Iterable[str],
+        ledger: SuccessLedger,
+        before_round: int,
+    ) -> str:
         if self.tie_break == "fewest_attempts":
-            return min(tied, key=lambda vid: (ledger.attempts_on(vid, task_id), vid))
+            return min(
+                tied,
+                key=lambda vid: (
+                    ledger.attempts_on_cluster(
+                        vid,
+                        task_ids,
+                        before_round=before_round,
+                        window=self.window,
+                    ),
+                    vid,
+                ),
+            )
         if self.tie_break == "smallest_id":
             return min(tied)
         return self._rng.choice(sorted(tied))

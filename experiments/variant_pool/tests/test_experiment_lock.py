@@ -36,7 +36,6 @@ from variant_pool.gate import DEFAULT_MIN_FORK
 from variant_pool.ledger import DEFAULT_STALE_PRIOR
 from variant_pool.pool import DEFAULT_K
 from variant_pool.router import CLUSTER_MODES, TIE_BREAKS
-from variant_pool.target import STRATEGIES
 
 # ---------------------------------------------------------------------------
 # Fixture helpers
@@ -97,11 +96,23 @@ def test_every_blank_of_the_contract_table_is_locked() -> None:
         "epsilon",
         "fork_inheritance",
         "min_fork",
-        "retire_metric",
+        "retirement_metric",
         "retire_reassign",
         "target_strategy",
+        "target_strategy_provenance",
         "idle_scope",
         "cluster_mode",
+        "cluster_source",
+        "routing_mode",
+        "routing_window",
+        "candidates_per_round",
+        "candidate_mode",
+        "candidate_limit",
+        "candidate_pipeline_adapter",
+        "candidate_pipeline_semantics",
+        "actionability_threshold",
+        "actionability_threshold_provenance",
+        "baseline_round_policy",
         "per_variant_persistence",
         "multi_bucket_attribution",
         "hit_rate_scope",
@@ -118,25 +129,44 @@ def test_defaults_agree_with_the_modules_they_describe() -> None:
     assert params.stale_prior == DEFAULT_STALE_PRIOR
     assert params.cluster_mode in CLUSTER_MODES
     assert params.tie_break in TIE_BREAKS
-    assert params.target_strategy in STRATEGIES
+    assert params.target_strategy == "worst_first"
+    assert params.target_strategy_provenance.startswith("OURS:")
     assert params.window is None  # full history (SPEC §6.6)
     assert params.epsilon == 0.0  # pure argmax
 
 
-def test_paper_parameters_are_copied_not_chosen() -> None:
-    """Table 8 p.29 + A.2/A.3 p.28-29."""
+def test_runtime_parameters_and_paper_plan_are_not_conflated() -> None:
+    """A single-run lock separates enabled behavior from Table-8 plans."""
     params = Hyperparams()
-    assert (params.K_t, params.T, params.P) == (4, 15, 3)
+    assert params.candidate_mode == "paper"
+    assert params.candidates_per_round == "global_up_to_4"
+    assert params.candidate_limit == 4
+    assert "not_full_llm_aegis" in params.candidate_pipeline_semantics
+    assert params.actionability_threshold == 1.0
+    assert params.baseline_round_policy.startswith("R0_")
+    assert (params.T, params.P) == (15, 3)
     assert params.pass_at_k == 2
     assert (params.max_steps, params.concurrency) == (20, 10)
     assert (params.meta_concurrency, params.meta_max_steps) == (4, 200)
-    assert params.noise_threshold == 0.05
-    assert len(params.seeds) == 3
+    assert params.noise_threshold is None
+    assert params.planned_candidates_per_round == 4
+    assert params.planned_meta_concurrency == 4
+    assert params.planned_noise_threshold == 0.05
+    assert len(params.planned_seeds) == 3
 
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"K": 0}, {"K_t": 0}, {"pass_at_k": 0}, {"epsilon": 1.5}, {"stale_prior": -0.1}],
+    [
+        {"K": 0},
+        {"planned_candidates_per_round": 0},
+        {"candidate_limit": 0},
+        {"candidate_limit": 5},
+        {"actionability_threshold": -0.1},
+        {"pass_at_k": 0},
+        {"epsilon": 1.5},
+        {"stale_prior": -0.1},
+    ],
 )
 def test_impossible_hyperparameters_are_rejected(kwargs) -> None:
     with pytest.raises(ValueError):
@@ -156,7 +186,7 @@ def test_json_round_trip_restores_every_type(tmp_path) -> None:
     assert again == original
     assert isinstance(again.h0.tool_registry, tuple)
     assert isinstance(again.hyperparams.min_fork, tuple)
-    assert isinstance(again.hyperparams.seeds, tuple)
+    assert isinstance(again.hyperparams.planned_seeds, tuple)
     assert again.dataset.level_distribution == PAPER_LEVEL_DISTRIBUTION
     assert all(isinstance(key, int) for key in again.dataset.level_distribution)
 
@@ -174,6 +204,28 @@ def test_an_unknown_field_is_a_hard_error() -> None:
     payload["hyperparams"]["temperature"] = 0.7
     with pytest.raises(ValueError, match="temperature"):
         ExperimentLock.from_json(json.dumps(payload))
+
+
+def test_legacy_lock_reads_with_plans_migrated_from_runtime_fields() -> None:
+    payload = json.loads(_lock().to_json())
+    hyper = payload["hyperparams"]
+    hyper["K_t"] = hyper.pop("planned_candidates_per_round")
+    hyper["seeds"] = hyper.pop("planned_seeds")
+    hyper["retire_metric"] = hyper.pop("retirement_metric")
+    hyper.pop("candidates_per_round")
+    hyper.pop("planned_meta_concurrency")
+    hyper.pop("planned_noise_threshold")
+    hyper.pop("routing_mode")
+    hyper.pop("routing_window")
+    hyper.pop("cluster_source")
+
+    migrated = ExperimentLock.from_json(json.dumps(payload))
+    assert migrated.hyperparams.candidates_per_round == "one_per_active_variant"
+    assert migrated.hyperparams.planned_candidates_per_round == 4
+    assert migrated.hyperparams.planned_seeds == (0, 1, 2)
+    assert migrated.hyperparams.target_strategy == "all_active_variants"
+    assert migrated.hyperparams.routing_mode == "task_tournament"
+    assert any("legacy lock migrated" in warning for warning in migrated.provenance_warnings)
 
 
 def test_spec_version_travels_with_the_lock() -> None:

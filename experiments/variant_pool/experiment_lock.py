@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +67,12 @@ LOCK_FILENAME = "experiment.lock.json"
 #: Revision of ``SPEC.md`` this lock schema tracks. The SPEC carries no version
 #: string of its own, so the date of its latest ruling section (§7, Jul-23
 #: 2026) is used; bump it whenever a §6.6 default changes meaning.
-SPEC_VERSION = "2026-07-23"
+SPEC_VERSION = "2026-07-25"
+
+#: Explicit marker for provenance a caller could not resolve. Empty strings and
+#: provider-template placeholders are forbidden in emitted locks because they
+#: look like real values to downstream comparison code.
+UNRESOLVED = "unresolved"
 
 #: The paper's GAIA set: 103 text-only tasks, levels 39/52/12 (A.2 p.28).
 PAPER_LEVEL_DISTRIBUTION = {1: 39, 2: 52, 3: 12}
@@ -95,8 +100,8 @@ class H0Freeze:
     so a diff can say which tool appeared or vanished.
     """
 
-    config_sha256: str
-    system_prompt_sha256: str
+    config_sha256: str = UNRESOLVED
+    system_prompt_sha256: str = UNRESOLVED
     tool_registry: tuple[str, ...] = ()
 
 
@@ -112,10 +117,10 @@ class ModelSpec:
     the paper's (SPEC preamble).
     """
 
-    task_agent_model: str
-    meta_agent_model: str
-    api_base: str = ""
-    provider: str = "deepseek"
+    task_agent_model: str = UNRESOLVED
+    meta_agent_model: str = UNRESOLVED
+    api_base: str = UNRESOLVED
+    provider: str = UNRESOLVED
 
 
 @dataclass(frozen=True)
@@ -128,9 +133,9 @@ class DatasetSpec:
     hiding it behind a hash nobody can invert.
     """
 
-    path: str
-    sha256: str
-    size: int
+    path: str = UNRESOLVED
+    sha256: str = UNRESOLVED
+    size: int = 0
     level_distribution: dict[int, int] = field(default_factory=dict)
 
     @classmethod
@@ -183,11 +188,16 @@ class Hyperparams:
     epsilon: float = 0.0
     fork_inheritance: str = "transfer"
     min_fork: tuple[int, int] = DEFAULT_MIN_FORK
-    retire_metric: str = "variant_rollup"
+    retirement_metric: str = "task_macro"
     retire_reassign: str = "reroute_orphans"
+    #: The paper names a target ``k`` but does not define how it is selected.
     target_strategy: str = "worst_first"
+    target_strategy_provenance: str = "OURS: paper leaves target selection undefined"
     idle_scope: str = "global"
     cluster_mode: str = "routed"
+    cluster_source: str = "gaia_level"
+    routing_mode: str = "cluster"
+    routing_window: int | None = None
     per_variant_persistence: bool = True
     #: SPEC §7.5 — a composite ship counts towards all of its buckets.
     multi_bucket_attribution: str = "all_buckets"
@@ -196,28 +206,81 @@ class Hyperparams:
     #: SPEC §7.2 — our machine-readable Level-2 evidence type.
     level2_evidence_type: str = "level2_roundtrip"
     # --- paper ------------------------------------------------------------
-    K_t: int = 4  # Evolver candidates per round (Table 8 p.29)
+    #: Actual runtime generation policy. Paper mode selects one global target
+    #: and allocates at most ``candidate_limit`` isolated proposal slots.
+    candidate_mode: str = "paper"
+    candidates_per_round: str = "global_up_to_4"
+    candidate_limit: int = 4
+    candidate_pipeline_adapter: str = (
+        "deterministic_evidence_digester_planner_critic+llm_metaagent_evolver"
+    )
+    candidate_pipeline_semantics: str = (
+        "runnable_fallback_not_full_llm_aegis_reproduction"
+    )
+    actionability_threshold: float = 1.0
+    actionability_threshold_provenance: str = (
+        "OURS: unpublished paper threshold; binary any-unsolved settled signal"
+    )
+    baseline_round_policy: str = "R0_settled_active_only_evolution_starts_R1"
     T: int = 15  # rounds (Table 8)
     P: int = 3  # early-stop idle rounds (Alg. 1 L29; §6.1)
     pass_at_k: int = 2  # pass@2 (§6.1 p.15; A.3 formula 6)
     max_steps: int = 20  # GAIA step cap (Table 8)
     concurrency: int = 10  # task concurrency (Table 8)
-    meta_concurrency: int = 4  # meta-agent concurrency (Table 8)
+    meta_concurrency: int = 4  # isolated paper proposal slots, capped by candidate_limit
     meta_max_steps: int = 200  # meta-agent step cap (Table 8)
-    noise_threshold: float = 0.05  # +-5% single-round pass-count wobble
-    seeds: tuple[int, ...] = (0, 1, 2)  # 3 lineages (Table 8)
+    noise_threshold: float | None = None  # no noise threshold in this gate
+    #: Paper plan, not runtime claims. One run's actual seed is ``EnvSpec.seed``.
+    planned_candidates_per_round: int | None = 4
+    planned_meta_concurrency: int | None = 4
+    planned_noise_threshold: float | None = 0.05
+    planned_seeds: tuple[int, ...] = (0, 1, 2)
 
     def __post_init__(self) -> None:
         if self.K < 1:
             raise ValueError(f"K must be >= 1, got {self.K}")
-        if self.K_t < 1:
-            raise ValueError(f"K_t must be >= 1, got {self.K_t}")
+        if not self.candidates_per_round:
+            raise ValueError("candidates_per_round must describe the enabled runtime policy")
+        if self.candidate_mode not in ("paper", "legacy_single"):
+            raise ValueError(
+                "candidate_mode must be 'paper' or 'legacy_single', "
+                f"got {self.candidate_mode!r}"
+            )
+        if not 1 <= self.candidate_limit <= 4:
+            raise ValueError(
+                f"candidate_limit must be in [1, 4], got {self.candidate_limit}"
+            )
+        if self.actionability_threshold < 0:
+            raise ValueError(
+                "actionability_threshold must be >= 0, "
+                f"got {self.actionability_threshold}"
+            )
         if self.pass_at_k < 1:
             raise ValueError(f"pass_at_k must be >= 1, got {self.pass_at_k}")
+        if self.planned_candidates_per_round is not None and self.planned_candidates_per_round < 1:
+            raise ValueError(
+                "planned_candidates_per_round must be >= 1 when present, "
+                f"got {self.planned_candidates_per_round}"
+            )
         if not 0.0 <= self.epsilon <= 1.0:
             raise ValueError(f"epsilon must be in [0, 1], got {self.epsilon}")
         if not 0.0 <= self.stale_prior <= 1.0:
             raise ValueError(f"stale_prior must be in [0, 1], got {self.stale_prior}")
+
+    # Read-only source compatibility for callers inspecting pre-2026-07-25
+    # names. These aliases are intentionally not dataclass fields and therefore
+    # are not emitted as ambiguous runtime claims in new lock JSON.
+    @property
+    def K_t(self) -> int | None:  # noqa: N802 - historical schema name
+        return self.planned_candidates_per_round
+
+    @property
+    def seeds(self) -> tuple[int, ...]:
+        return self.planned_seeds
+
+    @property
+    def retire_metric(self) -> str:
+        return self.retirement_metric
 
 
 @dataclass(frozen=True)
@@ -237,7 +300,7 @@ class EnvSpec:
     seed: int = 0
     #: git sha of ``recipe/gaia_evolver/oracle_ceiling.py`` at run time — the
     #: ceiling is what M0 is measured against (SPEC §6.3).
-    oracle_ceiling_sha: str = ""
+    oracle_ceiling_sha: str = UNRESOLVED
 
 
 @dataclass(frozen=True)
@@ -246,13 +309,64 @@ class ExperimentLock:
 
     experiment_id: str
     created_at: str
-    git_sha: str = ""
+    git_sha: str = UNRESOLVED
     spec_version: str = SPEC_VERSION
-    h0: H0Freeze = field(default_factory=lambda: H0Freeze("", ""))
-    models: ModelSpec = field(default_factory=lambda: ModelSpec("", ""))
-    dataset: DatasetSpec = field(default_factory=lambda: DatasetSpec("", "", 0))
+    h0: H0Freeze = field(default_factory=H0Freeze)
+    models: ModelSpec = field(default_factory=ModelSpec)
+    dataset: DatasetSpec = field(default_factory=DatasetSpec)
     hyperparams: Hyperparams = field(default_factory=Hyperparams)
     env: EnvSpec = field(default_factory=EnvSpec)
+    provenance_warnings: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalise missing provenance to explicit, auditable markers."""
+        h0 = replace(
+            self.h0,
+            config_sha256=_provenance_text(self.h0.config_sha256),
+            system_prompt_sha256=_provenance_text(self.h0.system_prompt_sha256),
+            tool_registry=self.h0.tool_registry or (UNRESOLVED,),
+        )
+        models = replace(
+            self.models,
+            task_agent_model=_provenance_text(self.models.task_agent_model),
+            meta_agent_model=_provenance_text(self.models.meta_agent_model),
+            api_base=_provenance_text(self.models.api_base),
+            provider=_provenance_text(self.models.provider),
+        )
+        dataset = replace(
+            self.dataset,
+            path=_provenance_text(self.dataset.path),
+            sha256=_provenance_text(self.dataset.sha256),
+        )
+        env = replace(self.env, oracle_ceiling_sha=_provenance_text(self.env.oracle_ceiling_sha))
+        git_sha = _provenance_text(self.git_sha)
+
+        object.__setattr__(self, "h0", h0)
+        object.__setattr__(self, "models", models)
+        object.__setattr__(self, "dataset", dataset)
+        object.__setattr__(self, "env", env)
+        object.__setattr__(self, "git_sha", git_sha)
+
+        warnings = list(self.provenance_warnings)
+        provenance = {
+            "git_sha": git_sha,
+            "h0.config_sha256": h0.config_sha256,
+            "h0.system_prompt_sha256": h0.system_prompt_sha256,
+            "h0.tool_registry": h0.tool_registry[0] if h0.tool_registry else UNRESOLVED,
+            "models.task_agent_model": models.task_agent_model,
+            "models.meta_agent_model": models.meta_agent_model,
+            "models.api_base": models.api_base,
+            "models.provider": models.provider,
+            "dataset.path": dataset.path,
+            "dataset.sha256": dataset.sha256,
+            "env.oracle_ceiling_sha": env.oracle_ceiling_sha,
+        }
+        for path, value in provenance.items():
+            if value == UNRESOLVED:
+                warning = f"{path} unresolved"
+                if warning not in warnings:
+                    warnings.append(warning)
+        object.__setattr__(self, "provenance_warnings", tuple(warnings))
 
     # ------------------------------------------------------------------
     # serialisation
@@ -277,16 +391,18 @@ class ExperimentLock:
         data = json.loads(text)
         if not isinstance(data, dict):
             raise ValueError("an experiment lock must be a JSON object")
+        data, migration_warnings = _migrate_legacy_lock(data)
         return cls(
             experiment_id=data["experiment_id"],
             created_at=data["created_at"],
-            git_sha=data.get("git_sha", ""),
+            git_sha=data.get("git_sha", UNRESOLVED),
             spec_version=data.get("spec_version", SPEC_VERSION),
             h0=_build(H0Freeze, data.get("h0", {})),
             models=_build(ModelSpec, data.get("models", {})),
             dataset=_build(DatasetSpec, data.get("dataset", {})),
             hyperparams=_build(Hyperparams, data.get("hyperparams", {})),
             env=_build(EnvSpec, data.get("env", {})),
+            provenance_warnings=tuple(data.get("provenance_warnings", ())) + migration_warnings,
         )
 
     def save(self, run_dir: str | Path) -> Path:
@@ -368,6 +484,100 @@ def sha256_text(text: str) -> str:
 def sha256_file(path: str | Path) -> str:
     """Hash for a file's raw bytes."""
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _provenance_text(value: Any) -> str:
+    """Return a real provenance value or the explicit unresolved sentinel."""
+    text = str(value or "").strip()
+    if not text or "YOUR_PROVIDER" in text.upper():
+        return UNRESOLVED
+    return text
+
+
+def _migrate_legacy_lock(data: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Read pre-2026-07-25 locks without perpetuating their false runtime claims.
+
+    The old schema stored Table-8 *plans* in ``K_t``/``seeds`` and labelled the
+    unused target selector as ``worst_first``. The actual recipe is recoverable
+    from its fixed control flow: one evolve call per active variant, task-level
+    tournament routing, and sequential meta-agent calls. Preserve the paper
+    values under explicitly planned fields and migrate enabled behaviour to the
+    runtime fields.
+    """
+    migrated = dict(data)
+    raw_hyperparams = migrated.get("hyperparams", {})
+    if not isinstance(raw_hyperparams, dict):
+        return migrated, ()
+    hyperparams = dict(raw_hyperparams)
+    warnings: list[str] = []
+
+    legacy = "K_t" in hyperparams or "seeds" in hyperparams or "retire_metric" in hyperparams
+    if "K_t" in hyperparams:
+        hyperparams.setdefault("planned_candidates_per_round", hyperparams.pop("K_t"))
+        hyperparams.setdefault("candidates_per_round", "one_per_active_variant")
+    if "seeds" in hyperparams:
+        hyperparams.setdefault("planned_seeds", hyperparams.pop("seeds"))
+    if "retire_metric" in hyperparams:
+        hyperparams.setdefault("retirement_metric", hyperparams.pop("retire_metric"))
+
+    if legacy:
+        # These values are implied by the historical recipe/engine, not by the
+        # old JSON labels. Make that reconstruction visible.
+        hyperparams["target_strategy"] = "all_active_variants"
+        hyperparams["candidate_mode"] = "legacy_single"
+        hyperparams["candidate_limit"] = 1
+        hyperparams["candidate_pipeline_adapter"] = (
+            "legacy_metaagent_single_proposal_per_active_variant"
+        )
+        hyperparams["candidate_pipeline_semantics"] = (
+            "legacy_ablation_no_structured_candidate_pipeline"
+        )
+        hyperparams["actionability_threshold"] = 0.0
+        hyperparams["actionability_threshold_provenance"] = (
+            "not enabled in legacy candidate mode"
+        )
+        hyperparams["baseline_round_policy"] = (
+            "legacy_baseline_candidate_runs_through_gate"
+        )
+        hyperparams["target_strategy_provenance"] = (
+            "legacy ablation evolves all active routed variants"
+        )
+        hyperparams.setdefault("routing_mode", "task_tournament")
+        hyperparams.setdefault("routing_window", hyperparams.get("window"))
+        hyperparams.setdefault("cluster_source", "routing_partition")
+        hyperparams["meta_concurrency"] = 1
+        warnings.append("legacy lock migrated: runtime behavior reconstructed from recipe control flow")
+
+    if (
+        "candidate_mode" not in hyperparams
+        and hyperparams.get("candidates_per_round") == "one_per_active_variant"
+    ):
+        hyperparams["candidate_mode"] = "legacy_single"
+        hyperparams.setdefault("candidate_limit", 1)
+        hyperparams.setdefault(
+            "candidate_pipeline_adapter",
+            "legacy_metaagent_single_proposal_per_active_variant",
+        )
+        hyperparams.setdefault(
+            "candidate_pipeline_semantics",
+            "legacy_ablation_no_structured_candidate_pipeline",
+        )
+        hyperparams.setdefault("actionability_threshold", 0.0)
+        hyperparams.setdefault(
+            "actionability_threshold_provenance",
+            "not enabled in legacy candidate mode",
+        )
+        hyperparams.setdefault(
+            "baseline_round_policy",
+            "legacy_baseline_candidate_runs_through_gate",
+        )
+        hyperparams.setdefault(
+            "target_strategy_provenance",
+            "legacy ablation evolves all active routed variants",
+        )
+
+    migrated["hyperparams"] = hyperparams
+    return migrated, tuple(warnings)
 
 
 def _jsonable(value: Any) -> Any:

@@ -26,6 +26,15 @@ def test_record_accumulates_pass_at_2_rollouts() -> None:
     assert cell == CellStats(passes=3, attempts=4, last_round=1)
 
 
+def test_record_merges_repeated_writes_in_the_same_round() -> None:
+    ledger = SuccessLedger()
+    ledger.record("V0", "t1", n_pass=1, n_att=2, round_idx=4)
+    ledger.record("V0", "t1", n_pass=1, n_att=2, round_idx=4)
+
+    assert ledger.cell("V0", "t1") == CellStats(passes=2, attempts=4, last_round=4)
+    assert ledger.aggregate_counts("V0", {"t1"}, before_round=5, window=1) == (2, 4)
+
+
 def test_record_keeps_the_highest_round_seen() -> None:
     """Out-of-order writes must not walk ``last_round`` backwards."""
     ledger = SuccessLedger()
@@ -89,6 +98,30 @@ def test_raw_rate_estimator_is_available_as_an_ablation() -> None:
     assert ledger.estimate("V0", "t2") == pytest.approx(1.0)
 
 
+def test_cluster_estimator_uses_one_aggregate_denominator() -> None:
+    ledger = SuccessLedger()
+    ledger.record("V0", "short", n_pass=2, n_att=2, round_idx=0)
+    ledger.record("V0", "long", n_pass=0, n_att=6, round_idx=0)
+
+    # One cluster cell: (2 + 1) / (2 + 6 + 2) = 3/10. Averaging two
+    # independently smoothed task cells would be 7/16 and is intentionally not
+    # the estimator used by Router.
+    assert ledger.aggregate_counts("V0", {"short", "long"}) == (2, 8)
+    assert ledger.estimate_cluster("V0", {"short", "long"}) == pytest.approx(3 / 10)
+
+
+def test_cluster_estimator_preserves_before_round_and_window() -> None:
+    ledger = SuccessLedger()
+    ledger.record("V0", "old", n_pass=2, n_att=2, round_idx=1)
+    ledger.record("V0", "fresh", n_pass=2, n_att=2, round_idx=8)
+
+    assert ledger.estimate_cluster("V0", {"old", "fresh"}, before_round=8) == pytest.approx(3 / 4)
+    assert ledger.estimate_cluster("V0", {"old", "fresh"}, before_round=9) == pytest.approx(5 / 6)
+    assert ledger.estimate_cluster(
+        "V0", {"old", "fresh"}, before_round=10, window=5
+    ) == pytest.approx(3 / 4)
+
+
 # ---------------------------------------------------------------------------
 # estimate(before_round=...) — the ledger half of the routing freeze (SPEC §6.2)
 # ---------------------------------------------------------------------------
@@ -112,20 +145,17 @@ def test_before_round_hides_future_rounds_too() -> None:
     assert ledger.estimate("V0", "t1", before_round=4) == 0.5
 
 
-def test_before_round_drops_the_whole_cell_not_just_the_new_rollouts() -> None:
-    """Documented coarseness: running totals cannot be un-mixed (SPEC §2.2).
-
-    A cell touched in the frozen round falls back to the prior even though it
-    also holds older rounds. Under correct operation this never fires, because
-    at freeze time no cell can carry the current round yet — and when it does,
-    dropping it is the safe direction (it can never leak this round's result).
-    """
+def test_before_round_strictly_excludes_current_but_keeps_older_rounds() -> None:
+    """A current-round write cannot hide valid history or leak into routing."""
     ledger = SuccessLedger()
     ledger.record("V0", "t1", n_pass=2, n_att=2, round_idx=1)
     assert ledger.estimate("V0", "t1", before_round=3) == pytest.approx(3 / 4)
 
     ledger.record("V0", "t1", n_pass=0, n_att=2, round_idx=3)
-    assert ledger.estimate("V0", "t1", before_round=3) == 0.5
+    assert ledger.aggregate_counts("V0", {"t1"}, before_round=3) == (2, 2)
+    assert ledger.estimate("V0", "t1", before_round=3) == pytest.approx(3 / 4)
+    assert ledger.aggregate_counts("V0", {"t1"}, before_round=4) == (2, 4)
+    assert ledger.estimate("V0", "t1", before_round=4) == pytest.approx(3 / 6)
 
 
 def test_max_last_round_is_the_freeze_guard() -> None:
@@ -153,6 +183,21 @@ def test_window_drops_cells_older_than_the_recency_horizon() -> None:
     # last 5 rounds relative to round 10: round 1 is out, round 8 is in
     assert ledger.estimate("V0", "stale", before_round=10, window=5) == 0.5
     assert ledger.estimate("V0", "fresh", before_round=10, window=5) == pytest.approx(3 / 4)
+
+
+def test_window_excludes_old_counts_inside_a_recently_touched_cell() -> None:
+    """The OURS window is a true round interval, not a last-write cell filter."""
+    ledger = SuccessLedger()
+    ledger.record("V0", "mixed", n_pass=2, n_att=2, round_idx=1)
+    ledger.record("V0", "mixed", n_pass=0, n_att=2, round_idx=8)
+
+    # The cumulative compatibility view still contains both rounds.
+    assert ledger.cell("V0", "mixed") == CellStats(passes=2, attempts=4, last_round=8)
+    assert ledger.aggregate_counts("V0", {"mixed"}) == (2, 4)
+
+    # [5, 10) retains R8 but excludes R1.
+    assert ledger.aggregate_counts("V0", {"mixed"}, before_round=10, window=5) == (0, 2)
+    assert ledger.estimate("V0", "mixed", before_round=10, window=5) == pytest.approx(1 / 4)
 
 
 def test_window_must_be_positive() -> None:
@@ -211,8 +256,68 @@ def test_variant_rollup_pools_every_cell_of_the_variant() -> None:
     ledger.record("V0", "t1", n_pass=2, n_att=2, round_idx=0)
     ledger.record("V0", "t2", n_pass=0, n_att=2, round_idx=0)
     ledger.record("V0", "t3", n_pass=1, n_att=2, round_idx=0)
-    # raw pooled rate, not Laplace: 3 passes / 6 attempts
+    # Equal attempt counts make task-macro and raw agree here.
     assert ledger.variant_rollup("V0") == pytest.approx(0.5)
+
+
+def test_task_macro_is_default_and_is_not_attempt_count_dominated() -> None:
+    ledger = SuccessLedger()
+    ledger.record("V0", "easy", n_pass=100, n_att=100, round_idx=0)
+    ledger.record("V0", "hard", n_pass=0, n_att=2, round_idx=0)
+    ledger.record("V1", "a", n_pass=3, n_att=4, round_idx=0)
+    ledger.record("V1", "b", n_pass=3, n_att=4, round_idx=0)
+
+    # Legacy pooled attempts make V0 look excellent; equal task weighting
+    # correctly exposes that it fails half its task types.
+    assert ledger.rollup_mode == "task_macro"
+    assert ledger.variant_rollup("V0", mode="raw") == pytest.approx(100 / 102)
+    assert ledger.variant_rollup("V1", mode="raw") == pytest.approx(0.75)
+    assert ledger.variant_rollup("V0") == pytest.approx(0.5)
+    assert ledger.variant_rollup("V1") == pytest.approx(0.75)
+
+
+def test_cluster_macro_gives_each_cluster_one_vote() -> None:
+    clusters = {"a": "large", "b": "large", "z": "small"}
+    ledger = SuccessLedger(task_clusters=clusters)
+    ledger.record("V0", "a", n_pass=2, n_att=2, round_idx=0)
+    ledger.record("V0", "b", n_pass=2, n_att=2, round_idx=0)
+    ledger.record("V0", "z", n_pass=0, n_att=2, round_idx=0)
+    ledger.record("V1", "a", n_pass=1, n_att=2, round_idx=0)
+    ledger.record("V1", "b", n_pass=1, n_att=2, round_idx=0)
+    ledger.record("V1", "z", n_pass=2, n_att=2, round_idx=0)
+
+    assert ledger.variant_rollup("V0", mode="cluster_macro") == pytest.approx(0.5)
+    assert ledger.variant_rollup("V1", mode="cluster_macro") == pytest.approx(0.75)
+
+
+def test_window_is_consistent_across_cluster_and_rollup_views() -> None:
+    clusters = {"a": "large", "b": "large", "z": "small"}
+    ledger = SuccessLedger(task_clusters=clusters)
+
+    # Old results make every task's full-history rate 1/2, but must not dilute
+    # the recent interval [5, 10).
+    ledger.record("V0", "a", n_pass=0, n_att=2, round_idx=1)
+    ledger.record("V0", "b", n_pass=2, n_att=2, round_idx=1)
+    ledger.record("V0", "z", n_pass=2, n_att=2, round_idx=1)
+    ledger.record("V0", "a", n_pass=2, n_att=2, round_idx=8)
+    ledger.record("V0", "b", n_pass=0, n_att=2, round_idx=8)
+    ledger.record("V0", "z", n_pass=0, n_att=2, round_idx=8)
+
+    kwargs = {"before_round": 10, "window": 5}
+    assert ledger.aggregate_counts("V0", clusters, **kwargs) == (2, 6)
+    assert ledger.estimate("V0", "a", **kwargs) == pytest.approx(3 / 4)
+    assert ledger.estimate_cluster("V0", clusters, **kwargs) == pytest.approx(3 / 8)
+    assert ledger.attempts_on_cluster("V0", clusters, **kwargs) == 6
+    assert ledger.variant_rollup("V0", mode="task_macro", **kwargs) == pytest.approx(1 / 3)
+    assert ledger.variant_rollup("V0", mode="cluster_macro", **kwargs) == pytest.approx(1 / 4)
+    assert ledger.variant_rollup("V0", mode="raw", **kwargs) == pytest.approx(1 / 3)
+
+
+def test_cluster_macro_requires_assignments() -> None:
+    ledger = SuccessLedger()
+    ledger.record("V0", "a", n_pass=1, n_att=2, round_idx=0)
+    with pytest.raises(ValueError, match="requires"):
+        ledger.variant_rollup("V0", mode="cluster_macro")
 
 
 def test_variant_rollup_of_an_untried_variant_is_the_prior() -> None:
@@ -227,3 +332,11 @@ def test_attempts_on_feeds_the_tie_break() -> None:
     ledger.record("V0", "t1", n_pass=0, n_att=2, round_idx=1)
     assert ledger.attempts_on("V0", "t1") == 4
     assert ledger.attempts_on("V1", "t1") == 0
+
+
+def test_attempts_on_cluster_honours_the_freeze_cut() -> None:
+    ledger = SuccessLedger()
+    ledger.record("V0", "old", n_pass=1, n_att=2, round_idx=0)
+    ledger.record("V0", "current", n_pass=2, n_att=4, round_idx=1)
+    assert ledger.attempts_on_cluster("V0", {"old", "current"}, before_round=1) == 2
+    assert ledger.attempts_on_cluster("V0", {"old", "current"}, before_round=2) == 6

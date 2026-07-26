@@ -14,7 +14,7 @@ import pytest
 
 from variant_pool.ledger import SuccessLedger
 from variant_pool.pool import VariantPool
-from variant_pool.router import CLUSTER_MODES, Router, RoutingFreezeError
+from variant_pool.router import CLUSTER_MODES, ROUTING_MODES, Router, RoutingFreezeError
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +31,11 @@ def _pool(tmp_path: Path, n_variants: int = 2, tasks: set[str] | None = None) ->
     return pool
 
 
+def _task_router(**kwargs) -> Router:
+    """The legacy per-task tournament, now an explicit compatibility arm."""
+    return Router(routing_mode="task_tournament", **kwargs)
+
+
 # ===========================================================================
 # Routing freeze (SPEC §6.2) — the correctness core
 # ===========================================================================
@@ -45,7 +50,7 @@ def test_freeze_routing_uses_prior_rounds_only_and_rejects_this_round(tmp_path: 
     """
     pool = _pool(tmp_path, n_variants=2)
     ledger = SuccessLedger()
-    router = Router()
+    router = Router(task_to_cluster={"t": "c"})
 
     # --- prior round only -------------------------------------------------
     ledger.record("V0", "t", n_pass=2, n_att=2, round_idx=0)  # V0 = 3/4
@@ -70,17 +75,16 @@ def test_freeze_routing_uses_prior_rounds_only_and_rejects_this_round(tmp_path: 
 def test_route_ignores_cells_written_in_the_frozen_round(tmp_path: Path) -> None:
     """Second line of defence: even reached directly, ``route`` cannot see it.
 
-    V0 holds weak prior evidence; V1 holds a strong result from the round being
-    frozen. At ``before_round=1`` the V1 cell is invisible, so V0 wins the
-    tie-break; at ``before_round=2`` the same cell is prior evidence and V1
-    wins outright.
+    V0 holds strong prior evidence; V1 holds an even stronger result from the
+    round being frozen. At ``before_round=1`` the V1 cell is invisible, so V0
+    wins; at ``before_round=2`` the same cell is prior evidence and V1 wins.
     """
     pool = _pool(tmp_path, n_variants=2)
     ledger = SuccessLedger()
-    router = Router()
+    router = Router(task_to_cluster={"t": "c"})
 
-    ledger.record("V0", "t", n_pass=1, n_att=2, round_idx=0)  # prior, weak
-    ledger.record("V1", "t", n_pass=2, n_att=2, round_idx=1)  # this round, strong
+    ledger.record("V0", "t", n_pass=2, n_att=2, round_idx=0)  # prior: 3/4
+    ledger.record("V1", "t", n_pass=4, n_att=4, round_idx=1)  # this round: 5/6
 
     assert router.route("t", pool, ledger, before_round=1) == "V0"
     assert router.route("t", pool, ledger, before_round=2) == "V1"
@@ -114,7 +118,7 @@ def test_freeze_routing_accepts_a_ledger_that_stops_one_round_short(tmp_path: Pa
     ledger = SuccessLedger()
     ledger.record("V1", "t", n_pass=2, n_att=2, round_idx=4)
 
-    frozen = Router().freeze_routing(["t"], pool, ledger, round_idx=5)
+    frozen = Router(task_to_cluster={"t": "c"}).freeze_routing(["t"], pool, ledger, round_idx=5)
     assert frozen["t"] == "V1"
 
 
@@ -127,7 +131,7 @@ def test_freeze_routing_covers_every_task(tmp_path: Path) -> None:
     # equal rollups, so cold start falls to the lowest id
     assert ledger.variant_rollup("V0") == ledger.variant_rollup("V1") == 1.0
 
-    frozen = Router().freeze_routing(["t1", "t2", "t3"], pool, ledger, round_idx=1)
+    frozen = _task_router().freeze_routing(["t1", "t2", "t3"], pool, ledger, round_idx=1)
     assert set(frozen) == {"t1", "t2", "t3"}
     assert frozen["t2"] == "V1"  # only t2 has task-level evidence
     assert frozen["t1"] == frozen["t3"] == "V0"  # cold start
@@ -151,7 +155,7 @@ def test_route_picks_the_highest_estimate(tmp_path: Path) -> None:
     ledger.record("V1", "t", n_pass=2, n_att=2, round_idx=0)
     ledger.record("V2", "t", n_pass=1, n_att=2, round_idx=0)
 
-    assert Router().route("t", pool, ledger, before_round=1) == "V1"
+    assert Router(task_to_cluster={"t": "c"}).route("t", pool, ledger, before_round=1) == "V1"
 
 
 def test_route_requires_before_round(tmp_path: Path) -> None:
@@ -180,7 +184,7 @@ def test_a_cell_estimating_exactly_at_the_prior_is_not_treated_as_absent(tmp_pat
     assert ledger.estimate("V1", "t", before_round=1) == 0.5
 
     # tie at 0.5 with untried V0 -> fewest attempts wins -> V0 (0 attempts)
-    assert Router().route("t", pool, ledger, before_round=1) == "V0"
+    assert _task_router().route("t", pool, ledger, before_round=1) == "V0"
     # ... whereas cold start would have consulted the rollup and picked V1
     assert ledger.variant_rollup("V1") > ledger.variant_rollup("V0")
     assert Router().cold_start("t", pool, ledger) == "V1"
@@ -236,7 +240,7 @@ def test_route_cold_starts_a_task_nobody_has_evidence_for(tmp_path: Path) -> Non
 
 def test_default_tie_break_is_fewest_attempts(tmp_path: Path) -> None:
     """Explicit test of an *our-default* knob: ties are spent on exploration."""
-    router = Router()
+    router = _task_router()
     assert router.tie_break == "fewest_attempts"
 
     pool = _pool(tmp_path, n_variants=2)
@@ -259,7 +263,7 @@ def test_smallest_id_tie_break(tmp_path: Path) -> None:
     ledger.record("V0", "t", n_pass=1, n_att=2, round_idx=1)
     ledger.record("V1", "t", n_pass=1, n_att=2, round_idx=1)
 
-    assert Router(tie_break="smallest_id").route("t", pool, ledger, before_round=2) == "V0"
+    assert _task_router(tie_break="smallest_id").route("t", pool, ledger, before_round=2) == "V0"
 
 
 def test_random_tie_break_is_seeded_and_reproducible(tmp_path: Path) -> None:
@@ -268,8 +272,8 @@ def test_random_tie_break_is_seeded_and_reproducible(tmp_path: Path) -> None:
     ledger.record("V0", "t", n_pass=1, n_att=2, round_idx=0)
     ledger.record("V1", "t", n_pass=1, n_att=2, round_idx=0)
 
-    first = [Router(tie_break="random", seed=7).route("t", pool, ledger, before_round=1) for _ in range(5)]
-    second = [Router(tie_break="random", seed=7).route("t", pool, ledger, before_round=1) for _ in range(5)]
+    first = [_task_router(tie_break="random", seed=7).route("t", pool, ledger, before_round=1) for _ in range(5)]
+    second = [_task_router(tie_break="random", seed=7).route("t", pool, ledger, before_round=1) for _ in range(5)]
     assert first == second
     assert set(first) <= {"V0", "V1"}
 
@@ -281,7 +285,7 @@ def test_random_tie_break_is_seeded_and_reproducible(tmp_path: Path) -> None:
 
 def test_exploration_is_off_by_default(tmp_path: Path) -> None:
     """Explicit test of an *our-default* knob: epsilon = 0, pure argmax."""
-    router = Router()
+    router = _task_router()
     assert router.epsilon == 0.0
     assert router.explore(["V0", "V1"]) is None
 
@@ -304,7 +308,7 @@ def test_exploration_can_override_argmax(tmp_path: Path) -> None:
     ledger.record("V0", "t", n_pass=2, n_att=2, round_idx=0)
     ledger.record("V1", "t", n_pass=0, n_att=2, round_idx=0)
 
-    router = Router(epsilon=1.0, seed=1)
+    router = _task_router(epsilon=1.0, seed=1)
     picks = {router.route("t", pool, ledger, before_round=1) for _ in range(30)}
     assert "V1" in picks  # the argmax loser is reachable
 
@@ -323,18 +327,126 @@ def test_cluster_of_is_the_carrying_variant(tmp_path: Path) -> None:
     assert router.cluster_of("t2", pool) == "V0"
 
 
-def test_cluster_of_falls_back_to_cold_start_for_an_uncarried_task(tmp_path: Path) -> None:
+def test_cluster_of_marks_an_uncarried_task_unknown(tmp_path: Path) -> None:
     pool = _pool(tmp_path, n_variants=2)
-    assert Router().cluster_of("orphan", pool) == "V0"
+    assert Router().cluster_of("orphan", pool) is None
+
+
+def test_default_routed_mode_aggregates_the_whole_carrier_cluster(tmp_path: Path) -> None:
+    """The default is no longer a task tournament disguised as a cluster."""
+    pool = _pool(tmp_path, n_variants=2, tasks={"a", "b"})
+    ledger = SuccessLedger()
+    ledger.record("V0", "a", 2, 2, 0)
+    ledger.record("V0", "b", 0, 2, 0)
+    ledger.record("V1", "a", 0, 2, 0)
+    ledger.record("V1", "b", 1, 2, 0)
+
+    # On b alone V1 wins (0.5 > 0.25), but over routed cluster {a,b}
+    # V0 wins (3/6 > 2/6). Both tasks therefore receive the cluster winner.
+    assert _task_router().route("b", pool, ledger, before_round=1) == "V1"
+    router = Router()
+    assert router.route("a", pool, ledger, before_round=1) == "V0"
+    assert router.route("b", pool, ledger, before_round=1) == "V0"
+
+
+def test_injected_mapping_drives_variant_by_cluster_routing(tmp_path: Path) -> None:
+    pool = _pool(tmp_path, n_variants=2)
+    mapping = {"a": "reasoning", "b": "reasoning"}
+    ledger = SuccessLedger()
+    ledger.record("V0", "a", 2, 2, 0)
+    ledger.record("V0", "b", 0, 2, 0)
+    ledger.record("V1", "a", 0, 2, 0)
+    ledger.record("V1", "b", 1, 2, 0)
+
+    router = Router(task_to_cluster=mapping)
+    assert router.cluster_of("b", pool) == "reasoning"
+    assert router.tasks_in_cluster("reasoning", pool) == frozenset({"a", "b"})
+    assert router.route("b", pool, ledger, before_round=1) == "V0"
+
+
+def test_cluster_tie_uses_the_aggregate_attempt_denominator(tmp_path: Path) -> None:
+    pool = _pool(tmp_path, n_variants=2)
+    ledger = SuccessLedger()
+    ledger.record("V0", "a", 1, 2, 0)  # aggregate estimate 2/4, 2 attempts
+    ledger.record("V1", "a", 1, 2, 0)
+    ledger.record("V1", "b", 1, 2, 0)  # aggregate estimate 3/6, 4 attempts
+
+    router = Router(task_to_cluster={"a": "c", "b": "c"})
+    assert ledger.estimate_cluster("V0", {"a", "b"}, before_round=1) == 0.5
+    assert ledger.estimate_cluster("V1", {"a", "b"}, before_round=1) == 0.5
+    assert router.route("b", pool, ledger, before_round=1) == "V0"
+
+
+def test_cluster_before_round_hides_every_same_round_member(tmp_path: Path) -> None:
+    pool = _pool(tmp_path, n_variants=2)
+    ledger = SuccessLedger()
+    ledger.record("V0", "a", 2, 2, 0)
+    ledger.record("V1", "a", 2, 2, 1)
+    ledger.record("V1", "b", 2, 2, 1)
+    router = Router(task_to_cluster={"a": "c", "b": "c"})
+
+    assert router.route("b", pool, ledger, before_round=1) == "V0"
+    assert router.route("b", pool, ledger, before_round=2) == "V1"
+
+
+def test_cold_start_rollup_cannot_leak_the_frozen_round(tmp_path: Path) -> None:
+    pool = _pool(tmp_path, n_variants=2)
+    ledger = SuccessLedger()
+    ledger.record("V1", "current", 2, 2, 1)
+    router = Router(task_to_cluster={})
+
+    # Unknown cluster -> cold start. The round-1 result is invisible at the
+    # round-1 cut, then becomes eligible in round 2.
+    assert router.route("unknown", pool, ledger, before_round=1) == "V0"
+    assert router.route("unknown", pool, ledger, before_round=2) == "V1"
+
+
+def test_cluster_window_is_forwarded_to_the_aggregate_estimator(tmp_path: Path) -> None:
+    pool = _pool(tmp_path, n_variants=2)
+    ledger = SuccessLedger()
+    ledger.record("V0", "a", 4, 4, 1)
+    ledger.record("V1", "b", 2, 2, 8)
+    mapping = {"a": "c", "b": "c"}
+
+    assert Router(task_to_cluster=mapping).route("b", pool, ledger, before_round=10) == "V0"
+    assert Router(task_to_cluster=mapping, window=5).route("b", pool, ledger, before_round=10) == "V1"
+
+
+def test_unknown_in_an_injected_map_takes_deterministic_cold_start(tmp_path: Path) -> None:
+    pool = _pool(tmp_path, n_variants=2)
+    ledger = SuccessLedger()
+    ledger.record("V0", "target", 2, 2, 0)
+    ledger.record("V0", "hard", 0, 2, 0)
+    ledger.record("V1", "other", 2, 2, 0)
+    router = Router(task_to_cluster={"other": "known"})
+
+    # Target's task-level evidence is deliberately ignored: its cluster is
+    # unknown, so the macro cold-start score deterministically selects V1.
+    assert {router.route("target", pool, ledger, before_round=1) for _ in range(10)} == {"V1"}
+    assert _task_router().route("target", pool, ledger, before_round=1) == "V0"
 
 
 @pytest.mark.parametrize("mode", ["failure", "level"])
-def test_ablation_cluster_modes_are_hooks_not_implementations(mode: str, tmp_path: Path) -> None:
+def test_non_routed_cluster_modes_require_assignments(mode: str, tmp_path: Path) -> None:
     pool = _pool(tmp_path, n_variants=1, tasks={"t1"})
     router = Router(cluster_mode=mode)
     assert router.cluster_mode in CLUSTER_MODES
-    with pytest.raises(NotImplementedError, match="batch-C ablation"):
+    with pytest.raises(NotImplementedError, match="requires an injected"):
         router.cluster_of("t1", pool)
+
+
+@pytest.mark.parametrize("mode", ["failure", "level"])
+def test_non_routed_cluster_modes_work_with_injected_assignments(mode: str, tmp_path: Path) -> None:
+    pool = _pool(tmp_path, n_variants=1, tasks={"t1"})
+    router = Router(cluster_mode=mode, task_to_cluster={"t1": "c1"})
+    assert router.cluster_of("t1", pool) == "c1"
+    assert router.route("t1", pool, SuccessLedger(), before_round=0) == "V0"
+
+
+def test_task_tournament_is_an_explicit_compatibility_mode() -> None:
+    assert set(ROUTING_MODES) == {"cluster", "task_tournament"}
+    assert Router().routing_mode == "cluster"
+    assert _task_router().routing_mode == "task_tournament"
 
 
 # ---------------------------------------------------------------------------
@@ -346,9 +458,13 @@ def test_ablation_cluster_modes_are_hooks_not_implementations(mode: str, tmp_pat
     "kwargs",
     [
         {"cluster_mode": "semantic"},
+        {"routing_mode": "pretend_cluster"},
         {"tie_break": "coin-flip"},
         {"epsilon": -0.1},
         {"epsilon": 1.5},
+        {"window": 0},
+        {"task_to_cluster": {"": "cluster"}},
+        {"task_to_cluster": {"task": ""}},
     ],
 )
 def test_router_rejects_unknown_settings(kwargs: dict) -> None:

@@ -248,7 +248,9 @@ class VariantPool:
         if not self.variants:
             raise RuntimeError("cannot reassign into an empty pool")
         mapping: dict[str, str] = {}
-        for task_id in orphan_tasks:
+        # Stable order matters when the router uses its seeded random tie-break
+        # or epsilon arm; callers commonly pass the set returned by ``retire``.
+        for task_id in sorted(set(orphan_tasks)):
             if ledger is not None and before_round is not None:
                 target = router.route(task_id, self, ledger, before_round=before_round)
             else:
