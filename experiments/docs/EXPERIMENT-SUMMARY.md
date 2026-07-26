@@ -1,6 +1,6 @@
 # HarnessX 变体池复现 · 实验总结
 
-## ⚠️ CORRECTION / ERRATA INDEX（2026-07-25）
+## ⚠️ CORRECTION / ERRATA INDEX（2026-07-25,更新 2026-07-26）
 
 > 本索引是本文的当前权威读法。下列历史文字为保留实验演进记录而不删除，但已被明确纠正。完整的方法学缺口、我方工程选择和验证要求见 [`PAPER-METHODOLOGY-DEVIATIONS.md`](./PAPER-METHODOLOGY-DEVIATIONS.md)。
 
@@ -13,6 +13,8 @@
 | EXP-E05 | **§6 下一步**中把 `(1,1)` 仅列为未来想法；本文各处隐含的旧实现状态 | 当前默认已改为 `(1,1)`；已有真实 cluster API、`task_tournament` 兼容分臂、task/cluster macro retirement、两阶段 settle、独立 active-pool scoring，以及 CandidatePipeline/Critic 契约。当前候选 queue 上限仍是 per target/variant，不是论文 round-global `K_t=4`；真实 LLM adapter 和正式 `103 × 15 × 3` 实验仍未运行。 |
 | EXP-E06 | **§2.1/§2.2** 对多候选、Critic 与 shipping “建成”的概括 | Algorithm 1 的 round-global `K_t` coordinator/target selector 尚未实现；当前 first-pass-wins 是按主文 Algorithm 作出的工程裁决，而 Appendix B.1 明述的 ranked bucket-disjoint multi-ship 尚未实现。两种 shipping 语义必须作为分臂，不能宣称已有唯一论文实现。 |
 | EXP-E07 | **§2.1/§2.2** 对 Digester/AEGIS 调用链“建成”的概括 | CandidatePipeline 的结构化合约已测试，但 actionability `a_t < α` / empty-landscape 前置 short-circuit 尚未实现；空 briefs 仍可能进入 Evolver。故不得宣称 Algorithm 1 selective invocation 已完成。 |
+| EXP-E08（07-26） | 2e78468 之前生成的所有 `pool_report.md` 的 headline 行 | `attempts / infra / budget exhaustion` 三数口径不一：attempts 全程总计，infra/budget **只数末轮**（smoke_calib6 实际 7 次耗尽报 2）。读旧报告一律以逐任务行/轨迹 frontmatter 为准；`to_dict/to_json` 同类不一致**尚未修**（与末轮 rates 配对，待单独决定）。 |
+| EXP-E09（07-26） | **§0 一句话结论**及各处“fork 在 DeepSeek 上不触发/候选恒为 0”谱系表述 | smoke_hard2 起候选链全通并获真实门判决（SEESAW REJECT）；smoke_calib6 复盘一候选距首次有机 APPLY 仅差一关。当前拦截点不是“无 mixed conflict”，而是 **L2 证据墙**（工具/processor 候选死于第 4 关，裁决=SPEC §7.11 乙+甲）与 **Critic 方差墙**（零上线轮的噪声翻转被判“未解释回退”，信息流已修 2e78468）。逐 run 权威记录=[`RUN-LOG.md`](./RUN-LOG.md)。 |
 
 **纠正后的唯一可支持结论：**旧探针暴露了 fork 门槛与报告边界缺陷；它们没有构成 Ensemble 效果实验。本文以下旧结论仅作为历史记录阅读，不再作为当前证据。
 

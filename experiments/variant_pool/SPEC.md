@@ -568,3 +568,20 @@ C4 首次真跑时,evolve 内部 replay 门 timeout 抛异常,被 `run_variant_p
   2. manifest 收口(`_finalize_slot`)把回声的别名映射回 slot ID,别名本身存 `meta["repo_candidate_id"]` 供审计。
 - **否决的替代方案**:全内部改用数字形(会撞 `CANDIDATE_ID_RE`、打乱 `_brief_for_slot` 的位序解析、污染全部 C-R 形文档/fixture);在渲染层翻译(契约 dict 将与 meta 实际所见不一致,审计失真)。
 - legacy 路径不注入契约(repo 原生 TASK.md),其 ID 纯内部记账,维持 `C-R{round}-{vid}` 原样。
+
+## 7.10 `--force-gate` 管道探针(Jul-26,应用户"强行做一个变体验证链路"之令)
+
+**目的**:APPLY/FORK 结算链(`engine._settle_round`:pool.fork、journal 继承、双变体路由、退役)从未被真实数据触发;探针在真数据上强制走通。**设计**:recipe 层包装器经引擎现成注入缝(`VariantPoolEngine(gate=...)`)注入,真门照常全跑、审计全留,仅改写**最终判定**;`off`(默认)= 返回原 `run_gate` 同一对象,字节等同。**三条硬规**:①只改写**已到达第 5 关**(`decision is not None`)的结果——前四关完整性失败永不放行(探针不送垃圾过门);②强制 FORK 且真实 improved 为空时,从本轮评测失败任务合成子变体任务集,`archive_reason` 里 `synthesized_improved=` 可审计;③强制轮次带双污点标记(pool_report 首行横幅 + experiment.lock `provenance_warnings`),**永远不算测量**。落点:`run_variant_pool.py`(5f96a21),14 个离线测试。forceprobe1 实测:守卫①行为正确(两轮候选均死于前四关,探针未出手)。
+
+## 7.11 L2 证据机制:乙+甲(Jul-26,用户拍板"可以")
+
+**问题**:repo journal 无 capability_evidence 槽位;契约明文要求后 DeepSeek meta 仍不写(forceprobe1 R1,措辞逐字在 TASK.md:89,n=1 不遵守)→ 工具/processor 候选全死第 4 关,Action 杠杆瘫痪(媒体簇唯一修法)。**裁决**:
+- **甲(保留)**:契约措辞不动(e79e76d);meta 亲笔证据优先采用——顺带产出"亲笔率"作论文数据点(§7.7 未测面);
+- **乙(新增兜底,repo 模式 + tools 桶)**:判门时经门预留 `check_roundtrip` 注入缝,取**该候选评测轨迹中新工具的真实输出**,过 provider 真序列化器(`check_level2_roundtrip` + `_prepare_messages`),机器生成证据,记入 candidate meta 并标 **OURS**;
+- **边界**:新工具在候选评测中从未被调用 → 无证据可取,**诚实拒**(与 attribution_signature 的 `expected_min_calls≥1` 同精神);processor 桶 v1 维持"必须亲笔申报"(轨迹取证语义未定,不装覆盖);paper 模式一字不动(忠实臂);
+- **否决案**:丙 retry 再教(费 meta 调用且无保证,留作论文期补充)、丁放宽第 4 关(=软化判据,墓碑老路)、戊禁工具候选(砍 Action 杠杆,砍掉与 C-R10-02 对话资格)。
+- 实施时记偏差台账 **M-22**;论文叙事:"证据优先由 Evolver 提供;缺失时由 recipe 对真实运行产物执行同一探针并标注机器来源"——比口头声明更符 p.32 反"I believe this will work"之精神。
+
+## 7.12 回退情报接线(Jul-26)
+
+forceprobe1 R2 暴露断路:`context.regressions` 只流入 Critic,meta 全然不知,却因"未解释回退"被整轮否决(W16 考没发的题)。**修**(2e78468):`planner_brief` 非空回退时携带 `active_regressions` 清单 + 引 Critic 原话的硬性要求;空时字节稳定。Critic 判据未动——修的是信息流,不是纪律。

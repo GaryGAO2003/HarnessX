@@ -127,6 +127,8 @@ flowchart LR
 
 **当前问题是校准,不是结构**:smoke_hard2 的候选被拒理由是 `improved=[] regressed=[04a04a9b]`,但该"回退"是假定价饿死的——repo 的 `_estimate_cost` 按 Claude Sonnet 定价记账(对 DeepSeek 约 66× 虚高),`--max-cost 1` 作为单 rollout 上限在第 15 步(< 20 步)掐死了候选评测,当时 agent 正要输出最终答案(`cost_usd: 1.114` 假美元 = 真实约 ¥0.1)。整个 smoke 真实花费 ≈ ¥2.1(余额差)。⇒ 候选评测必须给足假美元头寸(如 `--max-cost 8`),成本判断只看 token/余额,不看 repo 的 `cost_usd`。
 
+**Jul-26 晚更新**:校准已解(smoke_hard3 验证跑满 20 步)。当前挡在第 5 关前的是**两堵墙**(详 RUN-LOG.md + SPEC §7.11/§7.12):①**L2 证据墙**——工具/processor 候选因 meta 不写 capability_evidence 死于第 4 关(措辞要求无效,n=1);裁决=乙+甲(机器自证兜底,SPEC §7.11),施工中;②**Critic 方差墙**——零上线轮次的任务噪声翻转产生"无人能解释的回退",Critic 整轮否决;已修信息流(planner_brief 携带 active_regressions,2e78468),pass@2 再削噪声根源。calib6 复盘:一个候选距首次有机 APPLY 仅差 L2 一关。
+
 ---
 
 ## 6. 论文 vs 开源 repo(必须记住的落差)
