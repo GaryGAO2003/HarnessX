@@ -25,7 +25,7 @@ flowchart TB
     PLAN -->|"空间为空"| SKIP2["跳过本轮 ⬜"]
     PLAN --> EVO
 
-    EVO["<b>④ Evolver</b> 🟥<br/>产出 K_t 个候选 + change manifest<br/><b>← 我们卡在这里</b>"]
+    EVO["<b>④ Evolver</b> 🟩<br/>产出 K_t 个候选 + change manifest<br/>(smoke_hard2 起全链贯通)"]
     EVO -->|"零候选"| SKIP3["跳过本轮"]
     EVO --> CRI
 
@@ -40,7 +40,6 @@ flowchart TB
     IDLE -->|是| STOP(["早停"])
     IDLE -->|否| NEXT(["第 t+1 轮"])
 
-    style EVO fill:#4a2020,stroke:#c55,color:#fdd
     style SKIP1 fill:#333,stroke:#666,color:#999
     style SKIP2 fill:#333,stroke:#666,color:#999
 ```
@@ -110,29 +109,23 @@ flowchart LR
 | 路由冻结 | 🟩 | 只读先前轮账本,代码结构保证不会"用本轮结果反向路由" |
 | pass@2 执行 | 🟩 | 论文附录 A.3 的无偏估计量 |
 | Digester / Planner | 🟩 | 复用 repo 的近似实现 |
-| **Evolver 产候选** | 🟥 | **meta-agent 分析完不写 config.yaml,候选恒为 0** |
-| Critic 契约 | 🟩 | 已建,但没候选可排序 |
-| 五关门 + 三路 fork | 🟩 | 全部测试通过,**但从没收到过候选** |
+| Evolver 产候选 | 🟩 | smoke_hard2 首次贯通:retry 契约(fault 2)+ repo manifest 适配(fault 1)+ 候选 ID 别名(SPEC §7.9)三修齐效 |
+| Critic 契约 | 🟩 | smoke_hard2 中首次真实排序(deterministic fallback) |
+| 五关门 + 三路 fork | 🟩 | smoke_hard2 中首次收到真实候选并做出判定(SEESAW_REGRESSION → REJECT,行为符合论文) |
 | 变体池 / 账本 / 退役 | 🟩 | 491 测试通过 |
 | 早停 | 🟩 | idle ≥ 3 |
-| 可行动性短路 | ⬜ | 论文有,我方未实现 |
+| 可行动性短路 | 🟩 | Algorithm 1 边界语义(a_t ≥ α 继续),smoke_hard2 审计可见 |
 | round-global 目标选择 | ⬜ | 论文未给算法,我方未实现 |
 
-**结论:整条链只有一处断点——第 ④ 步的候选产出。** 它下游的所有机制(Critic、门、fork、变体池)都建好且测试通过,但因为收不到候选而空转。
+**结论:整条链已无结构性断点。** smoke_hard2(Jul-26)里一个真实候选第一次走完 Digester → Planner → Evolver(1 次 retry)→ Critic → 评测 → 确定性门 → 归档拒绝的全程。
 
 ---
 
-## 5. 断点的性质
+## 5. 已解决的断点与当前的校准问题
 
-meta-agent(DeepSeek V4-pro)在 evolve 时会:读证据 → 分析失败 → 写出新模板 → **自查泛化性**(它甚至会检查"我有没有把具体答案写死进模板")→ 然后 **end_turn,不写最终的 `config.yaml`**。
+**旧断点(已解决)**:meta-agent(DeepSeek V4-pro)分析完不写 `config.yaml`。三项 recipe 层修复叠加后消失:`--evolve-retry`(把 DECISION_REQUIRED 文本喂回下一次尝试)、`--manifest-mode repo`(免去第二份 manifest.yaml 负担)、候选 ID 别名(repo evidence 门只认 `C-\d+`,SPEC §7.9)。
 
-repo 自己的诊断早就预见到这个模式:
-
-> "meta-agent finished after Ns but no config.yaml was written. **This usually means it ended with analysis but did not commit to a final decision.**"
-
-而且 repo 的原始指令里**已经写了**"不要只分析,必须写 config.yaml 或显式 cp 一份 no-op"——我方重复强调这句已被证明无效。
-
-**所以这不是能力问题,是收尾动作缺失**:活干完了,最后一次文件写入没执行。论文用 Opus 4.6 少见这种情况;开源权重模型作 meta-agent,论文 §7.7 明说"未测"。
+**当前问题是校准,不是结构**:smoke_hard2 的候选被拒理由是 `improved=[] regressed=[04a04a9b]`,但该"回退"是假定价饿死的——repo 的 `_estimate_cost` 按 Claude Sonnet 定价记账(对 DeepSeek 约 66× 虚高),`--max-cost 1` 作为单 rollout 上限在第 15 步(< 20 步)掐死了候选评测,当时 agent 正要输出最终答案(`cost_usd: 1.114` 假美元 = 真实约 ¥0.1)。整个 smoke 真实花费 ≈ ¥2.1(余额差)。⇒ 候选评测必须给足假美元头寸(如 `--max-cost 8`),成本判断只看 token/余额,不看 repo 的 `cost_usd`。
 
 ---
 
