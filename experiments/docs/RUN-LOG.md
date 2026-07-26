@@ -58,14 +58,41 @@
   修:planner_brief 携带 active_regressions);③FORCED 横幅+lock 污点标记验证;
   ④"只改写第 5 关判定"的守卫行为正确。
 
-### forceprobe2 — 进行中
+### forceprobe2 — **fork 结算链首次真实走通** ✅
 - 配置:calib6 / rounds 3 / `--force-gate fork` / **pass@2** / **K_t=2** / max-cost 8
-- 目的:pass@2 削两墙噪声 + 双候选提高第 5 关到达率;若双候选同轮被强制 FORK,
-  顺带实测 K=2 容量降级结算路径
-- 状态:后台运行中,完成后回填本条
+- 判决:`r1 fork V1`(历史首次 fork 事件);变体数 [1,2,1](R2 的"1"=at-freeze 语义,
+  池内仍 2);R2 空转(见发现④)
+- 全链验证清单(全过):①C-R1-01(levers=[instruction],故过第 4 关)达第 5 关,真实
+  判决 REJECT(improved=[] regressed=[])被强制改判,审计串完整:`FORCED_GATE(fork):
+  real_decision=reject; synthesized_improved=[00d579ea, 05407167]`——合成集恰为两个
+  失败媒体任务,按设计;②C-R1-02(processor 桶)死第 4 关 ROUNDTRIP_L2,探针按
+  stage-5-only 规矩未碰;③结算:pool.fork → V1 出生,config=候选 config,
+  **journal=获胜候选 slot memo**(`learnings_V1.md`,67 行完整条目,
+  `cited_candidates: [C-0101]` 别名入 journal)= inherit-then-diverge 正确;APPLY 侧
+  对等收养已核实存在(`_adopt_candidate_memo` :1750);④R2 路由冻结在双变体池上
+  合理决策:V1 账本全是候选评测惨案 → 六题全给 V0、V1 空转(活着,未退役);
+  ⑤pass@2 全链上线:masking gap 0.1667 实测(§7.1 现象);**R1 regressed=[] ——
+  pass@2 如预期削掉方差墙**(pass@1 的 calib6 轮轮翻转);⑥run-total headline 口径
+  生效(36/0/5)。
+- 新发现(待修/待记):
+  - **P1 报告误分类**:headline "candidates rejected: 2" 把 fork 赢家也计入拒绝
+    (诊断字段本身正确=fork);应加 "candidates forked" 行并修 rejected 口径;
+  - **P2 目标选择饿死**:R2 `paper_target_variant=V1`,而 V1 零路由零轨迹 → 无法
+    evolve → 整轮空转(requested_slots=0)。有机 fork 的子变体带着真赢下的任务集,
+    通常不会犯;但"目标选择可选中无轨迹变体"是真实设计缝(论文 round-global 目标
+    选择本就是留白)——修法:目标选择跳过无 settled 轨迹的变体;
+  - 观察:强制 fork 一个劣质候选 ⇒ 僵尸变体(占 K 名额直到退役)——探针可接受,
+    正式实验里由有机门防住。
 
-### 会话成本合计(实测)
-¥194.14 → ¥183.14(**≈¥11**,含 forceprobe2 已烧部分;终值待其结束后回填)
+### gaia_agent.j2 守则补丁落盘(forceprobe2 结束后)
+- +6 行 / 3 折入点(Step Budget 节 + Tool availability 条 + no-progress 条),文献
+  依据与两处渲染事实修正见会话记录与 researcher 证据表;全文件 Jinja 渲染验证
+  (`max_steps | default(20)` → 20/18)。备份 `gaia_agent.j2.h0-original` 同步入库。
+- **可比性边界:smoke_hard2 … forceprobe2(含)全部使用原版 prompt;此后的 run
+  使用守则版**。H0 变更由用户明令(Jul-26"加 guardrail,不要大改")。
+
+### 会话成本合计(实测,最终)
+¥194.14 → ¥182.67(**¥11.47**,六个 smoke + 全部 meta 调用)
 
 ### 本日提交索引(全部已推 lab)
 | commit | 内容 |
