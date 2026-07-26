@@ -508,10 +508,17 @@ class RunReport:
         """Candidate-level counts plus the evaluated task denominator.
 
         Counts are over ``(round, candidate_id)`` so a replayed identifier in a
-        later round cannot collapse two attempts into one. Rejected candidates
-        may also be evaluated; skipped candidates are those with no evaluated
-        task rows. These categories are intentionally not forced to sum to the
-        attempted denominator.
+        later round cannot collapse two attempts into one. The shipping outcome
+        is classified on the candidate's single *final* decision, so ``applied``,
+        ``forked`` and ``rejected`` are mutually exclusive: an APPLY/FORK winner
+        is never miscounted as ``rejected`` merely because it carries an
+        ``archive_reason`` (e.g. a forced-gate audit note). ``rejected`` is the
+        terminal non-ship — decision REJECT, or a pre-gate failure (a failed
+        stage / archive reason with no APPLY/FORK). ``skipped`` is the orthogonal
+        axis (no evaluated task rows) and may overlap ``rejected`` when a
+        candidate fails a pre-gate check before it is ever scored. The three
+        outcome buckets plus the pure skips (skipped and not rejected) partition
+        the attempted denominator.
         """
         grouped: dict[tuple[int, str], list[CandidateTaskResult]] = {}
         for row in rows:
@@ -519,6 +526,8 @@ class RunReport:
 
         candidate_summaries: list[dict[str, Any]] = []
         evaluated_keys: set[tuple[int, str]] = set()
+        applied_keys: set[tuple[int, str]] = set()
+        forked_keys: set[tuple[int, str]] = set()
         rejected_keys: set[tuple[int, str]] = set()
         skipped_keys: set[tuple[int, str]] = set()
         evaluated_rows = [row for row in rows if row.evaluated]
@@ -527,15 +536,32 @@ class RunReport:
             candidate_rows = grouped[key]
             scored_rows = [row for row in candidate_rows if row.evaluated]
             evaluated = bool(scored_rows)
-            rejected = any(
-                row.decision == "reject"
-                or row.failed_stage is not None
-                or bool(row.archive_reason)
-                for row in candidate_rows
+            # Classify on the one settled gate outcome, not on any archived
+            # note: a FORK/APPLY winner that carries an archive_reason must not
+            # be counted as rejected (runs/forceprobe2 P1).
+            final_decision = next(
+                (row.decision for row in candidate_rows if row.decision is not None),
+                None,
+            )
+            applied = final_decision == "apply"
+            forked = final_decision == "fork"
+            rejected = (
+                not applied
+                and not forked
+                and any(
+                    row.decision == "reject"
+                    or row.failed_stage is not None
+                    or bool(row.archive_reason)
+                    for row in candidate_rows
+                )
             )
             skipped = not evaluated
             if evaluated:
                 evaluated_keys.add(key)
+            if applied:
+                applied_keys.add(key)
+            if forked:
+                forked_keys.add(key)
             if rejected:
                 rejected_keys.add(key)
             if skipped:
@@ -547,12 +573,11 @@ class RunReport:
                     "candidate_id": key[1],
                     "target_variant_id": candidate_rows[0].target_variant_id,
                     "evaluated": evaluated,
+                    "applied": applied,
+                    "forked": forked,
                     "rejected": rejected,
                     "skipped": skipped,
-                    "decision": next(
-                        (row.decision for row in candidate_rows if row.decision is not None),
-                        None,
-                    ),
+                    "decision": final_decision,
                     "failed_stage": next(
                         (row.failed_stage for row in candidate_rows if row.failed_stage is not None),
                         None,
@@ -579,6 +604,8 @@ class RunReport:
             "candidate_count": attempted,
             "attempted_candidate_count": attempted,
             "evaluated_candidate_count": evaluated,
+            "applied_candidate_count": len(applied_keys),
+            "forked_candidate_count": len(forked_keys),
             "rejected_candidate_count": len(rejected_keys),
             "skipped_candidate_count": len(skipped_keys),
             "candidate_denominator": attempted,
@@ -609,10 +636,22 @@ class RunReport:
             "rounds": rounds,
             "tasks": len({result.task_id for result in self.results}),
             "attempts": sum(result.n_att for result in self.results),
+            # ``infra_failures`` / ``budget_exhaustions`` and their ``*_rate``
+            # companions are LAST-ROUND scoped (the ``round_idx=None`` default of
+            # the count/rate helpers), so each count is paired with the
+            # last-round rate beside it. This differs from ``attempts`` above,
+            # which is a run total. The keys are kept last-round for backward
+            # compatibility; the run-total triple that matches the markdown
+            # headline is exposed separately as the ``*_run_total`` keys below.
             "infra_failures": self.infra_failure_count(),
             "infra_failure_rate": self.infra_failure_rate(),
             "budget_exhaustions": self.budget_exhaustion_count(),
             "budget_exhaustion_rate": self.budget_exhaustion_rate(),
+            "attempts_run_total": sum(result.n_att for result in self.results),
+            "infra_failures_run_total": sum(result.infra_failures for result in self.results),
+            "budget_exhaustions_run_total": sum(
+                result.budget_exhaustions for result in self.results
+            ),
             "round_diagnostics": self.round_diagnostics(),
             "candidate_diagnostics": self.candidate_diagnostics(k=k),
             "variant_count_curve": self.variant_count_curve(),
@@ -741,6 +780,8 @@ class RunReport:
             "",
             f"- candidates attempted (denominator): {candidate['attempted_candidate_count']}",
             f"- candidates evaluated: {candidate['evaluated_candidate_count']}",
+            f"- candidates applied: {candidate['applied_candidate_count']}",
+            f"- candidates forked: {candidate['forked_candidate_count']}",
             f"- candidates rejected: {candidate['rejected_candidate_count']}",
             f"- candidates skipped: {candidate['skipped_candidate_count']}",
             f"- candidate task evaluations: {candidate['evaluated_tasks']}",

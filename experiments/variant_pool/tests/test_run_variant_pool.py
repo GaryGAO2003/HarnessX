@@ -612,3 +612,106 @@ def test_lock_records_runtime_values_and_resolved_provenance(tmp_path):
     rendered = lock.to_json()
     assert '""' not in rendered
     assert "YOUR_PROVIDER_ID" not in rendered
+
+
+# ===========================================================================
+# (d) target eligibility: a fork child with no trajectories is not targeted
+# ===========================================================================
+
+
+def test_paper_target_skips_a_fork_child_without_trajectories(tmp_path):
+    """runs/forceprobe2 P2: a freshly forked child that has no settled
+    trajectories dir must not be chosen as the paper-mode target, because the
+    evolve step cannot service it. The recipe wires
+    ``_variants_with_settled_trajectories`` as the selection eligibility.
+    """
+    args = _Args(candidate_mode="paper", target_strategy="worst_first", pool_k=2)
+    recipe = _make_recipe(
+        tmp_path,
+        args=args,
+        tasks=[_Task("a"), _Task("z")],
+        meta=FakeMeta("noop"),
+    )
+
+    # Fork a child V1 that has never been evaluated -> absent from _last_traj_dir.
+    recipe.pool.fork("V0", set(), at_round=1)
+    v0_traj = tmp_path / "v0_traj"
+    v0_traj.mkdir()
+    recipe._last_traj_dir = {"V0": v0_traj}
+
+    # Make V1 the worst_first winner, so eligibility (not the score) is what
+    # excludes it.
+    recipe.ledger.record("V0", "a", n_pass=2, n_att=2, round_idx=0)  # rollup high
+    recipe.ledger.record("V1", "z", n_pass=0, n_att=2, round_idx=0)  # rollup low
+
+    eligible = recipe._variants_with_settled_trajectories()
+    assert eligible == {"V0"}  # V1 excluded: no settled trajectories dir on disk
+
+    # Unfiltered selection would starve the round on V1; the wired eligibility
+    # deterministically targets V0 instead.
+    assert rvp.select_target_variant(recipe.pool, recipe.ledger, strategy="worst_first") == "V1"
+    assert (
+        rvp.select_target_variant(
+            recipe.pool, recipe.ledger, strategy="worst_first", eligible=eligible
+        )
+        == "V0"
+    )
+
+
+# ===========================================================================
+# (d) target eligibility, cont.: a variant WITH a settled trajectories dir but
+#     ZERO routed tasks is still not targeted (the routed-tasks half of the
+#     tightened predicate; runs/forceprobe2 R2)
+# ===========================================================================
+
+
+def test_paper_target_skips_a_variant_with_trajectories_but_no_routed_tasks(tmp_path):
+    """runs/forceprobe2 R2: a variant that still owns a settled trajectories dir
+    on disk but currently holds ZERO routed tasks must not be chosen as the
+    paper-mode target. The engine skips empty-cluster variants
+    (engine.py:262-263), so a round aimed at such a variant evolves nothing —
+    the exact R2 starvation the trajectory-only eligibility rule allowed.
+    ``_variants_with_settled_trajectories`` therefore also requires routed
+    tasks, not merely a trajectories dir.
+    """
+    args = _Args(candidate_mode="paper", target_strategy="worst_first", pool_k=2)
+    recipe = _make_recipe(
+        tmp_path,
+        args=args,
+        tasks=[_Task("a"), _Task("z")],
+        meta=FakeMeta("noop"),
+    )
+
+    # Fork a child V1 with no inherited tasks -> V1.routed_tasks is empty while
+    # V0 keeps both tasks. Unlike test (d), give V1 a real trajectories dir too,
+    # so ONLY the routed-tasks half of the predicate can exclude it.
+    recipe.pool.fork("V0", set(), at_round=1)
+    v0_traj = tmp_path / "v0_traj"
+    v0_traj.mkdir()
+    v1_traj = tmp_path / "v1_traj"
+    v1_traj.mkdir()
+    recipe._last_traj_dir = {"V0": v0_traj, "V1": v1_traj}
+
+    # Make V1 the worst_first winner, so eligibility (not the score) is what
+    # excludes it.
+    recipe.ledger.record("V0", "a", n_pass=2, n_att=2, round_idx=0)  # rollup high
+    recipe.ledger.record("V1", "z", n_pass=0, n_att=2, round_idx=0)  # rollup low
+
+    # V1 has a settled trajectories dir on disk (the trajectory-only rule alone
+    # would include it) but holds zero routed tasks (the tightened rule does not).
+    assert recipe._last_traj_dir["V1"].is_dir()
+    assert not recipe.pool.variants["V1"].routed_tasks
+    assert recipe.pool.variants["V0"].routed_tasks
+
+    eligible = recipe._variants_with_settled_trajectories()
+    assert eligible == {"V0"}  # V1 excluded: zero routed tasks despite its dir
+
+    # Unfiltered selection would starve the round on the empty-cluster V1; the
+    # wired eligibility deterministically targets V0 instead.
+    assert rvp.select_target_variant(recipe.pool, recipe.ledger, strategy="worst_first") == "V1"
+    assert (
+        rvp.select_target_variant(
+            recipe.pool, recipe.ledger, strategy="worst_first", eligible=eligible
+        )
+        == "V0"
+    )

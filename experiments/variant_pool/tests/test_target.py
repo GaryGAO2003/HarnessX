@@ -130,3 +130,53 @@ def test_unknown_strategy_is_rejected(tmp_path: Path) -> None:
 def test_empty_pool_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="empty pool"):
         select_target_variant(VariantPool(), SuccessLedger())
+
+
+# ---------------------------------------------------------------------------
+# eligibility filter — runs/forceprobe2 P2 (starve on a trajectory-less target)
+# ---------------------------------------------------------------------------
+
+
+def _ranked_ledger() -> SuccessLedger:
+    """V0 rollup 1.0 > V1 rollup 0.5 > V2 rollup 0.0 (V2 is worst_first)."""
+    ledger = SuccessLedger()
+    ledger.record("V0", "a", n_pass=2, n_att=2, round_idx=0)
+    ledger.record("V1", "b", n_pass=1, n_att=2, round_idx=0)
+    ledger.record("V2", "c", n_pass=0, n_att=2, round_idx=0)
+    return ledger
+
+
+def test_eligible_none_is_byte_identical_to_unfiltered_selection(tmp_path: Path) -> None:
+    """(a) The default eligible=None reproduces today's selection for every arm."""
+    pool = _pool(tmp_path, n_variants=3)
+    ledger = _ranked_ledger()
+    for strategy in ("worst_first", "failure_density"):
+        assert select_target_variant(pool, ledger, strategy=strategy) == (
+            select_target_variant(pool, ledger, strategy=strategy, eligible=None)
+        )
+    assert select_target_variant(pool, ledger, strategy="round_robin", round_idx=1) == (
+        select_target_variant(pool, ledger, strategy="round_robin", round_idx=1, eligible=None)
+    )
+
+
+def test_eligibility_excludes_the_would_be_winner(tmp_path: Path) -> None:
+    """(b) Excluding the worst variant deterministically picks the next eligible one."""
+    pool = _pool(tmp_path, n_variants=3)
+    ledger = _ranked_ledger()
+    assert select_target_variant(pool, ledger) == "V2"  # unfiltered worst_first
+    assert select_target_variant(pool, ledger, eligible={"V0", "V1"}) == "V1"
+    assert select_target_variant(pool, ledger, eligible=frozenset({"V0"})) == "V0"
+
+
+def test_all_ineligible_falls_back_to_the_unfiltered_result(tmp_path: Path) -> None:
+    """(c) An empty eligible intersection returns exactly the unfiltered result."""
+    pool = _pool(tmp_path, n_variants=3)
+    ledger = _ranked_ledger()
+    baseline = select_target_variant(pool, ledger)
+    assert select_target_variant(pool, ledger, eligible=set()) == baseline
+    assert select_target_variant(pool, ledger, eligible={"ghost"}) == baseline
+    # round_robin, too: the fall-back keeps the full cycle rather than raising.
+    rr = select_target_variant(pool, ledger, strategy="round_robin", round_idx=2)
+    assert select_target_variant(
+        pool, ledger, strategy="round_robin", round_idx=2, eligible={"ghost"}
+    ) == rr

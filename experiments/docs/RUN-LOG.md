@@ -104,8 +104,43 @@
   ②序列化器返回 content 字段而非整条 JSON(整条会因转义使子串检查虚假失败,
   content 才是"模型读到的东西")。
 
+### organic1 — **首次有机 APPLY ×2:演化环自持** ✅✅
+- 配置:calib6 / rounds 3 / pass@2 / K_t=2 / **无强制** / 四修复首次同场(守则 prompt
+  首跑 + 回退接线 + L2 自证 + run-total 口径);成本 ¥6.18 实测(182.67→176.49)
+- **判决:R1 `C-R1-02` APPLY(improved=[04a04a9b], regressed=∅)→ V0 配置首次有机更新;
+  R2 在新配置上 `C-R2-02` 再次 APPLY(improved=[00d579ea]——L3 媒体任务首次被上线候选
+  翻转)**。主池 pass@2 0.50 → 0.67 → 0.83(爬升含真实上线增益,与方差的归因需账本
+  细分,不作疗效声明)。
+- **首个有机上线候选内容 = `h_yt_dlp_ytsearch_v1`**:meta 自主发现 yt-dlp 直调可用,
+  教 agent 在 WebSearch 退化时用 `ytsearch` 兜底——与主循环同日的环境探测互证,
+  演化环第一发打在 yt-dlp 线索靶心上。
+- 其余候选:C-R1-01 no-config-after-retry(retry 契约用尽仍不写 config,DeepSeek 顽疾
+  仍偶发);C-R2-01 诚实 SEESAW 拒(improved=∅)。
+- ⚠ **报告误导实录(P1 bug 现行犯)**:pool_report.md 写 "rejected: 4 / candidate 列
+  无 ship 迹象",实际两发 APPLY——organic1 进程载入的是 P1 修复前代码,APPLY 的
+  archive_reason 字段令旧分类器误计。**真相以 R1/R2 pool_state.json 为准**;修复
+  (applied/forked/rejected 三分互斥)已随本批提交,此报告不追溯重生成(保运行时
+  原貌,以本条勘误替代)。
+- 🔴 **新发现 F2 守则不合规**:21 条 budget_exceeded 轨迹里 20 条空手而死(仅 1 条按
+  "第 18 步交底"守则交了答案);且主池预算耗尽 16/36,高于 forceprobe2 的 5/36——
+  "有步数就继续干"可能压过了截止条款,而 flash 无法在 30 万 token 轨迹里自数步数
+  (smolagents 的同款守则依赖 harness 每轮渲染剩余步数)。**裁定:不再迭代 prompt;
+  留作演化食物**(步数注入器正是论文 Control 杠杆的标准形态)+ 论文观察点
+  (开源小模型的守则依从性,接 §7.7 未测面)。
+
+### 环境诊断勘误 + POSIX 桥接(Jul-26 晚)
+- **勘误**:此前"yt-dlp 未安装"的诊断作废——yt-dlp 2026.06.09 一直装着且 rollout 同路
+  shell 直调可用(rc=0);python3 也真实存在(3.13.5)。真凶 = agent 的 POSIX 习惯撞
+  Windows cmd:`2>/dev/null` 使整条命令报「系统找不到指定的路径」而输出全空、
+  `/tmp` 路径不存在。hard3 no-op 的"工具不可用"论据部分为环境伪影;守则里
+  "yt-dlp 可能缺失"措辞不精确(它在,是调用方式死),不改(通用防线仍有效)。
+- **桥接(已实施并按 rollout 同路验证)**:建 `C:\tmp` `D:\tmp` 目录 + `C:\dev\null`
+  `D:\dev\null` 文件;验证 `2>/dev/null` rc=0、`/tmp` 写读全通。**可比性边界:
+  organic1(含)之前无桥接;此后的 run 带桥接**。ffmpeg 仍缺(记录在案,pilot 校准时
+  与 whisper 一并定)。冻结时环境清单进 lock。
+
 ### 会话成本合计(实测,最终)
-¥194.14 → ¥182.67(**¥11.47**,六个 smoke + 全部 meta 调用;organic1 另计)
+¥194.14 → ¥176.49(**¥17.65**:七个 run + 全部 meta 调用;organic1 单跑 ¥6.18)
 
 ### 本日提交索引(全部已推 lab)
 | commit | 内容 |

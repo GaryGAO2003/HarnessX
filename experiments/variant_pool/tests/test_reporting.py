@@ -531,3 +531,142 @@ def test_report_from_rows_reads_a_flat_feed() -> None:
     assert report.run_name == "calibration"
     assert report.pass_at_k() == 0.5
     assert report.infra_failure_count() == 1
+
+
+# ===========================================================================
+# Candidate-gate outcome classification — runs/forceprobe2 P1
+# ===========================================================================
+
+
+def _candidate(candidate_id: str, decision: str | None, **kwargs) -> CandidateTaskResult:
+    return CandidateTaskResult(
+        task_id="t",
+        round_idx=0,
+        candidate_id=candidate_id,
+        target_variant_id="V0",
+        n_att=2,
+        n_pass=kwargs.pop("n_pass", 2),
+        decision=decision,
+        **kwargs,
+    )
+
+
+def test_forked_winner_is_counted_as_forked_not_rejected() -> None:
+    """A FORK winner carries a forced-gate ``archive_reason``; it must be counted
+    as forked, not rejected (runs/forceprobe2 said "candidates rejected: 2" while
+    one of the two had FORKED). applied / forked / rejected are the three mutually
+    exclusive shipping outcomes and, with no pure skips, sum to the denominator.
+    """
+    report = _report(_result("t", 0, 2, variant_id="V0"))
+    report.add_candidate(_candidate("C-apply", "apply", archive_reason="applied edit"))
+    report.add_candidate(
+        _candidate(
+            "C-fork",
+            "fork",
+            n_pass=1,
+            archive_reason="FORCED_GATE(fork): real_decision=reject; synthesized_improved=[x, y]",
+        )
+    )
+    report.add_candidate(
+        _candidate(
+            "C-reject",
+            "reject",
+            n_pass=0,
+            failed_stage="SEESAW_REGRESSION",
+            archive_reason="regressed a previously solved task",
+        )
+    )
+
+    diagnostics = report.candidate_diagnostics()
+    assert diagnostics["attempted_candidate_count"] == 3
+    assert diagnostics["applied_candidate_count"] == 1
+    assert diagnostics["forked_candidate_count"] == 1
+    assert diagnostics["rejected_candidate_count"] == 1
+    assert diagnostics["skipped_candidate_count"] == 0
+    # mutually exclusive, and (no pure skips) summing to the denominator
+    assert (
+        diagnostics["applied_candidate_count"]
+        + diagnostics["forked_candidate_count"]
+        + diagnostics["rejected_candidate_count"]
+        == diagnostics["attempted_candidate_count"]
+    )
+
+    by_id = {row["candidate_id"]: row for row in diagnostics["candidates"]}
+    assert by_id["C-fork"]["forked"] is True and by_id["C-fork"]["rejected"] is False
+    assert by_id["C-apply"]["applied"] is True and by_id["C-apply"]["rejected"] is False
+    assert by_id["C-reject"]["rejected"] is True
+    assert by_id["C-reject"]["applied"] is False and by_id["C-reject"]["forked"] is False
+
+    # The JSON representation mirrors the same counters.
+    payload = report.to_dict()["candidate_diagnostics"]
+    assert payload["applied_candidate_count"] == 1
+    assert payload["forked_candidate_count"] == 1
+    assert payload["rejected_candidate_count"] == 1
+
+    # The markdown pins the rendered lines and counts.
+    text = report.to_markdown()
+    assert "- candidates applied: 1" in text
+    assert "- candidates forked: 1" in text
+    assert "- candidates rejected: 1" in text
+    assert "- candidates skipped: 0" in text
+
+
+def test_pre_gate_failure_is_rejected_and_skipped_but_never_forked() -> None:
+    """A pre-gate failure (no decision, a failed stage, unevaluated) stays in the
+    ``rejected`` bucket and the orthogonal ``skipped`` bucket, and is in neither
+    ``applied`` nor ``forked``.
+    """
+    report = _report(_result("t", 0, 2, variant_id="V0"))
+    report.add_candidate(
+        CandidateTaskResult(
+            task_id="__candidate__",
+            round_idx=0,
+            candidate_id="C-pre",
+            target_variant_id="V0",
+            n_att=0,
+            n_pass=0,
+            decision=None,
+            failed_stage="ROUNDTRIP_L2",
+            archive_reason="no Level-2 round-trip evidence",
+            evaluated=False,
+        )
+    )
+    diagnostics = report.candidate_diagnostics()
+    assert diagnostics["applied_candidate_count"] == 0
+    assert diagnostics["forked_candidate_count"] == 0
+    assert diagnostics["rejected_candidate_count"] == 1
+    assert diagnostics["skipped_candidate_count"] == 1
+    row = diagnostics["candidates"][0]
+    assert row["applied"] is False and row["forked"] is False
+    assert row["rejected"] is True and row["skipped"] is True
+
+
+# ===========================================================================
+# to_dict scope: run-total vs last-round infra/budget — deferred Fix (2e78468)
+# ===========================================================================
+
+
+def test_to_dict_exposes_run_total_and_last_round_infra_budget_scopes() -> None:
+    """``infra_failures`` / ``budget_exhaustions`` keep their LAST-ROUND scope
+    (paired with the last-round rates), and the new ``*_run_total`` keys are the
+    whole-run sums that match the markdown headline.
+    """
+    report = _report(
+        _result("a", 0, 0, budget_exhaustions=2),
+        _result("b", 0, 0, infra_failures=1),
+        _result("a", 1, 0, budget_exhaustions=1),
+        _result("b", 1, 1, infra_failures=1),
+    )
+    payload = report.to_dict()
+
+    # Old keys keep last-round values (round 1: 1 infra, 1 budget) — unchanged API.
+    assert payload["infra_failures"] == 1
+    assert payload["budget_exhaustions"] == 1
+    # New keys are run totals over both rounds.
+    assert payload["infra_failures_run_total"] == 2
+    assert payload["budget_exhaustions_run_total"] == 3
+    assert payload["attempts_run_total"] == 8
+    # ``attempts`` was already a run total and is unchanged.
+    assert payload["attempts"] == 8
+    # The run-total triple matches the markdown headline row.
+    assert "| 8 / 2 / 3 |" in report.to_markdown()

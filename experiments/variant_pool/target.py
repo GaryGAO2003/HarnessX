@@ -24,6 +24,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
+    from collections.abc import Collection
+
     from .ledger import SuccessLedger
     from .pool import VariantPool
 
@@ -38,6 +40,7 @@ def select_target_variant(
     *,
     strategy: str = "worst_first",
     round_idx: int | None = None,
+    eligible: Collection[str] | None = None,
 ) -> str:
     """Pick the variant the next candidate should target.
 
@@ -57,12 +60,29 @@ def select_target_variant(
 
     All three break ties on the lowest variant id, so selection is
     reproducible across runs.
+
+    ``eligible`` (optional) restricts every strategy to a caller-supplied set of
+    variant ids — for example the variants that hold settled trajectories and
+    can therefore actually be evolved this round. ``None`` (default) considers
+    the whole pool and is byte-identical to the historical behaviour. When a set
+    is given but *no* pool variant is in it, selection falls back to the whole
+    pool rather than raising, so the result stays deterministic and total and
+    the caller's own no-trajectories guard handles the starve case (today's
+    outcome, no new failure mode).
     """
     if strategy not in STRATEGIES:
         raise ValueError(f"strategy must be one of {STRATEGIES}, got {strategy!r}")
     variant_ids = sorted(pool.variants)
     if not variant_ids:
         raise RuntimeError("cannot select a target variant from an empty pool")
+
+    if eligible is not None:
+        filtered = [variant_id for variant_id in variant_ids if variant_id in eligible]
+        # Empty -> keep the unfiltered pool (fall-back ruling above). A
+        # non-empty subset preserves the sorted order, so tie-breaks on the
+        # lowest id are unchanged.
+        if filtered:
+            variant_ids = filtered
 
     if strategy == "worst_first":
         # min() keeps the first minimum, and variant_ids is sorted -> lowest id

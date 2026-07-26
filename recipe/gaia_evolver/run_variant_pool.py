@@ -1435,6 +1435,7 @@ class VariantPoolRecipe:
                         self.ledger,
                         strategy=self.target_strategy,
                         round_idx=round_idx,
+                        eligible=self._variants_with_settled_trajectories(),
                     )
                 result = self.engine.run_round(round_idx, set(all_ids))
                 self._reconcile(result)
@@ -1454,6 +1455,48 @@ class VariantPoolRecipe:
 
         self._dump_final()
         return results
+
+    def _variants_with_settled_trajectories(self) -> set[str]:
+        """Variant ids eligible to be this round's evolve target.
+
+        A variant qualifies only when it satisfies BOTH conditions:
+
+        * it currently **holds routed tasks** (``variant.routed_tasks`` is
+          non-empty), and
+        * its last **settled trajectories dir exists** on disk
+          (``_last_traj_dir``).
+
+        Ruling (runs/forceprobe2 R2 starvation). The engine evaluates *before*
+        it evolves, so any variant holding routed tasks this round necessarily
+        has fresh settled trajectories by evolve time — the routed-tasks
+        condition subsumes the trajectories condition in the organic flow. The
+        trajectories check therefore stays only as a belt for reuse / edge paths
+        (e.g. ``candidate_reuse``, where a variant can retain a stale
+        trajectories dir after its tasks moved off it). Requiring routed tasks
+        closes the actual forceprobe2 R2 bug: V1 was eligible under the
+        trajectory-only rule (its dir survived via candidate_reuse) yet held
+        zero routed tasks, so the engine — which skips empty-cluster variants
+        (engine.py:262-263) — evolved nothing when a round was aimed at it.
+
+        The trajectories half is still exactly the precondition
+        :meth:`_run_paper_candidate_pipeline` raises on — a target with no
+        settled trajectories dir cannot be evolved (runs/forceprobe2 P2).
+        Passing this intersection as target-selection eligibility keeps a round
+        from being aimed at a variant the evolve step cannot service or the
+        engine will skip. Empty (e.g. before the R0 baseline seeds V0) makes
+        selection fall back to the whole pool.
+        """
+        with_trajectories = {
+            vid
+            for vid, traj in self._last_traj_dir.items()
+            if traj is not None and Path(traj).is_dir()
+        }
+        with_routed_tasks = {
+            vid
+            for vid, variant in self.pool.variants.items()
+            if variant.routed_tasks
+        }
+        return with_trajectories & with_routed_tasks
 
     # ------------------------------------------------------------------
     # callback: evolve
