@@ -4982,7 +4982,10 @@ def _build_experiment_lock(
                 else "legacy_ablation_no_structured_candidate_pipeline"
             ),
             actionability_threshold=(
-                float(getattr(args, "actionability_threshold", 1.0))
+                _resolve_actionability_threshold(
+                    getattr(args, "actionability_threshold", None),
+                    str(getattr(args, "aegis_digester", DEFAULT_AEGIS_DIGESTER)),
+                )
                 if paper_mode
                 else 0.0
             ),

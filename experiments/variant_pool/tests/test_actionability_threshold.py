@@ -37,6 +37,28 @@ def test_explicit_value_wins_in_both_modes() -> None:
     assert rvp._resolve_actionability_threshold(0.7, "llm") == 0.7
 
 
+def test_parser_default_is_none_and_registered_exactly_once() -> None:
+    # runs/paper4 crash class: a duplicate registration (argparse conflict) or
+    # a re-added explicit default would silently disable the auto semantics.
+    parser = rvp.build_arg_parser()
+    assert parser.get_default("actionability_threshold") is None
+
+
+def test_no_consumer_bypasses_the_resolver() -> None:
+    # runs/paper4 crashed on a leftover ``float(getattr(args,
+    # "actionability_threshold", 1.0))`` in _build_experiment_lock: float(None)
+    # after the default moved to None. Every consumer must go through
+    # _resolve_actionability_threshold (or the recipe's resolved attribute).
+    import re
+
+    src = Path(rvp.__file__).read_text(encoding="utf-8")
+    raw_consumers = re.findall(
+        r'float\(\s*getattr\((?:self\.)?args,\s*"actionability_threshold"', src
+    )
+    assert raw_consumers == []
+    assert src.count('"--actionability-threshold"') == 1
+
+
 def test_paper_brief_spells_out_the_capability_evidence_type_vocabulary() -> None:
     # runs/paper3: both metas invented types (search_backend,
     # trajectory_analysis) because the brief never gave the enum.
