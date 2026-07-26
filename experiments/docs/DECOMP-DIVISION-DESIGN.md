@@ -20,14 +20,38 @@
 - **P-B 收益拆解**:必须 2×2 = {分解, 不分解} × {分工, 单变体},否则分解收益与
   分工收益混淆。基线臂 = 现 AEGIS(K=1 与 K=8 各一)。
 
-## 2. 分解方法选项空间(researcher 调研中,待拍板)
+## 2. 分解方法选项空间(Jul-27 调研完毕;证据全部亲开来源,详见调研台账节)
 
-| 选项 | 机制 | 初判 |
+| 选项 | 机制 | 调研判定(GAIA 级实测锚点) |
 |---|---|---|
-| D1 LLM 规划器 | 每任务一次分解调用 → 子任务 DAG(plan-and-execute 系) | 最直接;分解质量=新方差源 |
-| D2 类型化模板 | 任务分类 → 固定流水线模板(search→extract→compute→format) | 稳定可控;覆盖率与 GAIA 异质性冲突 |
-| D3 执行中自派 | 执行 agent 自行 spawn 子任务(orchestrator-worker,Magentic-One 系) | 与现 run loop 冲突最大 |
-| D4 演化分解策略 | 分解 prompt/规则作为 harness 组件,交给 AEGIS 演化 | 与论文机制同构,论文叙事最顺;冷启动难 |
+| D1 前置规划器→类型化 DAG | 每任务一次轻量分解调用 → **小固定分类学**子任务 DAG | LLMCompiler 3.7×延迟/6.7×成本降+~9%准确(多跳 QA 非 GAIA);HuggingGPT 的 {task,id,dep,args} 槽式 schema 便宜可路由。**v1 推荐载体** |
+| D2 类型化模板 | 任务分类 → 固定阶段链 | AgentOrchestra 5 角色累积消融 36.5→83.4(GAIA);deep-research 综述固定四段。**被 D1 吸收**(固定分类学=D2 的实质,套在 D1 的 DAG 里) |
+| D3 orchestrator-worker | 执行中动态委派(Magentic-One 双台账) | GAIA 38.0±5.5,去台账 −31%(分解状态承重的实证);但角色手工、~2-5× token、与不可动 run loop 冲突最大。**否决 v1** |
+| D4 演化分解策略 | 分解 policy 作为 harness 组件交 AEGIS 演化 | GPTSwarm GAIA 18.45 vs 9.70;DAAO 比 MaAS +8.33% 且 64% 成本;**推理期反而更便宜**(离线搜索+按查询分配)。**留 v2**(与论文机制同构=终局形态,但冷启动+方差,先立 v1 基线) |
+| 补:涌现特化 | QD/种群小生境(AC/DC 档案、MaAS supernet) | 全部在权重/架构层——**无人做过 harness-config 特化涌现:我们的缝** |
+
+## 2.1 调研关键结论(全部亲开来源;未验数字已剔)
+
+- **分类学**:三系统独立收敛于 4-5 类 → v1 取 **search/retrieve · browse/extract ·
+  compute/reason · verify/synthesize** 四类,禁递归再分解(防过度分解级联);
+- **P-A 信用分配裁决依据**:Who&When 步级归因仅 **14.2%**、AgentProp 判官步级
+  **κ=0.43-0.57**、Shapley 系对基线敏感 ⇒ **子任务级 LLM 判官出局**;真值=确定性
+  任务级门(before/after exact-match),按类信用**观察式累积**(某变体承接某类的
+  任务通过率),零额外 rollout;leave-one-slot-out 只作校准用;
+- **级联控制**:静态分解重试成本 +80.5%(2605.15425);阶段间 verify-then-proceed
+  门实测 −23pp 幻觉但**模型依赖**(Gemini 上无效)——旗控实现,flash 上先测后信;
+- **冷启动**:per-(variant×subtype) 细胞计数在 103×pass@2 规模下可辨识性存疑
+  (调研开放题 #1)——回退整任务簇先验(现 AEGIS 路由)直至类计数累积;
+- **Q6**:推理时 web agent 上"分解收益 vs 指派收益"的干净拆分**无人做过**
+  (最近者 2603.06859 是 RL 训练期且关键数字开卷未见,已标未验)⇒ 2×2 即贡献。
+
+## 2.2 v1 推荐包(待用户拍板)
+
+**D1-lite**:前置轻量规划器(meta 模型一调用)→ 四类型化子任务 DAG(串行,禁递归)
+→ 按 (variant×subtype) 账本路由、冷启动回退整任务簇先验 → 固定聚合步 →
+阶段间 verify 门旗控。信用=观察式;**2×2 headline**:{不分解} × {分解+轮转指派,
+分解+账本路由}(轮转臂隔离"分解收益",账本臂加载"指派收益")。
+v2 留:D4 演化分解 policy、QD 小生境特化涌现、Shapley 校准。
 
 ## 3. 子任务→变体路由的待决项
 
