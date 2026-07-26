@@ -230,6 +230,12 @@ DECISION_CONTRACT_EMPHASIS = (
 # the paper shape instead of its journal vocabulary. Recipe-layer injection
 # only; nothing under ``harnessx/`` is modified.
 PAPER_MANIFEST_SCHEMA_BRIEF = (
+    "WRITE ORDER (hard requirement): FIRST write `output_dir/config.yaml` and "
+    "any `tools/`/`processors/`/`templates/` files your change declares; ONLY "
+    "THEN write `_meta_scratch/manifest.yaml` and `candidates.md`. A manifest "
+    "that describes a config.yaml you have not actually written is an "
+    "automatic failed round (runs/paper1: four attempts died exactly this "
+    "way — analysis artefacts complete, config.yaml missing).\n"
     "Write `_meta_scratch/manifest.yaml` as a bare YAML mapping in the paper's "
     "Table 9 schema. Types are STRICT: `capability_evidence` and `file_changes` "
     "are LISTS OF MAPPINGS and `predicted_impact` is a MAPPING — never prose "
@@ -255,6 +261,10 @@ PAPER_MANIFEST_SCHEMA_BRIEF = (
     "  predicted_impact: {tasks_will_unlock: [db4fd70a, f0f46385], tasks_will_stabilize: [4b6bb5f7], tasks_at_risk: []}\n"
     "  attribution_signature: {type: tool_call, tool_name: WikiTextFetch, expected_min_calls: 1}\n"
     "  target_variant: V0\n"
+    "For tools/processor buckets, at least ONE capability_evidence claim MUST "
+    "contain the phrase 'Level 2' asserting the tool return survives provider "
+    "serialization (the example's second entry is the reference shape) — the "
+    "deterministic gate rejects code candidates without it at ROUNDTRIP_L2."
 )
 
 # --manifest-mode repo — the caller adapts the meta-agent's repo-native products
