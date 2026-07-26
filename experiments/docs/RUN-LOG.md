@@ -200,8 +200,17 @@
   需要显式契约脚手架,强模型靠隐性能力补齐"= §7.7 未测面的干净观察,证据链 n=10
   (paper1×4 + paper2×2 + paper3×2 + paper4×2)。
 
+### aegis1 — **Phase A 验收:三角色全 LLM 首跑绿灯** ✅(`llm_aegis_reproduction: true` 首次盖章)
+- 配置:calib6 / rounds 2 / pass@1 / repo 模式 / 三角色全 llm / α auto=0.5 / 60s replay 帽
+- 判决:四角色审计名全真、零回退;Digester a_t=1.0(auto α 无误杀);**Planner 改造
+  空间成立**(两份桶多样化 brief,YouTube-JS 诊断 [tools,config] + 预算策略诊断
+  [prompt]);**Critic 实质审计**——拒掉唯一候选,理由证据锚定("所改组件与失败证据
+  不对症、无能力证据、会浪费检查资源")= p.32 纪律由 LLM 角色在评测前执行,较确定性
+  回退省 ~6 条评测 rollout。另一 slot no_config(顽疾,随机)。
+- 认知层复现度 ~40% → **~90%**(余差=论文原版 prompt 未知 + B1 顺延)。Phase A 收官。
+
 ### 会话成本合计(实测)
-¥194.14 → ¥168.94(至 a1smoke 止 **¥25.20**;paper4/aegis1 待收口回填)
+¥194.14 → ¥168.94(至 a1smoke 止 **¥25.20**;paper4/aegis1/校准跑待收口回填)
 
 ### 本日提交索引(全部已推 lab)
 | commit | 内容 |
