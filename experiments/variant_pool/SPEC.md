@@ -528,6 +528,7 @@ K{4,8}(**删K=16**:破碎)/ 簇{routed/failure/level}/ 口径{裸率/Laplace/EMA
 | 3 | `harnessx/providers/litellm_provider.py` | 空 content 发 `""` 而非 `null`(~3 行) | **Bug 修复**(DeepSeek 反序列化器拒收 `content: null`,长任务全崩) | 同上,只走 litellm 路径;`""` 对 OpenAI/DeepSeek 都合法,Claude 路径不受影响 |
 
 | 4 | `benchmarks/gaia/prompts/gaia_agent.j2` | +6 行守则(Step Budget 节:`{{ max_steps \| default(20) }}` 硬预算+第 N−2 步强制交底;Tool availability 条:勿假设 yt-dlp/whisper/ffmpeg 存在、失败即转向;no-progress 条:连续 2 次无新信息=换策略) | **H0 基线变更**(用户明令 Jul-26"加 guardrail,不要大改";文献依据=researcher 证据表:BATS 2511.17006 / s1 2501.19393 / StressWeb 2604.16385 / smolagents 逐字部署等) | 恢复 `gaia_agent.j2.h0-original`(字节级备份,与补丁同 commit 入库)。**非默认关闭**——是经批准的基线变更;可比性边界记于 RUN-LOG(≤forceprobe2 为原版) |
+| 5 | `harnessx/meta_harness/agent.py` | replay 冒烟硬帽从写死 `min(x, 20.0)` 改为 `min(x, _replay_timeout_cap_s())`——环境变量 `HARNESSX_REPLAY_TIMEOUT_CAP_S` 门控,默认 20s 字节等同 | **Bug 修复级**(参数 `replay_timeout_s=300` 被静默钳到 20;对 DeepSeek 思考模式=延迟彩票,runs/paper2 成形候选恰死于 20.0s;影响两种 manifest 模式的所有 evolve) | 不设环境变量 = 原行为逐字节不变;测试 `test_replay_cap.py` 钉死默认与回退 |
 
 **判定**:#1 是唯一的"功能"改动,已做成默认关闭的开关(`--pass-k`);#2/#3 是让 upstream 在非 Claude 模型上不出错的修复,**不影响论文原配置(Claude)的行为**;#4 是**用户明令的 H0 基线变更**(唯一非默认关闭项),字节级备份与可比性边界在案。⇒ 除 #4(经批准)外,"原体默认行为 = 原版"仍满足。
 新增文件(平行 recipe + experiments 包)对 upstream 零侵入,可随时 `git checkout origin/main -- <原体文件>` 完全复原。

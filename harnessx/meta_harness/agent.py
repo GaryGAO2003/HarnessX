@@ -37,6 +37,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -64,6 +65,23 @@ _DEFAULT_MAX_STEPS = 500
 # Sandbox provider — keeps absolute paths usable while defaulting Bash cwd
 # to output_dir so relative commands don't pollute filesystem root.
 # ---------------------------------------------------------------------------
+
+
+def _replay_timeout_cap_s() -> float:
+    """Hard cap applied to ``evolve``'s ``replay_timeout_s``, default 20s.
+
+    Historically the caller's value was silently clamped to 20s. That default
+    is kept byte-identical, but slower providers (e.g. DeepSeek in thinking
+    mode) time the synthetic replay smoke out on latency alone, turning the
+    gate into a lottery — set ``HARNESSX_REPLAY_TIMEOUT_CAP_S`` to raise the
+    cap explicitly. Invalid or non-positive values fall back to 20.
+    """
+    raw = os.environ.get("HARNESSX_REPLAY_TIMEOUT_CAP_S", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 20.0
+    return value if value > 0 else 20.0
 
 
 class _MetaAgentSandboxProvider:
@@ -663,7 +681,7 @@ class MetaAgent:
             memo_path=self.memo_path,
             replay_model=replay_model,
             replay_max_cost_usd=replay_max_cost_usd,
-            replay_timeout_s=min(replay_timeout_s, 20.0),
+            replay_timeout_s=min(replay_timeout_s, _replay_timeout_cap_s()),
         )
         await validator.run(
             out_yaml=out_yaml,

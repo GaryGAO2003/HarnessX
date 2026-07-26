@@ -263,7 +263,7 @@ PAPER_MANIFEST_SCHEMA_BRIEF = (
     "  capability_evidence: list of {type, claim, evidence}  # [] for a pure prompt edit\n"
     "  file_changes: list of {path, action(create|modify|delete), diff_summary}\n"
     "  predicted_impact: {tasks_will_unlock: [...], tasks_will_stabilize: [...], tasks_at_risk: [...]}\n"
-    "  attribution_signature: {type(tool_call|processor_invocation|prompt_feature), tool_name, expected_min_calls}  # null for a pure prompt edit\n"
+    "  attribution_signature: {type(tool_call|processor_invocation|prompt_feature), tool_name, expected_min_calls}  # null ONLY when bucket == [prompt]; REQUIRED for any other bucket incl. [prompt, config] (W19 hard gate — runs/paper2 died on this)\n"
     "  target_variant: str  # exactly the given target\n"
     "Filled example (paper C-R10-02, appendix C.1 p.37):\n"
     "  candidate_id: C-R10-02\n"
