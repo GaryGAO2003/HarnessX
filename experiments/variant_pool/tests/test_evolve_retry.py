@@ -55,11 +55,17 @@ class _ScriptedMeta:
     def __init__(self, script: list[str]) -> None:
         self.script = script
         self.calls: list[dict] = []
+        self._contract = None
 
-    async def evolve(self, *, output_dir, candidate_contract, **kwargs):
+    def set_candidate_contract(self, contract) -> None:
+        # Mirrors VariantPoolMetaAgent: ``evolve``'s signature is upstream, so the
+        # recipe sets the per-call contract on the agent right before each call.
+        self._contract = contract
+
+    async def evolve(self, *, output_dir, **kwargs):
         idx = len(self.calls)
         self.calls.append(
-            {"output_dir": Path(output_dir), "contract": candidate_contract}
+            {"output_dir": Path(output_dir), "contract": self._contract}
         )
         action = self.script[idx] if idx < len(self.script) else "ship"
         scratch = Path(output_dir) / "_meta_scratch"

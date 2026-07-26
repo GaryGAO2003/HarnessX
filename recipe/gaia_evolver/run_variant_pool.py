@@ -78,6 +78,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 # Importing run.py runs its module-level setup (project root onto sys.path,
 # .env load, LiteLLM quieting) and gives us its verified, unchanged parts.
 from .defaults import (
@@ -105,7 +107,11 @@ from .run import (
 
 # Repo parts (same sources run.py imports from).
 from harnessx.core.model_config import ModelConfig
-from harnessx.meta_harness import MetaAgent
+from harnessx.meta_harness import MetaAgent  # noqa: F401 - documented base of VariantPoolMetaAgent
+
+# Recipe-layer subclass that injects our candidate contract into TASK.md without
+# modifying ``harnessx/`` (the variant pool is additive only).
+from .variant_pool_meta_agent import VariantPoolMetaAgent
 
 from benchmarks.gaia.evaluator import GAIAPipelineEvaluator
 from benchmarks.gaia.harness import make_gaia_builder_gpt5
@@ -219,16 +225,19 @@ PAPER_MANIFEST_SCHEMA_BRIEF = (
     "  target_variant: V0\n"
 )
 
-# --manifest-mode repo — the caller adapts the meta-agent's natural journal
-# vocabulary, so it does not have to reshape into the paper schema.
+# --manifest-mode repo — the caller adapts the meta-agent's repo-native products
+# (config diff + journal), so it does not have to write a separate manifest at
+# all. This is the default because it hands the meta-agent one artefact to
+# produce (config.yaml + its journal entry) instead of two; runs/smoke_fix2
+# showed it frequently fails to finish even one (DECISION_REQUIRED.md), so
+# demanding a second manifest.yaml on top only compounded the failure.
 REPO_MANIFEST_SCHEMA_BRIEF = (
-    "Write `_meta_scratch/manifest.yaml` as a bare YAML mapping. You MAY use your "
-    "journal vocabulary directly: `levers` (subset of configuration/control/"
+    "You do NOT need to write `_meta_scratch/manifest.yaml`. The caller adapts its "
+    "internal manifest from your repo-native products: the `config.yaml` diff and "
+    "your journal vocabulary directly — `levers` (subset of configuration/control/"
     "action/instruction), `predicted_affected` (task ids you expect to flip), and "
-    "`hypothesis_id`, alongside `candidate_id`, `target_variant`, and a "
-    "`file_changes` list (prose bullets or {path, action, diff_summary} entries). "
-    "The caller maps this to the internal manifest; you do not need to supply "
-    "`capability_evidence` or a paper `attribution_signature`."
+    "`hypothesis_id`. Just write `config.yaml` and your usual journal entry; you do "
+    "not need to supply `capability_evidence` or a paper `attribution_signature`."
 )
 
 
@@ -293,12 +302,16 @@ def _build_candidate_contract(
 ) -> dict[str, Any]:
     """Assemble the ``candidate_contract`` our recipe injects into ``TASK.md``.
 
-    All injection is recipe-layer: it augments the ``planner_brief`` that
-    ``agent.py:_render_candidate_contract`` renders verbatim as JSON. Nothing
+    All injection is recipe-layer: the contract is carried on
+    :class:`~recipe.gaia_evolver.variant_pool_meta_agent.VariantPoolMetaAgent`
+    (via ``set_candidate_contract``) and rendered by its
+    ``_render_candidate_contract`` override, which appends the section to the
+    base brief and serialises this ``planner_brief`` verbatim as JSON. Nothing
     under ``harnessx/`` is touched. Carries (1) the mode-specific manifest
-    instructions (paper Table 9 schema + C-R10-02 example, or the repo-journal
-    acceptance note) for fault (1), and (2) the B4 decision-contract emphasis for
-    fault (2). On a retry it also carries the prior ``DECISION_REQUIRED.md`` text.
+    instructions (paper Table 9 schema + C-R10-02 example, or the repo-native
+    "no manifest needed" note) for fault (1), and (2) the B4 decision-contract
+    emphasis for fault (2). On a retry it also carries the prior
+    ``DECISION_REQUIRED.md`` text.
     """
     manifest_instructions = (
         PAPER_MANIFEST_SCHEMA_BRIEF
@@ -323,6 +336,119 @@ def _build_candidate_contract(
         "target_variant": target_variant,
         "planner_brief": brief,
     }
+
+
+def _repo_journal_file_changes(
+    current_config_path: Path,
+    new_config_path: Path,
+) -> list[dict[str, str]]:
+    """Honest ``file_changes`` for a manifest adapted without a manifest.yaml.
+
+    ``config.yaml`` is always listed: the caller already rejected byte-identical
+    output, so the config provably changed. When both configs load as
+    ``HarnessConfig``s the structural changeset (added/removed tools, processors
+    and templates) is appended so the record is faithful; any load failure
+    degrades to the ``config.yaml``-only entry rather than fabricating changes.
+    """
+    changes: list[dict[str, str]] = [
+        {
+            "path": "config.yaml",
+            "action": "modify",
+            "diff_summary": (
+                "config.yaml changed vs current_config (repo-native manifest adaptation)"
+            ),
+        }
+    ]
+    try:
+        from harnessx.core.harness import HarnessConfig
+        from harnessx.meta_harness.agent import compute_changeset
+
+        before = HarnessConfig.from_yaml_file(Path(current_config_path)).canonicalize()
+        after = HarnessConfig.from_yaml_file(Path(new_config_path)).canonicalize()
+        diff = compute_changeset(before, after)
+    except Exception:  # noqa: BLE001 - degrade to the config.yaml-only record
+        return changes
+
+    for name in diff.get("tools_added", []):
+        changes.append(
+            {"path": f"tools/{name}", "action": "create", "diff_summary": f"add tool {name}"}
+        )
+    for name in diff.get("tools_removed", []):
+        changes.append(
+            {"path": f"tools/{name}", "action": "delete", "diff_summary": f"remove tool {name}"}
+        )
+    for name in diff.get("processors_added", []):
+        changes.append(
+            {"path": f"processors/{name}", "action": "create", "diff_summary": f"add processor {name}"}
+        )
+    for name in diff.get("processors_removed", []):
+        changes.append(
+            {"path": f"processors/{name}", "action": "delete", "diff_summary": f"remove processor {name}"}
+        )
+    for name in diff.get("processors_config_changed", []):
+        changes.append(
+            {"path": f"processors/{name}", "action": "modify", "diff_summary": f"retune processor {name}"}
+        )
+    for name in diff.get("templates_added", []):
+        changes.append(
+            {"path": f"templates/{name}", "action": "create", "diff_summary": f"add template {name}"}
+        )
+    for name in diff.get("templates_changed", []):
+        changes.append(
+            {"path": f"templates/{name}", "action": "modify", "diff_summary": f"edit template {name}"}
+        )
+    for name in diff.get("templates_removed", []):
+        changes.append(
+            {"path": f"templates/{name}", "action": "delete", "diff_summary": f"remove template {name}"}
+        )
+    return changes
+
+
+def _repo_manifest_from_journal(
+    *,
+    memo_path: Path,
+    current_config_path: Path,
+    new_config_path: Path,
+    candidate_id: str,
+    target_variant: str,
+) -> ChangeManifest:
+    """Adapt a repo-native manifest when the meta-agent wrote no manifest.yaml.
+
+    Repo mode does not require ``manifest.yaml``; the meta-agent only has to
+    write ``config.yaml`` and its usual journal entry (both already required by
+    the base brief). This assembles the same journal vocabulary the
+    ``--manifest-mode repo`` adapter accepts, drawn from the two repo-native
+    products:
+
+    * the latest journal entry at ``memo_path`` -> ``levers`` (edit buckets),
+      ``predicted_affected`` (the flip claim), and ``hypothesis_id``;
+    * the config diff -> ``file_changes`` (see :func:`_repo_journal_file_changes`).
+
+    The result carries ``provenance="repo_journal"`` exactly like the
+    manifest.yaml path, so the deterministic seesaw stays the shipping authority
+    and the same paper-only fields are relaxed. Nothing is fabricated: absent
+    journal fields simply stay empty and surface at ``validate_complete``.
+    """
+    from harnessx.meta_harness.journal import latest_entry
+
+    mapping: dict[str, Any] = {
+        "candidate_id": candidate_id,
+        "target_variant": target_variant,
+        "file_changes": _repo_journal_file_changes(current_config_path, new_config_path),
+    }
+    entry = latest_entry(Path(memo_path))
+    if entry is not None:
+        if entry.levers:
+            mapping["levers"] = list(entry.levers)
+        if entry.predicted_affected:
+            mapping["predicted_affected"] = list(entry.predicted_affected)
+        if entry.hypothesis_id:
+            mapping["hypothesis_id"] = entry.hypothesis_id
+    return adapt_repo_journal_manifest(
+        yaml.safe_dump(mapping, sort_keys=False, allow_unicode=True),
+        fallback_candidate_id=candidate_id,
+        fallback_target_variant=target_variant,
+    )
 
 
 @dataclass
@@ -374,10 +500,13 @@ async def _evolve_candidate_with_retry(
             planner_brief=planner_brief,
             decision_feedback=decision_history[-1] if decision_history else None,
         )
+        # ``evolve``'s signature is upstream and cannot take the contract, so we
+        # set it on the (subclass) agent immediately before the call. Each
+        # attempt updates it (retries carry the prior DECISION_REQUIRED text).
+        slot_agent.set_candidate_contract(contract)
         try:
             new_yaml = await slot_agent.evolve(
                 output_dir=attempt_dir,
-                candidate_contract=contract,
                 **dict(base_evolve_kwargs),
             )
         except Exception as exc:  # noqa: BLE001 - classify no-config vs other
@@ -947,28 +1076,38 @@ class VariantPoolRecipe:
             meta["parse_status"] = "explicit_noop"
             raise ValueError(f"{slot_id}: byte-identical explicit no-op")
 
-        # Retries write to isolated subdirs, so the manifest lives beside the
-        # config the winning attempt actually returned, not the base slot dir.
+        # Manifest sourcing. Retries write to isolated subdirs, so the manifest
+        # (if any) lives beside the config the winning attempt returned.
+        #
+        # ``paper`` mode requires manifest.yaml (paper fidelity). ``repo`` mode
+        # (default) makes it OPTIONAL: the meta-agent's burden is one artefact
+        # (config.yaml + its journal entry), not two. When it wrote no
+        # manifest.yaml the caller adapts one from repo-native products (the
+        # config diff + the journal's levers/predicted_affected); a
+        # journal-vocabulary manifest.yaml, if it still wrote one, is honoured.
         manifest_path = config_path.parent / "_meta_scratch" / "manifest.yaml"
-        if not manifest_path.is_file():
-            meta["parse_status"] = "manifest_missing"
-            raise FileNotFoundError(
-                f"{slot_id}: required manifest missing: {manifest_path}"
-            )
-        manifest_text = manifest_path.read_text(encoding="utf-8")
 
         if self.manifest_mode == "paper":
+            if not manifest_path.is_file():
+                meta["parse_status"] = "manifest_missing"
+                raise FileNotFoundError(
+                    f"{slot_id}: required manifest missing: {manifest_path}"
+                )
             try:
-                manifest = ChangeManifest.from_yaml(manifest_text)
+                manifest = ChangeManifest.from_yaml(
+                    manifest_path.read_text(encoding="utf-8")
+                )
             except Exception as exc:  # noqa: BLE001 - preserve parser detail in audit
                 meta["parse_status"] = "format_mismatch"
                 raise ValueError(
                     f"{slot_id}: invalid manifest.yaml (paper schema mismatch): {exc}"
                 ) from exc
-        else:  # repo: accept the meta-agent's journal vocabulary
+        elif manifest_path.is_file():
+            # repo mode, manifest.yaml present: accept the journal vocabulary.
+            meta["manifest_source"] = "manifest_yaml"
             try:
                 manifest = adapt_repo_journal_manifest(
-                    manifest_text,
+                    manifest_path.read_text(encoding="utf-8"),
                     fallback_candidate_id=slot_id,
                     fallback_target_variant=context.target_variant,
                 )
@@ -977,6 +1116,16 @@ class VariantPoolRecipe:
                 raise ValueError(
                     f"{slot_id}: repo manifest format mismatch: {exc}"
                 ) from exc
+        else:
+            # repo mode, no manifest.yaml: adapt from repo-native products.
+            meta["manifest_source"] = "repo_journal_entry"
+            manifest = _repo_manifest_from_journal(
+                memo_path=slot.memo_path,
+                current_config_path=context.current_config_path,
+                new_config_path=config_path,
+                candidate_id=slot_id,
+                target_variant=context.target_variant,
+            )
 
         meta["provenance"] = manifest.provenance
         meta["paper_only_gaps"] = list(manifest.paper_only_gaps())
@@ -2542,7 +2691,7 @@ def setup(args: Any, run_dir: Path) -> dict[str, Any]:
     baseline_config_path = v0_dir / "config.yaml"
     original_base.to_yaml_file(baseline_config_path)
 
-    meta_agent = MetaAgent(
+    meta_agent = VariantPoolMetaAgent(
         inner_model=meta_model,
         memo_path=run_dir / "learnings.md",
         extra_skills_dirs=([_GAIA_SKILLS_DIR] if _GAIA_SKILLS_DIR.is_dir() else None),
