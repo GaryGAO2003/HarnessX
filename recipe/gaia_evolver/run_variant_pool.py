@@ -69,6 +69,7 @@ import copy
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -143,13 +144,15 @@ from experiments.variant_pool.experiment_lock import (
     UNRESOLVED,
     sha256_file,
 )
-from experiments.variant_pool.gate import Decision, GateResult, TaskEval, run_gate
+from experiments.variant_pool.gate import Decision, GateResult, TaskEval, _declared_level2, run_gate
 from experiments.variant_pool.ledger import SuccessLedger
 from experiments.variant_pool.manifest import (
     CandidateArtifact,
     ChangeManifest,
+    DEFAULT_LEVEL2_LABEL,
     RepoJournalFormatError,
     adapt_repo_journal_manifest,
+    check_level2_roundtrip,
 )
 from experiments.variant_pool.pool import VariantPool
 from experiments.variant_pool.reporting import CandidateTaskResult, RunReport, TaskResult
@@ -185,6 +188,14 @@ DEFAULT_EVOLVE_RETRY = 1
 #: gate's final decision so the settlement chain runs on real data. See
 #: :func:`_forced_gate`.
 FORCE_GATE_MODES = ("off", "apply", "fork")
+
+#: --l2-cert — L2 (ROUNDTRIP_L2) evidence mechanism (SPEC §7.11, "乙+甲").
+#: ``auto`` (default) machine-certifies undeclared tool-bucket Level-2 evidence
+#: from a candidate's own eval trajectories under ``--manifest-mode repo``;
+#: ``off`` keeps today's built-in stage-4 behaviour byte-identical. See
+#: :func:`_l2_certifying_gate`.
+L2_CERT_MODES = ("auto", "off")
+DEFAULT_L2_CERT = "auto"
 
 # B4 — the repo's own hard requirement, quoted from ``agent.py`` L926-937's
 # DECISION_REQUIRED notice, front-loaded into our injected brief so the
@@ -399,6 +410,367 @@ def _forced_gate_banner(mode: str) -> str:
         f"> ⚠ FORCED GATE MODE: {mode} — plumbing probe; decisions are "
         "overridden, results are NOT measurements."
     )
+
+
+# ---------------------------------------------------------------------------
+# --l2-cert L2 machine self-certification (SPEC §7.11 "乙+甲"; default auto)
+# ---------------------------------------------------------------------------
+#
+# repo-mode tool candidates die at gate stage 4 (ROUNDTRIP_L2) because the open
+# repo meta-agent will not write ``capability_evidence`` even when the contract
+# demands it (forkprobe1 R1; TASK.md:89, an n=1 non-compliance). SPEC §7.11's
+# ruling: 甲 — a meta-declared Level-2 entry always wins (and its rate is itself a
+# paper data point); 乙 — when the meta did NOT declare it, the recipe certifies
+# the capability *mechanically* from the candidate's OWN evaluation trajectories:
+# it takes the new tool's REAL recorded output and runs it through the provider's
+# REAL serializer (``manifest.check_level2_roundtrip`` + the litellm tool-message
+# path), and stage 4 passes/fails on that measurement — never on assertion.
+#
+# This is measurement, not a softened gate (the 墓碑 old road): an honest reject
+# stands when the tool was never invoked (no evidence possible) or the real
+# output does not survive serialization (a C-R10-02-class catch, more informative
+# than "not declared"). Meta-declared evidence, the non-code exemption, and the
+# processor bucket (declared-only in v1) all keep the built-in ``_declared_level2``
+# behaviour. Injected only for ``--manifest-mode repo`` paper-candidate runs; the
+# paper manifest arm is untouched (faithful arm), and legacy opaque candidates
+# have no manifest-backed stage 4 to certify. Recorded as deviation M-22. The gate
+# callable is injected through the engine's existing seam
+# (``VariantPoolEngine(..., gate=...)`` -> ``run_gate(..., check_roundtrip=...)``,
+# gate.py:384-410); nothing under experiments/ or harnessx/ is modified.
+
+
+def _real_tool_serializer() -> Callable[[str], Any]:
+    """The production Level-2 serializer: the litellm provider's real tool path.
+
+    Mirrors ``LiteLLMProvider.complete()``'s per-message construction for a
+    ``role="tool"`` result (``harnessx/providers/litellm_provider.py``) and
+    returns the ``content`` field the model would actually read.
+    ``to_openai_content`` is the provider's own utility — there is no stub in the
+    production path (SPEC §7.11). Imported lazily so importing this recipe (and
+    its offline tests) never pulls the provider stack; tests inject a fake
+    serializer and never reach here.
+    """
+    from harnessx.providers._utils import to_openai_content
+
+    def _serialize(tool_output: str) -> Any:
+        content = to_openai_content(tool_output)
+        tool_msg: dict[str, Any] = {
+            "role": "tool",
+            "content": "" if content is None else content,
+            "tool_call_id": "l2_probe",
+            "name": "l2_probe",
+        }
+        return tool_msg["content"]
+
+    return _serialize
+
+
+def _l2_target_tool_names(
+    manifest: ChangeManifest,
+    parent_config: Any,
+    candidate_config: Any,
+) -> set[str]:
+    """Tool names this candidate adds/changes (the set stage 4 must certify).
+
+    Union of two honest sources: manifest ``file_changes`` paths under ``tools/``
+    (basename, ``.py`` stripped) and — authoritative for the *registered* name a
+    tool is invoked under — ``compute_changeset(parent, candidate).tools_added``
+    (the same diff the recipe already uses in :func:`_repo_journal_file_changes`).
+    A config that fails to load degrades to the ``file_changes`` names rather than
+    raising.
+    """
+    names: set[str] = set()
+    for change in getattr(manifest, "file_changes", None) or []:
+        path = str((change or {}).get("path", "")).strip().replace("\\", "/")
+        if path.startswith("tools/"):
+            leaf = path[len("tools/") :].strip().strip("/").rsplit("/", 1)[-1]
+            if leaf.endswith(".py"):
+                leaf = leaf[:-3]
+            if leaf:
+                names.add(leaf)
+    if parent_config and candidate_config:
+        try:
+            from harnessx.core.harness import HarnessConfig
+            from harnessx.meta_harness.agent import compute_changeset
+
+            before = HarnessConfig.from_yaml_file(Path(parent_config)).canonicalize()
+            after = HarnessConfig.from_yaml_file(Path(candidate_config)).canonicalize()
+            for name in compute_changeset(before, after).get("tools_added", []):
+                if str(name).strip():
+                    names.add(str(name).strip())
+        except Exception:  # noqa: BLE001 - degrade to file_changes-derived names
+            pass
+    return names
+
+
+def _l2_candidate_sessions_dir(
+    recipe: Any,
+    candidate_id: str,
+    target_variant: str,
+) -> Path | None:
+    """The candidate's evaluation ``sessions/`` dir, where tool outputs are traced.
+
+    The recipe records ``_round_traj_dir[candidate_id] = <cg>/trajectories`` during
+    evaluation (which runs before the gate, engine.py:295 vs 308), and the journal
+    writes tool traces to the sibling ``<cg>/sessions``. That lookup is primary; a
+    deterministic reconstruction from ``run_dir`` + the round parsed off the
+    ``C-R<round>-<NN>`` id is the fallback when the map is unavailable (tests).
+    """
+    traj = getattr(recipe, "_round_traj_dir", {}).get(candidate_id)
+    if traj is not None:
+        return Path(traj).parent / "sessions"
+    run_dir = getattr(recipe, "run_dir", None)
+    match = re.match(r"C-R(\d+)-", str(candidate_id or ""))
+    if run_dir is None or match is None or not target_variant:
+        return None
+    return (
+        Path(run_dir)
+        / f"R{match.group(1)}"
+        / target_variant
+        / "candidate_gate"
+        / str(candidate_id)
+        / "sessions"
+    )
+
+
+def _l2_resolve_tool_content(msg: dict, rec: dict, session_dir: Path) -> str:
+    """The tool result text, resolving the journal's large-output externalization.
+
+    Inline results live in ``message.content``; results over the journal's
+    ``INLINE_LIMIT`` are written to ``tool_results/{id}.txt`` and referenced by
+    ``meta.content_ref`` (journal.py:_prepare_tool_result). Non-string content
+    (multimodal) resolves to ``""`` so the probe reports a non-survivable return.
+    """
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        return content
+    meta = rec.get("meta")
+    if isinstance(meta, dict):
+        ref = meta.get("content_ref")
+        if ref:
+            try:
+                return Path(session_dir, ref).read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001 - a missing sidecar is not this tool's output
+                pass
+    return content if isinstance(content, str) else ""
+
+
+def _l2_find_tool_output(
+    sessions_dir: Path | None,
+    targets: set[str],
+) -> tuple[str, str] | None:
+    """Longest REAL recorded output of any ``targets`` tool, or ``None`` if never called.
+
+    Parses the HarnessJournal session JSONL (``sessions/*/<run>.jsonl``, skipping
+    ``*_trace.jsonl``). Tool results are ``raw_tool`` (pre-processor, always
+    written) / ``tool`` (post-processor delta) records; the effective delta is
+    preferred per ``tool_call_id``. Returns ``(tool_name, output)`` for the
+    longest output (the strongest capability evidence; an all-empty tool yields
+    ``("name", "")`` which the probe then honestly rejects). ``None`` means no
+    invocation was recorded at all.
+    """
+    if sessions_dir is None or not Path(sessions_dir).is_dir():
+        return None
+    best_len = -1
+    best_name: str | None = None
+    best_output: str | None = None
+    for jsonl in sorted(Path(sessions_dir).glob("*/*.jsonl")):
+        if jsonl.name.endswith("_trace.jsonl"):
+            continue
+        try:
+            text = jsonl.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001 - unreadable segment is skipped
+            continue
+        per_call: dict[str, tuple[int, str, str]] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:  # noqa: BLE001 - a malformed line is not a tool result
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in ("raw_tool", "tool"):
+                continue
+            msg = rec.get("message")
+            if not isinstance(msg, dict) or msg.get("role") != "tool":
+                continue
+            name = msg.get("name")
+            if name not in targets:
+                continue
+            output = _l2_resolve_tool_content(msg, rec, jsonl.parent)
+            call_id = str(msg.get("tool_call_id") or f"__pos_{len(per_call)}")
+            priority = 1 if rec.get("type") == "tool" else 0
+            prev = per_call.get(call_id)
+            if prev is None or priority >= prev[0]:
+                per_call[call_id] = (priority, str(name), output)
+        for _, name_str, output in per_call.values():
+            if len(output) > best_len:
+                best_len, best_name, best_output = len(output), name_str, output
+    if best_name is None or best_output is None:
+        return None
+    return best_name, best_output
+
+
+def _l2_record(
+    recipe: Any,
+    candidate_id: str,
+    *,
+    outcome: str,
+    tool: str | None,
+    output_chars: int | None,
+    note: str,
+    passed: bool,
+) -> tuple[bool, str]:
+    """Write the machine-certification audit into the recipe's candidate meta.
+
+    Records under ``_candidate_meta[candidate_id]["l2_certification"]`` and returns
+    the ``(passed, reason)`` pair stage 4 expects. A PASS reason is tagged as ours;
+    a FAIL reason is the bare note so the archived ``ROUNDTRIP_L2: <note>`` reads as
+    the specific catch (empty return / dropped content / never invoked / no target).
+    """
+    record = {
+        "outcome": outcome,
+        "tool": tool,
+        "output_chars": output_chars,
+        "note": note,
+        "provenance": "OURS_machine_certified",
+    }
+    try:
+        recipe._candidate_meta.setdefault(candidate_id, {})["l2_certification"] = record
+    except Exception:  # noqa: BLE001 - auditing must never break the gate decision
+        pass
+    if passed:
+        return True, f"OURS machine-certified ({outcome}): {note}"
+    return False, note
+
+
+def _make_l2_certifier(
+    recipe: Any,
+    candidate: Any,
+    parent_config: Any,
+    serializer_factory: Callable[[], Callable[[str], Any]],
+) -> Callable[[Any], tuple[bool, str]]:
+    """Build the stage-4 ``check_roundtrip`` for one candidate (SPEC §7.11).
+
+    Receives the manifest the gate unwraps (gate.py:409). Cases 甲/exempt/processor
+    defer to the built-in :func:`_declared_level2` (meta wins / no code / declared-
+    only); a tool-bucket manifest with no declared Level-2 entry is machine-
+    certified from the candidate's real eval-trajectory tool output.
+    """
+
+    def _check(manifest: Any) -> tuple[bool, str]:
+        # 甲 (declared) / non-code exempt / processor-only (declared-only, v1):
+        # all keep the built-in stage-4 behaviour exactly.
+        if (
+            not isinstance(manifest, ChangeManifest)
+            or manifest.level2_evidence() is not None
+            or not manifest.needs_code_verification()
+            or "tools" not in set(manifest.bucket)
+        ):
+            return _declared_level2(manifest)
+
+        # 乙: tools bucket, no declared evidence -> certify from the real run.
+        candidate_id = manifest.candidate_id or str(getattr(candidate, "candidate_id", "") or "")
+        target_variant = str(getattr(candidate, "target_variant", "") or manifest.target_variant or "")
+        candidate_config = getattr(candidate, "config_path", None)
+
+        targets = _l2_target_tool_names(manifest, parent_config, candidate_config)
+        if not targets:
+            return _l2_record(
+                recipe,
+                candidate_id,
+                outcome="no_target",
+                tool=None,
+                output_chars=None,
+                note="cannot identify which tool to certify; declare capability_evidence explicitly",
+                passed=False,
+            )
+
+        sessions_dir = _l2_candidate_sessions_dir(recipe, candidate_id, target_variant)
+        found = _l2_find_tool_output(sessions_dir, targets)
+        if found is None:
+            return _l2_record(
+                recipe,
+                candidate_id,
+                outcome="no_invocation",
+                tool=None,
+                output_chars=None,
+                note="new tool was never invoked during candidate evaluation; no capability evidence possible",
+                passed=False,
+            )
+
+        tool_name, tool_output = found
+        serializer = serializer_factory()
+        evidence = check_level2_roundtrip(tool_output, serializer, label=DEFAULT_LEVEL2_LABEL)
+        return _l2_record(
+            recipe,
+            candidate_id,
+            outcome="certified" if evidence.survived else "failed_probe",
+            tool=tool_name,
+            output_chars=len(tool_output),
+            note=evidence.note,
+            passed=evidence.survived,
+        )
+
+    return _check
+
+
+def _l2_certifying_gate(
+    recipe: Any,
+    real_gate: Callable[..., GateResult] = run_gate,
+    *,
+    serializer_factory: Callable[[], Callable[[str], Any]] | None = None,
+) -> Callable[..., GateResult]:
+    """Wrap ``run_gate`` so undeclared tool-bucket Level-2 evidence is machine-certified.
+
+    Returns ``real_gate`` **unchanged** (identity) unless certification is active —
+    ``l2_cert == "auto"`` and ``manifest_mode == "repo"`` and the paper candidate
+    mode (legacy opaque candidates never reach a manifest-backed stage 4, so there
+    is nothing to certify and the off-mode identity is preserved). When active, the
+    returned callable mirrors :func:`run_gate`'s signature and, for a candidate that
+    carries a :class:`ChangeManifest` and has no caller-supplied ``check_roundtrip``,
+    injects the certifier as stage 4's check (it *replaces* the built-in
+    ``_declared_level2``, gate.py:384-410). Opaque candidates and an explicit
+    ``check_roundtrip`` pass through untouched.
+    """
+    active = (
+        getattr(recipe, "l2_cert", DEFAULT_L2_CERT) == "auto"
+        and getattr(recipe, "manifest_mode", "") == "repo"
+        and getattr(recipe, "candidate_mode", "") == "paper"
+    )
+    if not active:
+        return real_gate
+    factory = serializer_factory or _real_tool_serializer
+
+    def _gate(
+        candidate: Any,
+        parent_config: Any,
+        ledger: Any,
+        tk_results: Iterable[TaskEval],
+        *,
+        min_fork: tuple[int, int] = DEFAULT_MIN_FORK,
+        check_manifest: Callable[[Any], list[str]] | None = None,
+        check_canonicalize: Callable[[Any, Any], tuple[bool, str]] | None = None,
+        check_smoke: Callable[[Any], tuple[bool, str]] | None = None,
+        check_roundtrip: Callable[[Any], tuple[bool, str]] | None = None,
+    ) -> GateResult:
+        manifest = candidate if isinstance(candidate, ChangeManifest) else getattr(candidate, "manifest", None)
+        if check_roundtrip is None and isinstance(manifest, ChangeManifest):
+            check_roundtrip = _make_l2_certifier(recipe, candidate, parent_config, factory)
+        return real_gate(
+            candidate,
+            parent_config,
+            ledger,
+            tk_results,
+            min_fork=min_fork,
+            check_manifest=check_manifest,
+            check_canonicalize=check_canonicalize,
+            check_smoke=check_smoke,
+            check_roundtrip=check_roundtrip,
+        )
+
+    return _gate
 
 
 # ---------------------------------------------------------------------------
@@ -909,6 +1281,14 @@ class VariantPoolRecipe:
             raise ValueError(
                 f"force_gate must be one of {FORCE_GATE_MODES}, got {self.force_gate!r}"
             )
+        # --l2-cert: L2 evidence mechanism (SPEC §7.11). ``auto`` machine-certifies
+        # undeclared tool-bucket Level-2 evidence from a candidate's own eval
+        # trajectories under repo manifest-mode; ``off`` keeps stage 4 byte-identical.
+        self.l2_cert = str(getattr(args, "l2_cert", DEFAULT_L2_CERT))
+        if self.l2_cert not in L2_CERT_MODES:
+            raise ValueError(
+                f"l2_cert must be one of {L2_CERT_MODES}, got {self.l2_cert!r}"
+            )
         self.target_strategy = str(
             getattr(
                 args,
@@ -999,9 +1379,14 @@ class VariantPoolRecipe:
             self.router,
             evaluate=self._evaluate,
             evolve=self._evolve,
-            # off -> _forced_gate returns run_gate itself (identity), so the gate
-            # path is byte-identical; apply/fork inject the override wrapper.
-            gate=_forced_gate(self.force_gate, run_gate),
+            # Two recipe-layer wrappers over the real ``run_gate``, composed so L2
+            # certification happens *inside* the real-gate call that force-gate
+            # audits. ``_l2_certifying_gate`` returns ``run_gate`` unchanged unless
+            # SPEC §7.11 certification is active (auto + repo manifest-mode + paper
+            # candidates), and ``_forced_gate`` returns its argument unchanged when
+            # off — so with both features off the engine still receives ``run_gate``
+            # itself (byte-identical gate path).
+            gate=_forced_gate(self.force_gate, _l2_certifying_gate(self, run_gate)),
             evidence=self.evidence,
             patience=patience,
             min_fork=min_fork,
@@ -2363,6 +2748,7 @@ class VariantPoolRecipe:
         total_retries = 0
         candidates_needing_retry = 0
         gap_counts: dict[str, int] = {}
+        l2_cert_counts: dict[str, int] = {}
         for record in meta.values():
             prov = str(record.get("provenance"))
             provenance_counts[prov] = provenance_counts.get(prov, 0) + 1
@@ -2374,6 +2760,10 @@ class VariantPoolRecipe:
                 candidates_needing_retry += 1
             for gap in record.get("paper_only_gaps") or ():
                 gap_counts[gap] = gap_counts.get(gap, 0) + 1
+            cert = record.get("l2_certification")
+            if isinstance(cert, dict):
+                outcome = str(cert.get("outcome"))
+                l2_cert_counts[outcome] = l2_cert_counts.get(outcome, 0) + 1
         lines = [
             "## Manifest-mode diagnostics (W28)",
             "",
@@ -2392,6 +2782,13 @@ class VariantPoolRecipe:
             f"- repo paper-only gaps marked (not fabricated): {gap_counts or 'none'}",
             "",
         ]
+        # SPEC §7.11 (M-22): one line only when the recipe machine-certified L2
+        # evidence for at least one candidate this run (乙 fallback fired).
+        if l2_cert_counts:
+            lines.insert(
+                len(lines) - 1,
+                f"- L2 machine-certification (OURS 乙, M-22): {l2_cert_counts}",
+            )
         return "\n".join(lines)
 
     def _dump_final(self) -> None:
@@ -2841,6 +3238,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "failures are never overridden. fork works best with --pool-k >= 2; at "
             "K=1 the engine legitimately downgrades an infeasible fork to REJECT "
             "(that downgrade path is itself worth exercising, so K=1 is allowed)."
+        ),
+    )
+    parser.add_argument(
+        "--l2-cert",
+        choices=L2_CERT_MODES,
+        default=DEFAULT_L2_CERT,
+        help=(
+            "L2 (ROUNDTRIP_L2) evidence mechanism (SPEC §7.11, 乙+甲). auto "
+            "(default) = a meta-declared Level-2 entry always wins (甲); when a "
+            "repo-mode tool-bucket candidate declares none, the recipe machine-"
+            "certifies it (乙) by running the new tool's REAL output from the "
+            "candidate's own eval trajectories through the provider's REAL "
+            "serializer — an honest reject stands if the tool was never invoked or "
+            "the output does not survive. Only fires for --manifest-mode repo paper "
+            "candidates; the paper manifest arm is untouched. off = today's built-in "
+            "declared-only stage 4, byte-identical. Recorded as deviation M-22."
         ),
     )
     parser.add_argument(

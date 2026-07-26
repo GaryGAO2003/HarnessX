@@ -91,8 +91,21 @@
 - **可比性边界:smoke_hard2 … forceprobe2(含)全部使用原版 prompt;此后的 run
   使用守则版**。H0 变更由用户明令(Jul-26"加 guardrail,不要大改")。
 
+### L2 机器自证(乙+甲)落地(SPEC §7.11 → M-22)
+- `--l2-cert {auto,off}` 默认 auto,仅 repo 模式注入;meta 亲笔 L2 优先(甲);tools 桶
+  无申报时从**候选评测真轨迹**取新工具最长真实输出,过 provider 真序列化路径
+  (`to_openai_content` → tool message content,与 litellm 内联构造一致),
+  `check_level2_roundtrip` 判存活;从未调用=`no_invocation` 诚实拒;processor 桶 v1
+  仍须亲笔;certification 结果入 candidate meta(OURS 标记)+ W28 一行摘要。
+- 16 新测试(527/0)。**真盘集成验证**(coder 因规格书路径笔误未见真产物,主循环补验):
+  forceprobe2 真 sessions 上 WebFetch 30,044 字符/sidecar 解析/未知工具 None 全对;
+  真序列化器 30,044 字符存活、空串拒绝。
+- 两处偏差已审核接受:①legacy 模式不注入(无 manifest 可证,保 off-identity 断言);
+  ②序列化器返回 content 字段而非整条 JSON(整条会因转义使子串检查虚假失败,
+  content 才是"模型读到的东西")。
+
 ### 会话成本合计(实测,最终)
-¥194.14 → ¥182.67(**¥11.47**,六个 smoke + 全部 meta 调用)
+¥194.14 → ¥182.67(**¥11.47**,六个 smoke + 全部 meta 调用;organic1 另计)
 
 ### 本日提交索引(全部已推 lab)
 | commit | 内容 |
