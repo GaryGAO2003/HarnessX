@@ -158,8 +158,26 @@
   提醒——**等 A1 coder 落地后再改**(同文件并发冲突);→ paper2 复验(~¥4);
   ②若复验仍阴性 → 论文口径:"忠实臂需更强 meta(原文 Opus 4.6),n=6 证据"。
 
-### 会话成本合计(实测,最终)
-¥194.14 → ¥173.64(**¥20.50**:八个 run + 全部 meta 调用;organic1 ¥6.18、paper1 ¥2.85)
+### paper2 — 写作顺序条款生效,墙前移两级
+- 配置:同 paper1 + 顺序条款(9818314);判决:C-R1-02 **首次在 paper 模式写出
+  config.yaml**,死于 replay 冒烟超时(**恰 20.0s——揪出上游钳制 bug**,见下);
+  C-R1-01 死于 W19(bucket=[prompt,config] 缺 attribution_signature,注释"纯 prompt
+  可 null"被读宽)。→ 修复:HARNESSX_REPLAY_TIMEOUT_CAP_S 环境门控(bb0a90d,
+  SPEC §10#5,默认 20s 字节不变)+ attribution 注释收紧。
+
+### paper3 — Table 9 manifest 首次全清,死因退到类型词表
+- 配置:同 paper2 + 60s replay 帽 + 两处措辞修复;判决:`provenance:
+  {paper_manifest: 2}, parse ok: 2` ——**两个候选的论文 manifest 全部合法解析**
+  (历史首次);死于 capability_evidence `type` 自创词(search_backend /
+  trajectory_analysis ∉ 枚举)——**契约从未给出词表**,proposal 期即拒,零评测
+  浪费。→ 修复:必填键行补 type 枚举 + "不确定用 other"(等 A3 落地后改,同文件
+  冲突纪律);paper4 复验。
+- **收敛判断**:paper1→3 每轮一句话措辞消一堵墙且墙持续变小;忠实臂"DeepSeek 撑不起"
+  的初判正在被推翻,更准确口径="撑得起,但契约必须把 schema 词表逐项挑明"——本身
+  即 §7.7 开源 meta 观察点。
+
+### 会话成本合计(实测)
+¥194.14 → ¥173.64(至 paper1 止 **¥20.50**;paper2/paper3/a1smoke 待收口后回填)
 
 ### 本日提交索引(全部已推 lab)
 | commit | 内容 |
