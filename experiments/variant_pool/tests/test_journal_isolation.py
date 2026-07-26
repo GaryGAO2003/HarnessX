@@ -61,6 +61,16 @@ class _Args:
         self.model = "task-model"
         self.meta_model = "meta-model"
         self.max_tasks = 0
+        # Per-variant journal isolation is a property of the *legacy* evolve arm:
+        # ``_evolve`` -> ``_evolve_legacy`` clones one meta-agent per variant and
+        # evolves each against its own ``variant.journal_path``. The recipe's
+        # default ``paper`` candidate_mode instead evolves only the single global
+        # target variant through the K_t pipeline (isolated slots, not per-variant
+        # clones), so ``_evolve`` returns ``None`` for every non-target variant and
+        # the ``RecordingMeta.evolve`` spy these fixtures drive never fires. Force
+        # the legacy arm; with candidate_mode="legacy_single" the recipe defaults
+        # target_strategy to the required "all_active_variants".
+        self.candidate_mode = "legacy_single"
         self.__dict__.update(overrides)
 
 

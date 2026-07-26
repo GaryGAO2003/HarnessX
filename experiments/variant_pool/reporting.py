@@ -670,9 +670,16 @@ class RunReport:
             f"| final pass@1 | {self.pass_at_1():.4f} |",
             f"| final per-attempt rate | {self.per_attempt_rate():.4f} |",
             f"| pass@{k} - pass@1 (masking gap, §7.1) | {self.masking_gap(k=k):.4f} |",
-            f"| attempts / infra failures / budget exhaustion | "
-            f"{sum(r.n_att for r in self.results)} / {self.infra_failure_count()} / "
-            f"{self.budget_exhaustion_count()} |",
+            # Run-total health counts over the whole settled active pool, unlike
+            # the per-round score rows above. All three share one scope: summing
+            # ``self.results`` (every round) keeps them consistent. Using the
+            # ``infra_failure_count`` / ``budget_exhaustion_count`` helpers here
+            # would scope only the final round (their ``round_idx=None`` default),
+            # so a run with exhaustions in earlier rounds would under-report them.
+            f"| attempts / infra failures / budget exhaustion (run total) | "
+            f"{sum(r.n_att for r in self.results)} / "
+            f"{sum(r.infra_failures for r in self.results)} / "
+            f"{sum(r.budget_exhaustions for r in self.results)} |",
             "",
             "> The peak is selected on the same task set the run evolved on, with",
             "> no held-out split (§7.7). It is reported next to the final score,",

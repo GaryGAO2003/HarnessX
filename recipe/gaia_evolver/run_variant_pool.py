@@ -72,7 +72,7 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -501,6 +501,41 @@ def _build_candidate_contract(
         "target_variant": target_variant,
         "planner_brief": brief,
     }
+
+
+def _planner_brief_with_regressions(
+    brief: Mapping[str, Any],
+    regressions: Sequence[str],
+) -> dict[str, Any]:
+    """Surface the active pool's regressions in the meta-agent's planner brief.
+
+    ``PipelineContext.regressions`` already reaches the DeterministicCritic, but
+    nothing tells the meta-agent which previously-solved tasks regressed, so its
+    journal/manifest cannot name them and the Critic vetoes the whole round
+    (runs/forceprobe1 R2: "regressions were neither handled in tasks_at_risk nor
+    explained"). This merges that list into the brief the meta-agent actually
+    reads — ``_build_candidate_contract`` renders ``planner_brief`` verbatim into
+    ``TASK.md`` — so the meta-agent can list each regressed task in
+    ``tasks_at_risk`` or explain it and clear the Critic's whole-round veto.
+
+    Byte-stable when empty: with no regressions the result is exactly
+    ``dict(brief)`` (no new keys), so regression-free rounds keep their previous
+    brief verbatim.
+    """
+    merged = dict(brief)
+    if not regressions:
+        return merged
+    tasks = list(regressions)
+    merged["active_regressions"] = tasks
+    merged["regression_requirement"] = (
+        "These previously-solved tasks regressed in the last settled round: "
+        f"{tasks}; your journal/manifest MUST either list each of them in "
+        "tasks_at_risk / predicted_impact.tasks_at_risk or give an explicit "
+        "regression explanation, because the Critic rejects the whole round "
+        'otherwise ("regressions were neither handled in tasks_at_risk nor '
+        'explained").'
+    )
+    return merged
 
 
 def _repo_journal_file_changes(
@@ -1220,7 +1255,9 @@ class VariantPoolRecipe:
                 slot=slot,
                 manifest_mode=self.manifest_mode,
                 target_variant=context.target_variant,
-                planner_brief=asdict(brief),
+                planner_brief=_planner_brief_with_regressions(
+                    asdict(brief), context.regressions
+                ),
                 base_evolve_kwargs=base_kwargs,
                 max_retries=self.evolve_retry,
             )

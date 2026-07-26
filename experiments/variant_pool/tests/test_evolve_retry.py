@@ -214,6 +214,61 @@ def test_repo_mode_injects_journal_acceptance_not_the_paper_schema() -> None:
 
 
 # ===========================================================================
+# active-pool regressions injected into the candidate contract
+# ===========================================================================
+
+
+def test_active_regressions_are_surfaced_in_the_planner_brief() -> None:
+    """Non-empty regressions add both keys, carry the task ids, and cite the exact
+    Critic veto so the meta-agent's manifest can clear the whole-round rejection.
+
+    Without this the meta-agent is never told which tasks regressed, so its
+    manifest cannot name them in ``tasks_at_risk`` and the DeterministicCritic
+    vetoes the round (runs/forceprobe1 R2).
+    """
+    regressed = ("04a04a9b-task", "bead-task")
+    brief = rvp._planner_brief_with_regressions({"rationale": "x"}, regressed)
+    contract = rvp._build_candidate_contract(
+        manifest_mode="repo",
+        suggested_candidate_id="C-R2-01",
+        target_variant="V0",
+        planner_brief=brief,
+    )
+    injected = contract["planner_brief"]
+    assert injected["active_regressions"] == ["04a04a9b-task", "bead-task"]
+    requirement = injected["regression_requirement"]
+    assert "04a04a9b-task" in requirement and "bead-task" in requirement
+    # Wording matches critic.py verbatim so the meta-agent knows the exact bar.
+    assert "regressions were neither handled in tasks_at_risk nor explained" in requirement
+
+
+def test_no_regressions_leaves_the_planner_brief_byte_stable() -> None:
+    """Empty regressions add no keys: the brief is exactly the plain merge, so a
+    regression-free round is byte-identical to the pre-change ``asdict(brief)``."""
+    base = {"rationale": "x", "buckets": ()}
+    merged = rvp._planner_brief_with_regressions(base, ())
+    assert merged == base  # no new keys...
+    assert merged is not base  # ...but a fresh dict, never the caller's object
+
+    with_helper = rvp._build_candidate_contract(
+        manifest_mode="repo",
+        suggested_candidate_id="C-R2-01",
+        target_variant="V0",
+        planner_brief=merged,
+    )
+    plain = rvp._build_candidate_contract(
+        manifest_mode="repo",
+        suggested_candidate_id="C-R2-01",
+        target_variant="V0",
+        planner_brief=dict(base),
+    )
+    assert "active_regressions" not in with_helper["planner_brief"]
+    assert "regression_requirement" not in with_helper["planner_brief"]
+    # Identical to feeding the plain asdict(brief) straight in, as before.
+    assert with_helper == plain
+
+
+# ===========================================================================
 # --candidates-per-round controls the number of meta sessions
 # ===========================================================================
 

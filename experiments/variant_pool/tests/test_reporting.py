@@ -248,6 +248,35 @@ def test_budget_exhaustion_is_not_reported_as_infrastructure() -> None:
     assert payload["budget_exhaustions"] == 1
 
 
+def test_headline_counts_failures_as_run_totals_across_rounds() -> None:
+    """The headline's attempts / infra / budget row is a run total over every
+    settled round, not just the final one.
+
+    runs/smoke_calib6 exposed the bug: exhaustions in R0 and R1 were under-counted
+    because ``attempts`` summed all rounds while infra/budget summed only the last
+    (the ``round_idx=None`` default of the count helpers). All three now share the
+    run-total scope.
+    """
+    report = _report(
+        _result("a", 0, 0, budget_exhaustions=2),
+        _result("b", 0, 0, infra_failures=1),
+        _result("a", 1, 0, budget_exhaustions=1),
+        _result("b", 1, 1, infra_failures=1),
+    )
+    # The per-round helpers keep their last-round default (unchanged API): R1 by
+    # itself has 1 infra + 1 budget — exactly what a last-round headline showed.
+    assert report.budget_exhaustion_count(round_idx=0) == 2
+    assert report.budget_exhaustion_count() == 1  # last round only
+    assert report.infra_failure_count(round_idx=0) == 1
+    assert report.infra_failure_count() == 1  # last round only
+
+    text = report.to_markdown()
+    # Run totals: attempts 8, infra 1+1=2, budget 2+1=3 — summed over both rounds.
+    assert "| 8 / 2 / 3 |" in text
+    # The last-round-only figures must NOT be what the headline prints.
+    assert "| 8 / 1 / 1 |" not in text
+
+
 @pytest.mark.parametrize("kwargs", [{"n_pass": 3, "n_att": 2}, {"n_pass": -1, "n_att": 2}])
 def test_impossible_results_are_rejected(kwargs) -> None:
     with pytest.raises(ValueError):
