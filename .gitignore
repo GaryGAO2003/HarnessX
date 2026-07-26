@@ -123,3 +123,4 @@ experiments/docs/*.pdf
 
 # Live overnight scratch dir (archived runs kept under overnight-<tag>/)
 experiments/overnight/
+graphify-out/
