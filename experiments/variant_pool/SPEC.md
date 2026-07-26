@@ -587,3 +587,7 @@ C4 首次真跑时,evolve 内部 replay 门 timeout 抛异常,被 `run_variant_p
 ## 7.12 回退情报接线(Jul-26)
 
 forceprobe1 R2 暴露断路:`context.regressions` 只流入 Critic,meta 全然不知,却因"未解释回退"被整轮否决(W16 考没发的题)。**修**(2e78468):`planner_brief` 非空回退时携带 `active_regressions` 清单 + 引 Critic 原话的硬性要求;空时字节稳定。Critic 判据未动——修的是信息流,不是纪律。
+
+## 7.13 worker 选型:Flash(thinking/high),不上 Pro(Jul-26,用户令案头裁定、免对照实验)
+
+证据与全表=`experiments/docs/MODEL-SELECTION-FLASH-VS-PRO.md`。五条理由:失败余量(Pro 在 BrowseComp 近天花板 83.4,压平效应窗;Flash 53-73 居中,合本地先验 33-67%)/每任务成本 ≈2.4×/失败签名有利(工具机制干净、败在实质——隔离 harness 效应的好失败模式)/唯一文档化硬伤(Non-think 长上下文崩塌)已避开(API `thinking` 默认 enabled、effort 默认 high,轨迹含 Thinking 块亲验)/无公开数据的两风险(格式依从、run 间方差)留 pilot 实测。冻结动作:lock 显式传 `thinking=enabled`,勿赖服务端默认;Pro 留作 meta 与论文期对照。
