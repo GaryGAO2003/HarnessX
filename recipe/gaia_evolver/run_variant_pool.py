@@ -129,6 +129,7 @@ from experiments.variant_pool.candidate_pipeline import (
     DigesterStage,
     IsolatedEvolverAdapter,
     OURS_ACTIONABILITY_THRESHOLD_PROVENANCE,
+    OURS_DEFAULT_ACTIONABILITY_THRESHOLD,
     outward_candidate_id,
     PipelineContext,
     PipelineResult,
@@ -251,6 +252,24 @@ DEFAULT_AEGIS_PLANNER = "deterministic"
 AEGIS_CRITIC_MODES = ("deterministic", "llm")
 DEFAULT_AEGIS_CRITIC = "deterministic"
 
+
+def _resolve_actionability_threshold(raw: float | None, aegis_digester: str) -> float:
+    """Algorithm 1's alpha, defaulted per Digester mode when not given explicitly.
+
+    The recipe's historical implicit default was 1.0 — calibrated for the
+    BINARY deterministic fallback digester (a_t ∈ {0.0, 1.0}; "equality
+    continues" makes 1.0 the never-skip legacy behavior). An LLM Digester
+    emits real-valued a_t, and runs/a1smoke showed a_t=0.9 < 1.0 silently
+    skipping every round under the legacy default. Auto default: 1.0 in
+    deterministic mode (byte-identical), the library's OURS default (0.5)
+    in llm mode; an explicit ``--actionability-threshold`` always wins.
+    """
+    if raw is not None:
+        return float(raw)
+    if aegis_digester == "llm":
+        return float(OURS_DEFAULT_ACTIONABILITY_THRESHOLD)
+    return 1.0
+
 # B4 — the repo's own hard requirement, quoted from ``agent.py`` L926-937's
 # DECISION_REQUIRED notice, front-loaded into our injected brief so the
 # meta-agent commits to a decision instead of stopping after analysis.
@@ -284,7 +303,7 @@ PAPER_MANIFEST_SCHEMA_BRIEF = (
     "  candidate_id: str  # exactly the suggested id\n"
     "  bucket: list[str]  # subset of [prompt, tools, config, processor]\n"
     "  iterates_from: str|null\n"
-    "  capability_evidence: list of {type, claim, evidence}  # [] for a pure prompt edit\n"
+    "  capability_evidence: list of {type, claim, evidence}  # [] for a pure prompt edit; type MUST be one of [python_package, http_endpoint, builtin_tool, filesystem, other] — any other value is rejected (runs/paper3 died on invented types); use 'other' when unsure\n"
     "  file_changes: list of {path, action(create|modify|delete), diff_summary}\n"
     "  predicted_impact: {tasks_will_unlock: [...], tasks_will_stabilize: [...], tasks_at_risk: [...]}\n"
     "  attribution_signature: {type(tool_call|processor_invocation|prompt_feature), tool_name, expected_min_calls}  # null ONLY when bucket == [prompt]; REQUIRED for any other bucket incl. [prompt, config] (W19 hard gate — runs/paper2 died on this)\n"
@@ -2980,6 +2999,11 @@ class VariantPoolRecipe:
                 f"aegis_critic must be one of {AEGIS_CRITIC_MODES}, "
                 f"got {self.aegis_critic!r}"
             )
+        # Algorithm 1's alpha: explicit flag wins; otherwise mode-dependent
+        # default (deterministic digester -> legacy 1.0, llm -> OURS 0.5).
+        self.actionability_threshold = _resolve_actionability_threshold(
+            getattr(args, "actionability_threshold", None), self.aegis_digester
+        )
         self.target_strategy = str(
             getattr(
                 args,
@@ -3457,7 +3481,7 @@ class VariantPoolRecipe:
             critic=critic,
             k_t=self.candidates_per_round,
             actionability_threshold=float(
-                getattr(self.args, "actionability_threshold", 1.0)
+                self.actionability_threshold
             ),
         )
         context = PipelineContext(
@@ -4770,7 +4794,7 @@ class VariantPoolRecipe:
                 ),
                 "llm_aegis_reproduction": self._llm_aegis_reproduction,
                 "actionability_threshold": (
-                    float(getattr(self.args, "actionability_threshold", 1.0))
+                    float(self.actionability_threshold)
                     if self.candidate_mode == "paper"
                     else None
                 ),
@@ -5221,6 +5245,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "regression veto still applies. Prompt is OURS. Only when Digester, "
             "Planner AND Critic are all llm does llm_aegis_reproduction flip to "
             "True; the audit's per-role Critic name flips to MetaModel_llm_critic."
+        ),
+    )
+    parser.add_argument(
+        "--actionability-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Algorithm 1's alpha for selective invocation. Default None = auto: "
+            "1.0 with the deterministic Digester (its binary a_t + the paper's "
+            "equality-continues boundary = legacy never-skip), 0.5 (library OURS "
+            "default) with --aegis-digester llm, whose real-valued a_t made the "
+            "legacy 1.0 skip whole rounds (runs/a1smoke: a_t=0.9). An explicit "
+            "value always wins in either mode."
         ),
     )
     parser.add_argument(
