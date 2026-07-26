@@ -1,0 +1,122 @@
+diff --git a/harnessx/meta_harness/agent.py b/harnessx/meta_harness/agent.py
+index f651b38..13c5c01 100644
+--- a/harnessx/meta_harness/agent.py
++++ b/harnessx/meta_harness/agent.py
+@@ -38,6 +38,7 @@ import hashlib
+ import json
+ import logging
+ import time
++from collections.abc import Mapping
+ from pathlib import Path
+ from typing import TYPE_CHECKING, Any
+ 
+@@ -545,11 +546,19 @@ class MetaAgent:
+         replay_max_cost_usd: float | None = 0.5,
+         replay_timeout_s: float = 300.0,
+         replay_mode: str = "synthetic_task",
++        candidate_contract: Mapping[str, Any] | None = None,
+     ) -> Path:
+         """Run one meta-agent pass. Returns path to ``output_dir/config.yaml``.
+ 
+         Post-flight checks: canonicalize → novelty → evidence →
+         changeset → replay smoke gate.
++
++        ``candidate_contract`` is an optional, caller-owned structured-proposal
++        request. It only augments ``TASK.md``; this module deliberately does
++        not import or validate an experiment-specific manifest type. Callers
++        that enable it must parse and validate the requested
++        ``_meta_scratch/manifest.yaml`` before accepting the proposal. Omitting
++        it preserves the legacy evolve contract.
+         """
+         from ..core.harness import BaseTask
+ 
+@@ -574,6 +583,7 @@ class MetaAgent:
+             trajectories_dir=trajectories_dir,
+             output_dir=output_dir,
+             scratch_dir=scratch_dir,
++            candidate_contract=candidate_contract,
+         )
+ 
+         # Build the harness for this round.
+@@ -686,6 +696,7 @@ class MetaAgent:
+         trajectories_dir: Path,
+         output_dir: Path,
+         scratch_dir: Path,
++        candidate_contract: Mapping[str, Any] | None = None,
+     ) -> tuple[Path, Path | None]:
+         """Write TASK.md + (when journal exists) CONTEXT.md. Return both paths."""
+         context_path: Path | None = None
+@@ -711,6 +722,7 @@ class MetaAgent:
+                 trajectories_dir=trajectories_dir,
+                 output_dir=output_dir,
+                 context_path=context_path,
++                candidate_contract=candidate_contract,
+             ),
+             encoding="utf-8",
+         )
+@@ -723,6 +735,7 @@ class MetaAgent:
+         trajectories_dir: Path,
+         output_dir: Path,
+         context_path: Path | None = None,
++        candidate_contract: Mapping[str, Any] | None = None,
+     ) -> str:
+         memo_line = f"- `memo_path`: `{self.memo_path}`" if self.memo_path is not None else "- `memo_path`: (not set)"
+         context_section = ""
+@@ -734,6 +747,7 @@ class MetaAgent:
+                 "see which levers have been tried and how well their predicted-"
+                 "affected tasks actually flipped\n"
+             )
++        candidate_contract_section = self._render_candidate_contract(candidate_contract)
+         return (
+             "# Evolve Brief\n\n"
+             f"- `current_config`: `{current_config_path}`\n"
+@@ -741,6 +755,7 @@ class MetaAgent:
+             f"- `output_dir`: `{output_dir}`\n"
+             f"{memo_line}\n"
+             f"{context_section}"
++            f"{candidate_contract_section}"
+             f"- budget: {self.max_cost_usd} USD, {self.max_steps} steps, "
+             f"{self.wall_clock_s:.0f}s wall-clock\n\n"
+             "## Deliverables (all under `output_dir`)\n\n"
+@@ -811,6 +826,41 @@ class MetaAgent:
+             "   keeps bind-only checking.\n"
+         )
+ 
++    @staticmethod
++    def _render_candidate_contract(candidate_contract: Mapping[str, Any] | None) -> str:
++        """Render an optional machine-readable candidate request into TASK.md."""
++
++        if candidate_contract is None:
++            return ""
++        candidate_id = str(candidate_contract.get("suggested_candidate_id", "")).strip()
++        target_variant = str(candidate_contract.get("target_variant", "")).strip()
++        planner_brief = candidate_contract.get("planner_brief", {})
++        contract_json = json.dumps(
++            {
++                "suggested_candidate_id": candidate_id,
++                "target_variant": target_variant,
++                "planner_brief": planner_brief,
++            },
++            ensure_ascii=False,
++            sort_keys=True,
++        )
++        return (
++            "\n## Structured candidate contract (caller-required)\n\n"
++            "This evolve call is one isolated candidate slot. In addition to the "
++            "normal deliverables, write `_meta_scratch/manifest.yaml` as a bare "
++            "YAML mapping. The caller rejects the proposal if this file is "
++            "missing, malformed, or incomplete; it will not infer fields from "
++            "`candidates.md` or silently wrap `config.yaml`.\n\n"
++            f"- `suggested_candidate_id`: `{candidate_id}` (use exactly this value)\n"
++            f"- `target_variant`: `{target_variant}` (use exactly this value)\n"
++            f"- `planner_contract_json`: `{contract_json}`\n\n"
++            "Required manifest keys: `candidate_id`, `bucket`, `iterates_from`, "
++            "`capability_evidence`, `file_changes`, `predicted_impact`, "
++            "`attribution_signature`, and `target_variant`. Continue to write "
++            "`_meta_scratch/candidates.md` when the config changes; the manifest "
++            "is an additional machine-readable contract, not a replacement.\n\n"
++        )
++
+     @staticmethod
+     def _render_user_message(*, brief_path: Path) -> str:
+         return (

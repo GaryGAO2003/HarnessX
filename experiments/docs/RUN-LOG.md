@@ -152,3 +152,8 @@
 | e79e76d | repo 契约:工具/processor 候选必须申报 L2 证据 |
 | 2e78468 | 回退情报接线 + headline 全程口径 + journal-isolation fixture(511/0) |
 | 16777ab | 移除误入的 graphify 缓存 + .gitignore |
+| 2f2bfb7 | RUN-LOG 台账建立 + SPEC §7.10-7.12 + 勘误 E08/E09(记录纪律批次) |
+| da9e0e7 | 守则 prompt 落盘(+6 行,备份入库)+ forceprobe2 fork 里程碑台账 |
+| 881199a | L2 机器自证(乙+甲,M-22;527/0;真盘集成验证) |
+| 2f11cd7 | worker 裁决 Flash(SPEC §7.13 + 证据档案) |
+| e384636 | P1 三分计数 / P2 目标资格(轨迹∩路由任务)/ to_dict run-total + organic1 里程碑台账(535/0) |
