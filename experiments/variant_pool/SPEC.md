@@ -555,3 +555,16 @@ C4 首次真跑时,evolve 内部 replay 门 timeout 抛异常,被 `run_variant_p
 **⑤ 裁定:gate 的 CANONICALIZE / BUILD_SMOKE_L1 = 冗余双重检查,正式标注为 no-op-by-design,不重复接线。** 理由:(a) 无候选路径绕过上游两道保证;(b) 重跑 canonicalize 零新增校验;(c) 重跑 replay 会二次 timeout——正是今日暴露的失败。**保留**五关枚举位、`GateResult`/`GATE_SEQUENCE` 结构、以及注入缝(`check_canonicalize`/`check_smoke` 参数)——注入的检查仍优先执行并可 halt,故 V1 反 reward-hacking 探针(§9.5)仍可强制失败;但 gate **不接内建 canonicalize/smoke 检查**(代码里这两关本就没有内建实现,仅 stage 1/4 对 manifest 有内建默认)。gate 的实际拦截来自三关:**MANIFEST_COMPLETE**(candidate 为 manifest 时)、**ROUNDTRIP_L2**(manifest 且 code bucket)、**SEESAW_REGRESSION**(恒真)。
 
 **落点**:`gate.py` 模块 docstring "Which stages are real" 段与 `run_gate` 内联注释已改写标注;`run_variant_pool.PoolCandidate` docstring 的 "batch C4" 前向引用已更新;测试见 `tests/test_gate_c4_redundancy.py`(锁定两关 no-op + 三关拦截 + 结构不变)。
+
+## 7.9 候选 ID 双空间:内部 paper 形,repo 边界用数字别名(Jul-26,用户裁定选项 1)
+
+**冲突**:论文 Table 9 的候选 ID 形如 `C-R3-01`(我方 `manifest.CANDIDATE_ID_RE` 亦如此校验);但 repo 自己的 evidence 门(`validate_workflow.py:1153`)只认 `^##\s+Candidate\s+(C-\d+)\b`——`C-` 后**纯数字**。smoke_hard 中 meta-agent 按我方契约写下 `## Candidate C-R1-01`,被它自己的 repo 当场拒收,候选永远到不了门。
+
+**裁定(用户选选项 1)**:契约交给 meta-agent 的是 repo 兼容 ID,映射由我方维护。实现为**双 ID 空间 + 单点翻译**:
+
+- **内部一律 paper 形**(`C-R<round>-<NN>`):slot 分配器、manifest、gate、ledger、报告、审计全部不变;`CANDIDATE_ID_RE` 与 round 前缀校验保持论文严格性。
+- **外部别名**只在两个缝出现(`candidate_pipeline.outward_candidate_id`,纯字符串映射 `C-R1-01 → C-0101`,revision 追加两位序号):
+  1. `_build_candidate_contract` 把别名写进契约(TASK.md 的 "use exactly this value"),meta-agent 的 candidates.md 标题因此过 repo 正则;
+  2. manifest 收口(`_finalize_slot`)把回声的别名映射回 slot ID,别名本身存 `meta["repo_candidate_id"]` 供审计。
+- **否决的替代方案**:全内部改用数字形(会撞 `CANDIDATE_ID_RE`、打乱 `_brief_for_slot` 的位序解析、污染全部 C-R 形文档/fixture);在渲染层翻译(契约 dict 将与 meta 实际所见不一致,审计失真)。
+- legacy 路径不注入契约(repo 原生 TASK.md),其 ID 纯内部记账,维持 `C-R{round}-{vid}` 原样。
