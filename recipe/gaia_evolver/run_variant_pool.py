@@ -243,8 +243,19 @@ REPO_MANIFEST_SCHEMA_BRIEF = (
     "internal manifest from your repo-native products: the `config.yaml` diff and "
     "your journal vocabulary directly — `levers` (subset of configuration/control/"
     "action/instruction), `predicted_affected` (task ids you expect to flip), and "
-    "`hypothesis_id`. Just write `config.yaml` and your usual journal entry; you do "
-    "not need to supply `capability_evidence` or a paper `attribution_signature`."
+    "`hypothesis_id`. For prompt/config-only edits, just write `config.yaml` and "
+    "your usual journal entry; no `capability_evidence` or paper "
+    "`attribution_signature` is needed. EXCEPTION — if your edit adds or modifies "
+    "a TOOL or PROCESSOR, the deterministic gate requires declared Level-2 "
+    "round-trip evidence and will otherwise reject it at ROUNDTRIP_L2 (this is "
+    "how runs/smoke_calib6's tool candidate died). In that case include in your "
+    "journal entry (or a manifest.yaml) a structured `capability_evidence:` list "
+    "of {type, claim, evidence} mappings with: (1) one entry showing the "
+    "capability works (the endpoint/command output you actually verified), and "
+    "(2) one entry whose claim contains 'Level 2' asserting the tool return "
+    "survives provider serialization to the model, with the observed evidence "
+    "(e.g. \"tool output of N chars appeared intact in the next model message\"). "
+    "Never fabricate: only claim what you observed in this session."
 )
 
 
