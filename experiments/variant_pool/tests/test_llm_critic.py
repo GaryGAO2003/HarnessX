@@ -703,40 +703,49 @@ def test_llm_aegis_reproduction_true_only_when_all_three_llm(
 
 def test_composed_pipeline_adapter_all_deterministic_is_byte_identical():
     # Lock literal (machine form) and comparison.json literal (human form) are
-    # each returned UNCHANGED when all three roles are deterministic.
+    # each returned UNCHANGED when all three roles are deterministic. P1-1: this
+    # holds regardless of --aegis-prompts (the prompts suffix is appended only in
+    # the composed/any-llm form), so both paper and ours keep the byte-identical
+    # literal.
     lock_literal = "deterministic_evidence_digester_planner_critic+llm_metaagent_evolver"
     cmp_literal = "deterministic Digester/Planner/Critic fallbacks + MetaAgent Evolver"
-    assert (
-        rvp._composed_pipeline_adapter(
-            "deterministic", "deterministic", "deterministic",
-            all_deterministic_literal=lock_literal,
+    for prompts_mode in ("paper", "ours"):
+        assert (
+            rvp._composed_pipeline_adapter(
+                "deterministic", "deterministic", "deterministic",
+                all_deterministic_literal=lock_literal,
+                prompts_mode=prompts_mode,
+            )
+            == lock_literal
         )
-        == lock_literal
-    )
-    assert (
-        rvp._composed_pipeline_adapter(
-            "deterministic", "deterministic", "deterministic",
-            all_deterministic_literal=cmp_literal,
+        assert (
+            rvp._composed_pipeline_adapter(
+                "deterministic", "deterministic", "deterministic",
+                all_deterministic_literal=cmp_literal,
+                prompts_mode=prompts_mode,
+            )
+            == cmp_literal
         )
-        == cmp_literal
-    )
 
 
 @pytest.mark.parametrize(
-    "digester, planner, critic, expected",
+    "digester, planner, critic, prompts_mode, expected",
     [
-        ("llm", "deterministic", "deterministic", "digester=llm,planner=deterministic,critic=deterministic+llm_metaagent_evolver"),
-        ("deterministic", "deterministic", "llm", "digester=deterministic,planner=deterministic,critic=llm+llm_metaagent_evolver"),
-        ("llm", "llm", "llm", "digester=llm,planner=llm,critic=llm+llm_metaagent_evolver"),
+        ("llm", "deterministic", "deterministic", "paper", "digester=llm,planner=deterministic,critic=deterministic+llm_metaagent_evolver,prompts=paper"),
+        ("deterministic", "deterministic", "llm", "ours", "digester=deterministic,planner=deterministic,critic=llm+llm_metaagent_evolver,prompts=ours"),
+        ("llm", "llm", "llm", "paper", "digester=llm,planner=llm,critic=llm+llm_metaagent_evolver,prompts=paper"),
+        ("llm", "llm", "llm", "ours", "digester=llm,planner=llm,critic=llm+llm_metaagent_evolver,prompts=ours"),
     ],
 )
 def test_composed_pipeline_adapter_uses_composed_form_when_any_role_is_llm(
-    digester, planner, critic, expected
+    digester, planner, critic, prompts_mode, expected
 ):
-    # The literal is IGNORED once any role is llm — the composed form is used.
+    # The literal is IGNORED once any role is llm — the composed form is used, and
+    # P1-1 appends the active --aegis-prompts mode as ',prompts=<mode>'.
     assert (
         rvp._composed_pipeline_adapter(
-            digester, planner, critic, all_deterministic_literal="IGNORED"
+            digester, planner, critic, all_deterministic_literal="IGNORED",
+            prompts_mode=prompts_mode,
         )
         == expected
     )
@@ -771,14 +780,17 @@ def test_experiment_lock_adapter_all_deterministic_matches_pre_a1_literal(tmp_pa
 
 
 @pytest.mark.parametrize(
-    "digester, planner, critic, expected",
+    "digester, planner, critic, prompts, expected",
     [
-        ("deterministic", "deterministic", "llm", "digester=deterministic,planner=deterministic,critic=llm+llm_metaagent_evolver"),
-        ("llm", "llm", "llm", "digester=llm,planner=llm,critic=llm+llm_metaagent_evolver"),
+        # aegis_prompts defaults to paper (paper-first house rule), so the composed
+        # lock string carries ,prompts=paper unless overridden to ours (P1-1).
+        ("deterministic", "deterministic", "llm", "paper", "digester=deterministic,planner=deterministic,critic=llm+llm_metaagent_evolver,prompts=paper"),
+        ("llm", "llm", "llm", "paper", "digester=llm,planner=llm,critic=llm+llm_metaagent_evolver,prompts=paper"),
+        ("deterministic", "deterministic", "llm", "ours", "digester=deterministic,planner=deterministic,critic=llm+llm_metaagent_evolver,prompts=ours"),
     ],
 )
 def test_experiment_lock_adapter_is_composed_when_a_role_is_llm(
-    tmp_path, digester, planner, critic, expected
+    tmp_path, digester, planner, critic, prompts, expected
 ):
     baseline, base = _lock_base(tmp_path)
     args = _Args(
@@ -787,6 +799,7 @@ def test_experiment_lock_adapter_is_composed_when_a_role_is_llm(
         aegis_digester=digester,
         aegis_planner=planner,
         aegis_critic=critic,
+        aegis_prompts=prompts,
     )
     lock = rvp._build_experiment_lock(
         args=args, run_tag="t", baseline_config_path=baseline, original_base=base

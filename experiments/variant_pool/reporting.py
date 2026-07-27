@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from math import comb
+from math import comb, sqrt
 from typing import Any
 
 #: Pool events the report knows how to lay on a time axis (SPEC §6.7).
@@ -826,3 +826,169 @@ def report_from_rows(rows: Iterable[Mapping[str, Any]], **kwargs: Any) -> RunRep
             )
         )
     return report
+
+
+# ---------------------------------------------------------------------------
+# P1-2 — paired-arm CI + drift reporting (mirror paper Table 5)
+# ---------------------------------------------------------------------------
+#
+# OPTIMIZATION-PLAN P1-2 / PAPER-GAP-AUDIT §0: the paper's headline (Table 5) is a
+# LONG-HORIZON, LARGE-n contrast — Ensemble stays up while Global peaks early and
+# collapses — and its visibility depends on the CI at the bed (task-set) size
+# (§7.7 reports ±8.5% at n=103, ±28% at n=12). These pure helpers put the two arms
+# side by side with the final/peak/drift columns of Table 5 and a CI at each arm's
+# bed size, so a run can never quote one arm's peak without the paired context.
+
+
+def binomial_ci(passes: float, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval for a binomial proportion (95% at the default z).
+
+    Wilson is chosen over Wald because Wald collapses to a zero-width interval at
+    ``p == 0`` or ``p == 1`` and under-covers for small ``n`` — exactly this
+    report's regime (GAIA level 3 is 12 tasks). For ``passes`` successes out of
+    ``n`` trials with ``p = passes / n``::
+
+        center = (p + z^2/2n) / (1 + z^2/n)
+        margin = (z / (1 + z^2/n)) * sqrt( p(1-p)/n + z^2/4n^2 )
+
+    returning ``(center - margin, center + margin)`` clamped to ``[0, 1]``.
+
+    ``passes`` may be FRACTIONAL: a macro-averaged pass@k rate over ``n`` tasks
+    has no integer success count, so :func:`paired_arm_summary` passes the
+    effective count ``rate * n`` and ``p`` is recovered exactly. ``passes`` is
+    clamped into ``[0, n]``. ``n <= 0`` returns ``(0.0, 1.0)`` — no data, maximal
+    uncertainty — so the caller never divides by zero.
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    passes = min(max(float(passes), 0.0), float(n))
+    p = passes / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p + z2 / (2.0 * n)) / denom
+    margin = (z / denom) * sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n))
+    return (max(0.0, center - margin), min(1.0, center + margin))
+
+
+def _arm_stats(report: RunReport, k: int) -> dict[str, Any] | None:
+    """Final/peak/drift + Wilson CI at the final-round bed size; ``None`` if empty.
+
+    The CI is a binomial-proportion interval over the arm's final-round task set
+    (its "bed"), treating the final pass@k rate as the proportion — mirroring the
+    paper's own n-dependent CI framing (§7.7). ``passes`` is therefore the
+    effective count ``rate * bed`` (fractional under a macro-averaged rate).
+    """
+    rounds = report.rounds()
+    if not rounds:
+        return None
+    final_round = rounds[-1]
+    bed = len({r.task_id for r in report.results_in(final_round)})
+    final = report.final(k)
+    peak_round, peak = report.peak(k)
+    return {
+        "final": final,
+        "peak": peak,
+        "peak_round": peak_round,
+        "drift": report.drift(k),
+        "bed": bed,
+        "ci": binomial_ci(final * bed, bed),
+        "final_round": final_round,
+    }
+
+
+def paired_arm_summary(
+    report_a: RunReport,
+    report_b: RunReport,
+    *,
+    label_a: str = "global",
+    label_b: str = "ensemble",
+    k: int | None = None,
+) -> str:
+    """Compact markdown comparing two arms, mirroring paper Table 5's columns.
+
+    Per arm: final pass@k, peak pass@k (+round), drift (final - peak), and the
+    95% Wilson CI at the arm's final-round bed size. Below the table: the
+    between-arm delta (``label_b - label_a`` on final pass@k) and a one-line
+    CI-overlap note (overlapping CIs mean the delta is not resolved at these bed
+    sizes — the PAPER-GAP-AUDIT §0 point about small-n visibility). Table 5's
+    ``tokens`` column is optional-if-available: emitted only when a report carries
+    a truthy ``tokens`` attribute, since :class:`RunReport` does not track tokens.
+
+    Consumes :class:`RunReport` instances (not ``to_dict``): the class already
+    exposes final/peak/drift and the per-round task rows, so the bed size and CI
+    read straight off it — the cleaner seam. An empty arm renders ``_no results_``
+    and is skipped in the delta/overlap line. No :class:`RunReport` method is
+    called for its side effects; this is a pure read.
+    """
+    k = k if k is not None else report_a.k
+    a = _arm_stats(report_a, k)
+    b = _arm_stats(report_b, k)
+    tokens_a = getattr(report_a, "tokens", None)
+    tokens_b = getattr(report_b, "tokens", None)
+    show_tokens = bool(tokens_a) or bool(tokens_b)
+
+    header = [
+        "arm",
+        f"final pass@{k}",
+        f"peak pass@{k} (round)",
+        "drift (final-peak)",
+        "95% CI (Wilson)",
+    ]
+    if show_tokens:
+        header.append("tokens")
+    lines = [
+        f"## Paired-arm comparison (pass@{k}, mirrors paper Table 5)",
+        "",
+        "| " + " | ".join(header) + " |",
+        "|" + "---|" * len(header),
+    ]
+
+    def _row(label: str, stats: dict[str, Any] | None, tokens: Any) -> str:
+        if stats is None:
+            cells = [label, "_no results_", "_no results_", "_no results_", "_no results_"]
+        else:
+            lo, hi = stats["ci"]
+            cells = [
+                label,
+                f"{stats['final']:.4f}",
+                f"{stats['peak']:.4f} (r{stats['peak_round']})",
+                f"{stats['drift']:+.4f}",
+                f"[{lo:.4f}, {hi:.4f}] (n={stats['bed']})",
+            ]
+        if show_tokens:
+            cells.append(str(tokens) if tokens else "n/a")
+        return "| " + " | ".join(cells) + " |"
+
+    lines.append(_row(label_a, a, tokens_a))
+    lines.append(_row(label_b, b, tokens_b))
+    lines.append("")
+
+    if a is None or b is None:
+        missing = label_a if a is None else label_b
+        lines.append(
+            f"- between-arm delta / CI overlap: n/a (missing results for {missing})"
+        )
+        lines.append("")
+        return "\n".join(lines)
+
+    delta = b["final"] - a["final"]
+    lo_a, hi_a = a["ci"]
+    lo_b, hi_b = b["ci"]
+    overlap = lo_a <= hi_b and lo_b <= hi_a
+    if overlap:
+        overlap_note = (
+            f"CIs overlap — the {delta:+.4f} delta is NOT resolved at these bed "
+            f"sizes (n_{label_a}={a['bed']}, n_{label_b}={b['bed']})"
+        )
+    else:
+        higher = label_b if lo_b > hi_a else label_a
+        overlap_note = (
+            f"CIs disjoint — {higher}'s CI lies entirely above the other's "
+            f"(the {delta:+.4f} delta is resolved at these bed sizes)"
+        )
+    lines.append(
+        f"- between-arm delta (final pass@{k}, {label_b} - {label_a}): {delta:+.4f}"
+    )
+    lines.append(f"- CI overlap: {overlap_note}")
+    lines.append("")
+    return "\n".join(lines)

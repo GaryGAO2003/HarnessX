@@ -352,6 +352,320 @@ REPO_MANIFEST_SCHEMA_BRIEF = (
     "Never fabricate: only claim what you observed in this session."
 )
 
+# --- Paper App B.1 published prompt text (verbatim; extraction: pypdf, ligature loss possible) ---
+#
+# P1-1 (OPTIMIZATION-PLAN): the paper (docs/assets/paper/HarnessX_Tech_Report.pdf,
+# = arXiv 2606.14249) publishes the AEGIS meta-agent role prompts in Appendix B.1.
+# Extracted per-page with pypdf (poppler unavailable). The prompt blocks render in a
+# monospace/code font, so NO ligatures were dropped: a scan for ligature codepoints
+# (fb00-fb06) and for dropped-ligature words found NONE across all three prompts, so
+# there are ZERO ligature repairs to mark. Preserved verbatim from the pypdf slice:
+# pagination lines (bare page numbers) were stripped, and pypdf's spacing artifacts
+# (e.g. "round ' s", "` code `", "{ % if %}") are kept UN-edited so the constant is
+# a faithful copy of the extraction rather than a hand-cleaned paraphrase.
+#
+# Coverage (paper Appendix B.1, pp.30-34): Planner = FULL; Evolver = published ~60%
+# with 3 author truncations; Critic = published ~70% with 2 author truncations.
+
+#: Planner system_prompt.md, verbatim, FULL (paper App B.1, pp.30-31).
+_PAPER_APP_B1_PLANNER = """\
+# Planner -- Round {{ round }}
+Your goal: write a single ` landscape.md ` that synthesises this round ' s evidence
+into a picture the downstream Evolver can use to freely explore evolution
+directions. You are the cross-trace synthesis layer -- Digesters produced
+per-task overviews; you zoom out and say what ' s really going on.
+## What the landscape should convey
+- Recurring failure modes across this round ' s digests -- your own grouping, not
+forced by exact-string matching.
+- What was tried in previous rounds (journal.md, data/ship_outcomes.json,
+data/rejected_candidates.jsonl, archive/) and which outcomes held up.
+- Tasks that persistently failed across rounds (data/task_history.jsonl) and
+theories about them that have NOT been tried yet.
+- Whether last round ' s ship caused regressions. Read R{{ round }}/regressions.md
+first: it is the deterministic, k-aware list of tasks whose pass-state
+worsened versus the previous round, with the joint-suspect ships from
+R{{ round_minus_1 }} attached. The hit-rate in ship_outcomes.json only counts
+predicted-task improvements, so collateral damage on un-predicted tasks does
+NOT show up there -- regressions.md is the only place it surfaces. If the file
+lists regressions, put them at the top of the landscape (a dedicated
+"## Regressions to address" section), name the responsible ship ' s bucket(s),
+and flag each in unattempted_directions so the Evolver treats them as
+first-class targets.
+- What the reputation signal says about which mutation layers have historically
+yielded (proposed -> shipped, window): {{ reputation_summary }}
+- What scoreboard.json and ship_outcomes.json say about per-bucket hit rates. If
+one bucket has shipped 3+ rounds running with flat or declining hit rate while
+another has never been tried AND the digests point at failures it could
+address, say so: name the neglected bucket and the cluster it would target.
+Do not prescribe WHICH mutation to pick -- point at the evidence and let the
+Evolver decide the shape.
+{ % if round >= 2 %}- Prior Critic ' s strategy_concern, if any. Read
+R{{ round_minus_1 }}/decision.md; if its frontmatter has a non-empty
+strategy_concern, surface it at the TOP of the landscape, quoted verbatim,
+then note whether this round ' s evidence still supports it. The Critic writes
+strategy_concern to reach next round ' s Evolver, but the Evolver only reads
+landscape.md -- you are the relay.
+{ % endif %}
+Be evidence-anchored. When you say "budget exhaustion keeps hitting X tasks",
+cite specific digests (digests/<task_id>.md) or trajectory anchors
+(trajectories/<task>_r0.jsonl#step_N). The Evolver will read what you cite.
+Be selective, not exhaustive. Three coherent directions -> list three. One
+overwhelming signal -> say so. Your reader decides how many candidates to build;
+it benefits from clarity, not volume.
+## Where evidence lives
+Run root has INDEX.md, a catalog. Typical sources: overview.md (this round ' s
+digests + patterns); digests/<task_id>.md (per-task analysis with anchors);
+journal.md (prior memos); data/*.jsonl and data/ship_outcomes.json (cross-round
+ledgers); archive/ (non-shipped manifests). No required reading list -- pull
+what supports the synthesis.
+## Output
+One file via ` write_tool ` . The body is open-ended markdown; the only structural
+expectation is a short YAML frontmatter so the Evolver can find your key
+conclusions:
+---
+round: {{ round }}
+top_themes: # your synthesis, free-text tags
+- <theme-1>
+persistent_failures: # task_ids failed across >=2 rounds
+- <task_id>
+unattempted_directions: # approaches not tried yet per ship_outcomes
+- <short description>
+---
+## Landscape
+<Open narrative. Evidence citations throughout.>"""
+
+#: Evolver system_prompt.md, verbatim, published ~60% (paper App B.1, pp.31-33).
+#: Carries the paper's own 3 truncation markers ([... ... truncated ...]).
+_PAPER_APP_B1_EVOLVER = """\
+# Evolver -- Round {{ round }}
+Your goal: produce concrete evolution candidates whose shipping will raise next
+round ' s benchmark pass rate. You decide how many candidates (K >= 1) -- one
+high-value candidate beats three speculative ones, but if two genuinely
+different directions both have strong evidence, produce both. Every candidate
+must be evidence-driven with citations to raw traces or digests.
+## Your stance
+This role is research, not maintenance. Your value is in creative, rigorous,
+breakthrough-level thinking -- not in iterating on the bucket the pipeline has
+shipped most recently. When evidence points to a structural lever the harness
+has never touched -- a new tool, a runloop parameter, a different processor-hook
+time point -- propose it, even when the bucket has an empty reputation. Do not
+let bucket history, gate-rejection fear, or implementation discomfort narrow
+your search. Follow the evidence.
+[... strategy-concern relay and revert/improve-prior-ship rules truncated ...]
+## Action space is what you can verify exists
+The mutation space is bounded by the runtime, the reachable web, and the
+harness ' s current capability set. When a direction depends on something beyond
+these -- a package, an API endpoint, a tool you assume is installed -- the
+system treats unverified dependencies as hallucinations. You have ` bash ` ,
+` web_search ` , and ` web_fetch ` to confirm a capability exists before writing code
+against it; record the confirmation in ` capability_evidence ` .
+## Build -> verify -> iterate (mandatory for code candidates)
+For any candidate that introduces new executable code, you MUST complete this
+loop IN YOUR SESSION before writing the manifest:
+1. Write the code to your scratch dir.
+2. Verify by actually running it -- not by reasoning about it. Two levels:
+- Level 1 -- unit call works: instantiate the processor/tool, drive the
+async hook, assert the expected state mutation happened.
+- Level 2 -- round-trip reaches the model: a unit call that returns does not
+prove the agent sees the return. Simulate the path from your code to the
+model ' s next input and assert the content survives it (provider serializer
+for tools; the next pipeline stage for processors).
+3. Iterate if verification fails -- fix the bug, or pivot if the environment
+does not support what you assumed. Do NOT hide the failure in a try/except.
+4. Attach the verifying output as ` capability_evidence ` . "I believe this will
+work" is not acceptable; paste the actual command and its output.
+A candidate whose new code has not been observed to work will burn a round ' s
+ship slot for zero flips. Pure prompt-bucket candidates (no code asset) are
+exempt -- the counterfactual gate provides the equivalent smoke check.
+[... reading list and write locations truncated ...]
+## Manifest shape
+Per candidate, emit a manifest at ` {{ candidates_dir }}/C-R{{ round }}-<NN>.md `
+and a scratch dir with the applied ` config.yaml ` .
+---
+candidate_id: C-R{{ round }}-<NN>
+bucket: <prompt|tools|config|processor> # or a list, e.g. [prompt, processor]
+iterates_from: <prior_ship_id> # OPTIONAL -- set for a revert/improve
+capability_evidence: # REQUIRED -- may be empty []
+- type: <python_package|http_endpoint|builtin_tool|filesystem|other>
+claim: "<the capability this candidate depends on>"
+evidence: "<something you OBSERVED this session: command + output snippet>"
+file_changes:
+- {path: <under scratch dir>, action: <create|modify|delete>, diff_summary: "<one line>"}
+predicted_impact:
+tasks_will_unlock: [<ALL_FAIL -> expect >=1 rollout to pass>]
+tasks_will_stabilize: [<PARTIAL_PASS -> expect all rollouts to pass>]
+tasks_at_risk: [<currently >=1 pass -> might regress>]
+attribution_signature: # recommended for tools/processor/config
+type: <tool_call|processor_invocation>
+tool_name: <PascalCase name as registered>
+expected_min_calls: 1
+---
+## Failure Evidence
+At least one trajectory or digest anchor per candidate, e.g.
+` trajectories/abc123_r0.jsonl#step_5 -- what went wrong here ` .
+## Root Cause
+## Targeted Fix
+Name explicitly WHICH hooks / event fields / state slots / config entries the
+mutation touches, so the Critic can judge interaction with existing components.
+## Why this won ' t break tasks_at_risk
+[... loader ground truth, YAML templates, reference-implementation table, and
+common-hallucination checklist truncated ...]"""
+
+#: Critic system_prompt.md, verbatim, published ~70% (paper App B.1, pp.33-34).
+#: Carries the paper's own 2 truncation markers ([... ... truncated ...]).
+_PAPER_APP_B1_CRITIC = """\
+# Critic -- Round {{ round }}
+Your goal has two parts, and both matter.
+## Part 1 -- Per-candidate verdict
+Pick the single candidate (or multiple bucket-disjoint candidates) whose
+shipping is most likely to raise next round ' s pass rate without hurting it. If
+none qualifies, no-op -- shipping a bad candidate is worse than nothing.
+Every verdict MUST explicitly address candidate-vs-config interaction. Read the
+candidate ' s ` ## Targeted Fix ` (which hooks / event fields / state slots it
+touches) AND the current HarnessConfig. Answer in your verdict: does this
+candidate ' s mutation surface overlap with any processor, tool, prompt clause, or
+config kwarg already in the parent config? If yes, argue whether the overlap is
+(a) intentional and safe (the new component supersedes the old one, which the
+candidate ' s applied YAML has removed) or (b) an accidental collision and grounds
+for rejection. A verdict that does not address this is incomplete and counts as
+ask-more.
+[... round-trip (Level-2) evidence check for tool/processor candidates truncated ...]
+## Part 2 -- Portfolio audit
+Even when every individual candidate is acceptable, step back and look at the
+pattern across rounds (scoreboard.json, data/ship_outcomes.json):
+- For any lever item shipped in >=2 of the last 3 rounds with cumulative
+hit_rate < 0.4, do NOT ship a candidate touching that lever again; flag it as
+strategy_concern. A single-round miss is likely k-sampling noise; only
+persistence across rounds is signal.
+- Is there a bucket or cluster the Evolver has never touched, while a failure
+pattern in digests/ suggests it is the right lever? Flag it.
+- Did this round ' s regressions.md list any regressed task? The Evolver was
+required either to ship a candidate addressing each regression or to write a
+"## Why this regression is acceptable" section. Reject the round (no-op) if
+neither path was taken, citing the missed task IDs.
+Record strategy_concern in decision.md ' s frontmatter only when the evidence is
+concrete: name the bucket, the round range, the hit rate, the failing tasks.
+Next round ' s Planner relays it to the Evolver. This is how you challenge the
+Evolver ' s strategy, not just its candidates.
+[... independence rule, available-to-read guide, ask_evolver, and loader ground
+truth truncated ...]
+## Output
+For each candidate, write ` verdicts/V-<candidate_id>.md ` :
+---
+candidate_id: <C-R{{ round }}-NN>
+verdict: <accept|reject|ask-more>
+evidence_anchors:
+- trajectories/<file>#step_N
+---
+## Reasoning
+<Why this verdict. Cite the anchors. 2-4 short paragraphs.>
+After all verdicts, write ` decision.md ` :
+---
+round: {{ round }}
+decision_type: <ship|no_op>
+ship_ranking: # candidates to ship, in priority order
+- candidate_id: <C-R{{ round }}-NN>
+strategy_concern: | # OPTIONAL -- fill only when the audit surfaces one
+<one concrete paragraph; cite ship_outcomes / task_history anchors>
+---
+## Reasoning
+<3-6 bullets, one per verdict file, plus one bullet for any strategy_concern.>
+Multi-ship: Stage 4 ships every listed candidate in order but skips any whose
+bucket was already claimed by an earlier-ranked ship, so bucket-disjoint
+candidates attacking orthogonal failure modes can ship together. Nothing ships
+unless decision.md parses cleanly."""
+
+#: --aegis-prompts. paper (default, paper-first house rule) drives the LLM roles
+#: with the paper's published App B.1 prompts (runtime-adapted only where our
+#: JSON/manifest contract requires); ours keeps the byte-identical OURS constants
+#: as the ablation arm. Only affects llm-role modes and the always-LLM Evolver.
+AEGIS_PROMPTS_MODES = ("paper", "ours")
+DEFAULT_AEGIS_PROMPTS = "paper"
+
+#: Marker inserted where a paper truncation is filled by OURS bridging text.
+_PAPER_TRUNCATION_BRIDGE_TAG = "[...paper truncation — OURS bridge]"
+
+
+def _apply_truncation_bridges(text: str, bridges: tuple) -> str:
+    """Replace each verbatim paper truncation marker with a marked OURS bridge.
+
+    ``bridges`` is a tuple of ``(paper_marker, ours_text)``; each marker is the
+    paper's own ``[... ... truncated ...]`` line and is replaced by
+    ``_PAPER_TRUNCATION_BRIDGE_TAG`` + the OURS text that covers the same ground.
+    A marker absent from ``text`` is a no-op (guarded by the P1-1 tests, which pin
+    the resulting bridge count and the absence of residual truncation markers).
+    """
+    for marker, ours in bridges:
+        text = text.replace(marker, f"{_PAPER_TRUNCATION_BRIDGE_TAG} {ours}")
+    return text
+
+
+#: Evolver truncation bridges (3), each OURS text covering the truncated section.
+_PAPER_EVOLVER_BRIDGES = (
+    ('[... strategy-concern relay and revert/improve-prior-ship rules truncated ...]', "The Planner relays any prior-round Critic strategy_concern to you through the planner brief below; when it names a lever with a weak cumulative hit rate, do not re-ship that lever. To revert or improve a prior ship, set iterates_from to that ship's candidate id and say why this round's evidence changes the call."),
+    ('[... reading list and write locations truncated ...]', "This runtime hands you the round's evidence directly in the injected planner brief (per-task digests, prior-ship history, and any active regressions); you do not fetch a separate reading list. Write the applied config.yaml (and any tools/processors/templates it declares) into your output_dir scratch exactly as the manifest instructions in this brief require."),
+    ('[... loader ground truth, YAML templates, reference-implementation table, and\ncommon-hallucination checklist truncated ...]', "The machine-readable manifest shape, the loader's accepted keys, and this runtime's anti-hallucination rules are pinned in the manifest_instructions and decision_contract_requirement fields of this brief; follow those exactly, verify every capability you depend on, and never claim a capability you did not observe."),
+)
+
+#: Critic truncation bridges (2).
+_PAPER_CRITIC_BRIDGES = (
+    ('[... round-trip (Level-2) evidence check for tool/processor candidates truncated ...]', "For any tools or processor candidate, require declared Level-2 round-trip evidence — proof that the tool/processor return survives provider serialization and actually reaches the model. The deterministic gate rejects a code candidate lacking it at ROUNDTRIP_L2, so rank such a candidate last or reject it and say the Level-2 evidence is missing."),
+    ('[... independence rule, available-to-read guide, ask_evolver, and loader ground\ntruth truncated ...]', "Judge each candidate independently on its own manifest and the shared round evidence, not on the other candidates' fate. You may request AT MOST ONE revision (see the output contract below). Base every judgement only on the manifests and evidence provided in this runtime."),
+)
+
+#: OURS runtime output-format tails. The paper prompts tell the model to WRITE
+#: files (landscape.md / verdicts+decision.md); our runtime instead parses one
+#: JSON object, so paper mode appends this machine-readable contract. The paper's
+#: own output wording is kept above and explicitly takes precedence; the tail only
+#: pins the JSON shape our parser (_parse_plan_json / _parse_review_json) requires.
+_PAPER_PLANNER_OUTPUT_CONTRACT_TAIL = (
+    '\n'
+    '\n'
+    '## OUTPUT FORMAT (OURS runtime contract)\n'
+    "The paper's own output instructions above take precedence in wording and intent. This runtime cannot read a landscape.md file written via write_tool; it parses a SINGLE JSON object from your reply that encodes the same synthesis as up to K_t candidate briefs. So instead of writing a file, return ONLY this JSON object (no prose, no markdown fences):\n"
+    '{\n'
+    '  "briefs": [\n'
+    '    {\n'
+    '      "buckets": ["<1+ of: prompt, tools, config, processor>"],\n'
+    '      "task_ids": ["<task ids taken ONLY from this round\'s summaries>"],\n'
+    '      "rationale": "<one evidence-anchored hypothesis for this single candidate; must be non-empty>"\n'
+    '    }\n'
+    '  ],\n'
+    '  "landscape_notes": "<short synthesis of what was tried and which edit classes remain untried>"\n'
+    '}\n'
+    'Emit between 0 and K_t briefs; an empty "briefs": [] is legitimate when nothing is addressable by a harness edit this round. Never invent task ids or edit classes. Return the JSON object and nothing else.'
+)
+
+_PAPER_CRITIC_OUTPUT_CONTRACT_TAIL = (
+    '\n'
+    '\n'
+    '## OUTPUT FORMAT (OURS runtime contract)\n'
+    "The paper's own output instructions above (verdicts/*.md and decision.md) take precedence in wording and intent. This runtime cannot read files you write; it parses a SINGLE JSON object from your reply that is the machine-readable equivalent of that decision. So in ADDITION to the reasoning described above, return ONLY this JSON object (no prose, no markdown fences):\n"
+    '{\n'
+    '  "ranked_candidate_ids": ["<candidate ids best-first; a permutation of the candidates you did NOT reject>"],\n'
+    '  "verdicts": [{"candidate_id": "<id>", "rank": <1-based integer>, "reasons": ["<short justification>"]}],\n'
+    '  "rejections": [{"candidate_id": "<id>", "reason": "<why it must not be ranked>"}],\n'
+    '  "revision_requests": [{"candidate_id": "<id>", "reason": "<what is wrong>", "instructions": "<concrete fix for the Evolver>"}],\n'
+    '  "no_op": <true to stop the whole round, else false>,\n'
+    '  "no_op_reasons": ["<non-empty when no_op is true>"],\n'
+    '  "strategy_concerns": ["<0+ portfolio-level observations>"]\n'
+    '}\n'
+    'Use ONLY the candidate ids shown; never invent one. Emit AT MOST ONE revision request (paper section 4.3). Return the JSON object and nothing else.'
+)
+
+#: Assembled paper-mode prompts actually fed to the roles in --aegis-prompts paper.
+#: Planner = full verbatim body + OURS JSON tail; Critic = bridged body + OURS JSON
+#: tail; Evolver guidance = bridged body (merged into the candidate contract brief,
+#: where our existing OURS manifest/decision text already covers output shape).
+_PAPER_PLANNER_PROMPT = _PAPER_APP_B1_PLANNER + _PAPER_PLANNER_OUTPUT_CONTRACT_TAIL
+_PAPER_CRITIC_PROMPT = (
+    _apply_truncation_bridges(_PAPER_APP_B1_CRITIC, _PAPER_CRITIC_BRIDGES)
+    + _PAPER_CRITIC_OUTPUT_CONTRACT_TAIL
+)
+_PAPER_EVOLVER_GUIDANCE = _apply_truncation_bridges(
+    _PAPER_APP_B1_EVOLVER, _PAPER_EVOLVER_BRIDGES
+)
+
 
 # ---------------------------------------------------------------------------
 # --force-gate plumbing probe (TEMPORARY, default-off)
@@ -914,8 +1228,15 @@ def _build_candidate_contract(
     target_variant: str,
     planner_brief: Mapping[str, Any],
     decision_feedback: str | None = None,
+    paper_evolver_guidance: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the ``candidate_contract`` our recipe injects into ``TASK.md``.
+
+    P1-1: in ``--aegis-prompts paper`` the recipe passes ``paper_evolver_guidance``
+    — the paper's published App B.1 Evolver prompt, merged with OURS bridges over
+    its truncations — which is added to the brief under ``paper_evolver_guidance``.
+    It is ``None`` in ``ours`` mode, and when ``None`` the brief is byte-identical
+    to the pre-P1-1 output.
 
     All injection is recipe-layer: the contract is carried on
     :class:`~recipe.gaia_evolver.variant_pool_meta_agent.VariantPoolMetaAgent`
@@ -946,6 +1267,11 @@ def _build_candidate_contract(
             "time you MUST end by writing `config.yaml` (a real change) or an "
             "explicit `cp` no-op.\n\n" + decision_feedback
         )
+    # P1-1 paper mode: merge the paper's App B.1 Evolver guidance into the brief
+    # the meta-agent (the always-LLM Evolver) reads. Absent in ours mode, keeping
+    # the brief byte-identical to the pre-P1-1 output.
+    if paper_evolver_guidance:
+        brief["paper_evolver_guidance"] = paper_evolver_guidance
     return {
         # The id the meta-agent must use verbatim is the repo-gate-safe ALIAS
         # of our paper-shape slot id: the repo's own validate_workflow scans
@@ -1055,6 +1381,7 @@ def _composed_pipeline_adapter(
     critic_mode: str,
     *,
     all_deterministic_literal: str,
+    prompts_mode: str,
 ) -> str:
     """One truthful ``candidate_pipeline_adapter`` string across all three roles.
 
@@ -1065,14 +1392,19 @@ def _composed_pipeline_adapter(
     not byte-identical to that literal, so the ruling is: keep the literal for the
     all-deterministic case, use the composed form only when a role is ``llm``).
     The Evolver is always the LLM MetaAgent, echoed as the ``+llm_metaagent_evolver``
-    suffix exactly like the old literal.
+    suffix exactly like the old literal. P1-1: when ANY of the three roles is
+    ``llm`` the active ``--aegis-prompts`` mode is appended as
+    ``,prompts=<paper|ours>``. The all-deterministic literal is left UNCHANGED
+    (no prompts suffix): its byte-identity is preserved regardless of the prompts
+    flag — the always-LLM Evolver's prompt mode is still recorded, but in the
+    audit dict's dedicated ``aegis_prompts`` field rather than in this literal.
     """
     modes = (digester_mode, planner_mode, critic_mode)
     if all(mode == "deterministic" for mode in modes):
         return all_deterministic_literal
     return (
         f"digester={digester_mode},planner={planner_mode},"
-        f"critic={critic_mode}+llm_metaagent_evolver"
+        f"critic={critic_mode}+llm_metaagent_evolver,prompts={prompts_mode}"
     )
 
 
@@ -1231,6 +1563,7 @@ async def _evolve_candidate_with_retry(
     planner_brief: Mapping[str, Any],
     base_evolve_kwargs: Mapping[str, Any],
     max_retries: int,
+    paper_evolver_guidance: str | None = None,
 ) -> _EvolveOutcome:
     """Run ``slot_agent.evolve``; on a *no-config* outcome, retry with feedback.
 
@@ -1260,6 +1593,7 @@ async def _evolve_candidate_with_retry(
             target_variant=target_variant,
             planner_brief=planner_brief,
             decision_feedback=decision_history[-1] if decision_history else None,
+            paper_evolver_guidance=paper_evolver_guidance,
         )
         # ``evolve``'s signature is upstream and cannot take the contract, so we
         # set it on the (subclass) agent immediately before the call. Each
@@ -2063,6 +2397,10 @@ class _LLMPlanner:
     provider: Any
     k_t: int
     fallback: _DeterministicPlanner
+    #: P1-1 --aegis-prompts: this role's system prompt. Defaults to the OURS
+    #: constant so every existing construction stays byte-identical; the recipe
+    #: passes ``_PAPER_PLANNER_PROMPT`` in ``paper`` mode.
+    prompt: str = _LLM_PLANNER_PROMPT
 
     async def plan(
         self,
@@ -2187,7 +2525,7 @@ class _LLMPlanner:
         retry_error: str | None,
     ) -> str:
         parts = [
-            _LLM_PLANNER_PROMPT,
+            self.prompt,
             f"\n\nROUND EVIDENCE:\n{summary}",
         ]
         if truncation:
@@ -2484,6 +2822,10 @@ class _LLMCritic:
     provider: Any
     fallback: DeterministicCritic
     revision_sink: dict[str, dict[str, str]] | None = None
+    #: P1-1 --aegis-prompts: this role's system prompt. Defaults to the OURS
+    #: constant (byte-identical construction); the recipe passes
+    #: ``_PAPER_CRITIC_PROMPT`` in ``paper`` mode.
+    prompt: str = _LLM_CRITIC_PROMPT
 
     async def review(
         self,
@@ -2623,7 +2965,7 @@ class _LLMCritic:
         retry_error: str | None,
     ) -> str:
         parts = [
-            _LLM_CRITIC_PROMPT,
+            self.prompt,
             f"\n\nROUND PORTFOLIO + EVIDENCE:\n{summary}",
         ]
         if truncation:
@@ -2999,6 +3341,17 @@ class VariantPoolRecipe:
                 f"aegis_critic must be one of {AEGIS_CRITIC_MODES}, "
                 f"got {self.aegis_critic!r}"
             )
+        # --aegis-prompts (P1-1): ``paper`` (default, paper-first house rule)
+        # drives the LLM Planner/Critic and the always-LLM Evolver with the paper's
+        # published App B.1 prompts (runtime-adapted only where our JSON/manifest
+        # contract requires); ``ours`` keeps the byte-identical OURS constants as
+        # the ablation arm.
+        self.aegis_prompts = str(getattr(args, "aegis_prompts", DEFAULT_AEGIS_PROMPTS))
+        if self.aegis_prompts not in AEGIS_PROMPTS_MODES:
+            raise ValueError(
+                f"aegis_prompts must be one of {AEGIS_PROMPTS_MODES}, "
+                f"got {self.aegis_prompts!r}"
+            )
         # Algorithm 1's alpha: explicit flag wins; otherwise mode-dependent
         # default (deterministic digester -> legacy 1.0, llm -> OURS 0.5).
         self.actionability_threshold = _resolve_actionability_threshold(
@@ -3364,6 +3717,11 @@ class VariantPoolRecipe:
             provider=provider,
             k_t=self.candidates_per_round,
             fallback=deterministic,
+            prompt=(
+                _PAPER_PLANNER_PROMPT
+                if self.aegis_prompts == "paper"
+                else _LLM_PLANNER_PROMPT
+            ),
         )
 
     @property
@@ -3395,6 +3753,11 @@ class VariantPoolRecipe:
             provider=provider,
             fallback=deterministic,
             revision_sink=self._round_revision_requests,
+            prompt=(
+                _PAPER_CRITIC_PROMPT
+                if self.aegis_prompts == "paper"
+                else _LLM_CRITIC_PROMPT
+            ),
         )
 
     @property
@@ -3553,6 +3916,9 @@ class VariantPoolRecipe:
                 ),
                 base_evolve_kwargs=base_kwargs,
                 max_retries=self.evolve_retry,
+                paper_evolver_guidance=(
+                    _PAPER_EVOLVER_GUIDANCE if self.aegis_prompts == "paper" else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - adapter converts to ProposalFailure
             self._candidate_meta[slot_id] = {
@@ -4781,6 +5147,7 @@ class VariantPoolRecipe:
                 "candidate_pipeline_adapter": (
                     # A3 — one composed string across all three LLM-AEGIS roles;
                     # byte-identical to the pre-A1 literal when all deterministic.
+                    # P1-1: ``,prompts=<mode>`` is appended only when a role is llm.
                     _composed_pipeline_adapter(
                         self.aegis_digester,
                         self.aegis_planner,
@@ -4788,9 +5155,24 @@ class VariantPoolRecipe:
                         all_deterministic_literal=(
                             "deterministic Digester/Planner/Critic fallbacks + MetaAgent Evolver"
                         ),
+                        prompts_mode=self.aegis_prompts,
                     )
                     if self.candidate_mode == "paper"
                     else "legacy MetaAgent single proposal"
+                ),
+                # P1-1: prompts mode is ALSO recorded as a dedicated field so it is
+                # visible even in all-deterministic runs (where the always-LLM
+                # Evolver still uses the selected prompt but the composed string
+                # above keeps its byte-identical literal).
+                "aegis_prompts": (
+                    self.aegis_prompts if self.candidate_mode == "paper" else None
+                ),
+                "aegis_prompts_provenance": (
+                    "paper: LLM roles + Evolver use the paper's App B.1 published "
+                    "prompts (runtime-adapted only for our JSON/manifest contract); "
+                    "ours: byte-identical OURS constants (P1-1)"
+                    if self.candidate_mode == "paper"
+                    else None
                 ),
                 "llm_aegis_reproduction": self._llm_aegis_reproduction,
                 "actionability_threshold": (
@@ -4972,6 +5354,7 @@ def _build_experiment_lock(
                     all_deterministic_literal=(
                         "deterministic_evidence_digester_planner_critic+llm_metaagent_evolver"
                     ),
+                    prompts_mode=str(getattr(args, "aegis_prompts", DEFAULT_AEGIS_PROMPTS)),
                 )
                 if paper_mode
                 else "legacy_metaagent_single_proposal_per_active_variant"
@@ -5248,6 +5631,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "regression veto still applies. Prompt is OURS. Only when Digester, "
             "Planner AND Critic are all llm does llm_aegis_reproduction flip to "
             "True; the audit's per-role Critic name flips to MetaModel_llm_critic."
+        ),
+    )
+    parser.add_argument(
+        "--aegis-prompts",
+        choices=AEGIS_PROMPTS_MODES,
+        default=DEFAULT_AEGIS_PROMPTS,
+        help=(
+            "Which prompt text drives the LLM meta-agent roles (P1-1; OPTIMIZATION-"
+            "PLAN F4). paper (default, paper-first house rule) = the paper's own "
+            "published Appendix B.1 prompts: the Planner in FULL, the Evolver "
+            "(~60% published, our bridges across its 3 truncations) merged into the "
+            "candidate contract, and the Critic (~70% published, bridges across its "
+            "2 truncations); each is runtime-adapted ONLY where our JSON/manifest "
+            "output contract requires (an appended OUTPUT FORMAT tail), the paper "
+            "body kept verbatim. ours = today's byte-identical OURS reconstructions "
+            "(the ablation arm). Only affects llm-role modes and the always-LLM "
+            "Evolver; the provenance string records ',prompts=<mode>' whenever any "
+            "role is llm, and the audit dict records it unconditionally."
         ),
     )
     parser.add_argument(
