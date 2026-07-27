@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -197,6 +198,24 @@ def render_report_md(report: ReplayReport, *, config_path: Path | None = None) -
     return "\n".join(lines)
 
 
+def _replay_timeout_cap_s() -> float:
+    """Hard cap for the replay smoke, default 20s (historical behavior).
+
+    Single source of truth for the whole replay chain (``agent.py`` imports
+    this). There were TWO hardcoded 20s clamps — ``agent.py`` (fixed first)
+    and this module's ``run_replay_gate_strict`` — so the env override
+    silently never reached the smoke (runs/a1pilot: elapsed 20.0s under a
+    120s cap). ``HARNESSX_REPLAY_TIMEOUT_CAP_S`` raises the cap; invalid or
+    non-positive values fall back to 20.
+    """
+    raw = os.environ.get("HARNESSX_REPLAY_TIMEOUT_CAP_S", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 20.0
+    return value if value > 0 else 20.0
+
+
 async def run_replay_gate_strict(
     cfg: "HarnessConfig",
     scratch_dir: Path,
@@ -243,7 +262,7 @@ async def run_replay_gate_strict(
         replay_model,
         max_steps=max_steps if max_steps is not None else 2,
         max_cost_usd=max_cost_usd,
-        timeout_s=min(timeout_s, 20.0),
+        timeout_s=min(timeout_s, _replay_timeout_cap_s()),
     )
 
     audit = scratch_dir / "REPLAY.md"

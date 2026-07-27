@@ -67,21 +67,10 @@ _DEFAULT_MAX_STEPS = 500
 # ---------------------------------------------------------------------------
 
 
-def _replay_timeout_cap_s() -> float:
-    """Hard cap applied to ``evolve``'s ``replay_timeout_s``, default 20s.
-
-    Historically the caller's value was silently clamped to 20s. That default
-    is kept byte-identical, but slower providers (e.g. DeepSeek in thinking
-    mode) time the synthetic replay smoke out on latency alone, turning the
-    gate into a lottery — set ``HARNESSX_REPLAY_TIMEOUT_CAP_S`` to raise the
-    cap explicitly. Invalid or non-positive values fall back to 20.
-    """
-    raw = os.environ.get("HARNESSX_REPLAY_TIMEOUT_CAP_S", "")
-    try:
-        value = float(raw)
-    except ValueError:
-        return 20.0
-    return value if value > 0 else 20.0
+# Env-gated replay-smoke cap; single source of truth lives in replay.py
+# (the second, downstream 20s clamp — see runs/a1pilot postmortem). Re-exported
+# here because evolve() clamps with it and tests import it from this module.
+from .replay import _replay_timeout_cap_s  # noqa: E402
 
 
 class _MetaAgentSandboxProvider:

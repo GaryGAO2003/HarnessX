@@ -33,3 +33,20 @@ def test_invalid_or_nonpositive_values_fall_back_to_20s(
 ) -> None:
     monkeypatch.setenv("HARNESSX_REPLAY_TIMEOUT_CAP_S", bad)
     assert _replay_timeout_cap_s() == 20.0
+
+
+def test_no_hardcoded_20s_clamp_survives_anywhere_in_the_chain() -> None:
+    """runs/a1pilot postmortem: a SECOND 20s clamp in replay.py silently
+    re-clamped what agent.py passed through, so the env cap never reached the
+    smoke (REPLAY_FAIL elapsed 20.0s under a 120s cap). Pin both modules."""
+    from pathlib import Path
+
+    import harnessx.meta_harness.agent as agent_mod
+    import harnessx.meta_harness.replay as replay_mod
+
+    agent_src = Path(agent_mod.__file__).read_text(encoding="utf-8")
+    replay_src = Path(replay_mod.__file__).read_text(encoding="utf-8")
+    assert "min(replay_timeout_s, 20.0)" not in agent_src
+    assert "min(timeout_s, 20.0)" not in replay_src
+    # Single source of truth lives in replay; agent re-exports it.
+    assert replay_mod._replay_timeout_cap_s is _replay_timeout_cap_s

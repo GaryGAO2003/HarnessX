@@ -650,7 +650,9 @@ _PAPER_CRITIC_OUTPUT_CONTRACT_TAIL = (
     '  "no_op_reasons": ["<non-empty when no_op is true>"],\n'
     '  "strategy_concerns": ["<0+ portfolio-level observations>"]\n'
     '}\n'
-    'Use ONLY the candidate ids shown; never invent one. Emit AT MOST ONE revision request (paper section 4.3). Return the JSON object and nothing else.'
+    'Use ONLY the candidate ids shown; never invent one. Emit AT MOST ONE revision request (paper section 4.3). '
+    'In repo manifest mode, Level-2 round-trip evidence for tool/processor candidates is MACHINE-CERTIFIED downstream at the deterministic gate from the candidate\'s real evaluation trajectories (deviation M-22); do NOT reject a candidate solely because declared Level-2 evidence is missing — record it as a strategy concern instead. '
+    'Return the JSON object and nothing else.'
 )
 
 #: Assembled paper-mode prompts actually fed to the roles in --aegis-prompts paper.
@@ -2753,7 +2755,12 @@ _LLM_CRITIC_PROMPT = (
     "MOST ONE revision request (paper section 4.3). `ranked_candidate_ids` must be "
     "a permutation of the candidates you did not reject (rank every non-rejected "
     "candidate, none twice). Base every judgement only on the manifests and "
-    "evidence shown. Return the JSON object and nothing else."
+    "evidence shown. In repo manifest mode, Level-2 round-trip evidence for "
+    "tool/processor candidates is MACHINE-CERTIFIED downstream at the "
+    "deterministic gate from the candidate's real evaluation trajectories "
+    "(deviation M-22); do NOT reject a candidate solely because declared Level-2 "
+    "evidence is missing — record it as a strategy concern instead. "
+    "Return the JSON object and nothing else."
 )
 
 
