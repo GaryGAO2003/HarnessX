@@ -120,7 +120,13 @@ from benchmarks.gaia.harness import make_gaia_builder_gpt5
 from benchmarks.gaia.task import GAIATask, load_gaia_tasks, load_gaia_tasks_from_json
 
 # The C1 engine and its offline components (SPEC stage A/C1).
-from experiments.variant_pool.engine import DEFAULT_MIN_FORK, DEFAULT_PATIENCE, RoundResult, VariantPoolEngine
+from experiments.variant_pool.engine import (
+    DEFAULT_MIN_FORK,
+    DEFAULT_PATIENCE,
+    SHIP_POLICIES,
+    RoundResult,
+    VariantPoolEngine,
+)
 from experiments.variant_pool.candidate_pipeline import (
     CandidateBrief,
     CandidatePipeline,
@@ -208,6 +214,12 @@ FORCE_GATE_MODES = ("off", "apply", "fork")
 #: :func:`_l2_certifying_gate`.
 L2_CERT_MODES = ("auto", "off")
 DEFAULT_L2_CERT = "auto"
+
+#: --ship-policy — round-settlement policy (M-17, SPEC §7.14). ``first_wins``
+#: (default) is the Algorithm-1 reading and byte-identical to the pre-M-17
+#: engine; ``bucket_disjoint`` is the App B.1 (p.34) ranked multi-ship arm. The
+#: allowed set is owned by :data:`experiments.variant_pool.engine.SHIP_POLICIES`.
+DEFAULT_SHIP_POLICY = "first_wins"
 
 #: The pass-marker replay.py writes as the first line of ``REPLAY.md`` on a
 #: passing smoke (``harnessx/meta_harness/replay.py`` ``render_report_md`` ->
@@ -3426,6 +3438,14 @@ class VariantPoolRecipe:
             raise ValueError(
                 f"l2_cert must be one of {L2_CERT_MODES}, got {self.l2_cert!r}"
             )
+        # --ship-policy: round settlement (M-17, SPEC §7.14). ``first_wins``
+        # (default) keeps the Algorithm-1 first-wins break byte-identical;
+        # ``bucket_disjoint`` enables App B.1 ranked multi-ship in the engine.
+        self.ship_policy = str(getattr(args, "ship_policy", DEFAULT_SHIP_POLICY))
+        if self.ship_policy not in SHIP_POLICIES:
+            raise ValueError(
+                f"ship_policy must be one of {SHIP_POLICIES}, got {self.ship_policy!r}"
+            )
         # --aegis-digester: Phase A1. ``deterministic`` (default) keeps the
         # byte-identical _EvidenceDigester; ``llm`` model-backs the Digester role.
         self.aegis_digester = str(getattr(args, "aegis_digester", DEFAULT_AEGIS_DIGESTER))
@@ -3574,6 +3594,7 @@ class VariantPoolRecipe:
             retirement_metric=retirement_metric,
             max_candidates_per_variant=self.candidates_per_round,
             record_selected_results=self.candidate_mode != "paper",
+            ship_policy=self.ship_policy,
         )
 
     # ------------------------------------------------------------------
@@ -5340,6 +5361,51 @@ class VariantPoolRecipe:
 # ---------------------------------------------------------------------------
 
 
+def _maybe_add_step_countdown(config: Any, mode: str) -> Any:
+    """Append a ``StepCountdownProcessor`` to the deployed H0 config when ``mode == 'on'``.
+
+    Config-level addition only — ``benchmarks/`` is never touched and H0 stays
+    byte-identical when off (the *same* object is returned unchanged). When on, the
+    processor is serialized to a ``_target_`` dict and appended to
+    ``config.processors`` so candidates authored FROM the deployed config inherit
+    it with no special handling (each candidate is a full config built from this
+    one).
+    """
+    if mode == "off":
+        return config
+    if mode != "on":
+        raise ValueError(f"--step-countdown must be 'off' or 'on', got {mode!r}")
+    import dataclasses as _dcs
+
+    from harnessx.core.harness import _serialize_processor
+    from harnessx.processors.control.step_countdown import StepCountdownProcessor
+
+    proc_dict = _serialize_processor(StepCountdownProcessor())
+    if not proc_dict:
+        return config
+    return _dcs.replace(config, processors=[*config.processors, proc_dict])
+
+
+def _step_countdown_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--step-countdown``.
+
+    Same pattern as ``--force-gate`` / ``--ship-policy``: ``Hyperparams`` is a
+    frozen dataclass and ``experiment_lock.py`` must not be modified, so a
+    non-default mode is recorded as a provenance warning. Returns ``None`` for
+    ``off`` (a default run's lock stays byte-identical); returns the warning
+    string for ``on``.
+    """
+    if mode == "off":
+        return None
+    return (
+        f"step_countdown={mode} ENABLED (run_variant_pool composition-native step "
+        "budget render, mirrors smolagents' per-turn remaining-step count): a "
+        "StepCountdownProcessor was appended to the deployed H0 config, so the frozen "
+        "h0.config_sha256 reflects the added processor. The H0 processor DEFAULTS are "
+        "unchanged and an off run's config + lock stay byte-identical"
+    )
+
+
 def _build_experiment_lock(
     *,
     args: Any,
@@ -5412,6 +5478,31 @@ def _build_experiment_lock(
             "settlement chain ran on real data but the resulting scores are NOT "
             "measurements"
         )
+
+    # --ship-policy provenance (M-17, SPEC §7.14). Like --force-gate, Hyperparams
+    # is a frozen dataclass we must not extend, so the byte-safe record for a
+    # non-default policy is a provenance note (persisted + surfaced by readers).
+    # first_wins (default) emits nothing, so a default run's lock stays
+    # byte-identical. Unlike force_gate this is NOT a taint — bucket_disjoint is a
+    # faithful App B.1 arm — but it must be recorded because it changes settlement
+    # semantics and comparability with default-policy runs.
+    ship_policy_mode = str(getattr(args, "ship_policy", DEFAULT_SHIP_POLICY))
+    if ship_policy_mode != DEFAULT_SHIP_POLICY:
+        warnings.append(
+            f"ship_policy={ship_policy_mode} (M-17, App B.1 p.34 ranked multi-ship): "
+            "round settlement ships every bucket-disjoint candidate in ranked order "
+            "instead of the default Algorithm-1 first-wins single ship; a second "
+            "same-variant APPLY is skipped as an unreconstructable whole-config merge "
+            "and recorded in the audit. Not a taint, but not comparable byte-for-byte "
+            "with a first_wins run"
+        )
+
+    # --step-countdown provenance. Same byte-safe pattern as --force-gate /
+    # --ship-policy: recorded as a provenance warning only when enabled, so an
+    # ``off`` run's lock stays byte-identical.
+    _sc_warn = _step_countdown_provenance(str(getattr(args, "step_countdown", "off")))
+    if _sc_warn:
+        warnings.append(_sc_warn)
 
     return ExperimentLock(
         experiment_id=run_tag,
@@ -5584,6 +5675,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--level", type=int, default=0, help="GAIA level (1/2/3); 0 = all.")
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS, help=f"Per-task step cap. Default: {MAX_STEPS}.")
     parser.add_argument(
+        "--step-countdown",
+        choices=("off", "on"),
+        default="off",
+        help=(
+            "Inject a refreshed, model-visible step-countdown line before each model "
+            "call (smolagents-style remaining-step render) so the worker outputs a "
+            "FINAL ANSWER before the step budget is exhausted. 'off' (default) keeps H0 "
+            "byte-identical; 'on' appends a StepCountdownProcessor to the deployed config "
+            "(candidates inherit it) and records a provenance warning in the lock."
+        ),
+    )
+    parser.add_argument(
         "--concurrency",
         type=int,
         default=PAPER_CONCURRENCY,
@@ -5690,6 +5793,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "the output does not survive. Only fires for --manifest-mode repo paper "
             "candidates; the paper manifest arm is untouched. off = today's built-in "
             "declared-only stage 4, byte-identical. Recorded as deviation M-22."
+        ),
+    )
+    parser.add_argument(
+        "--ship-policy",
+        choices=SHIP_POLICIES,
+        default=DEFAULT_SHIP_POLICY,
+        help=(
+            "Round-settlement policy (M-17, SPEC §7.14). first_wins (default) = "
+            "the Algorithm-1 reading (paper p.9): the first deterministic "
+            "APPLY/FORK in a variant's ranked queue ships, the rest are skipped; "
+            "byte-identical to the pre-M-17 engine. bucket_disjoint = the App B.1 "
+            "reading (paper p.34): ship every ranked candidate in order, skipping "
+            "any whose edit bucket (prompt/tools/config/processor) was already "
+            "claimed this round, so bucket-disjoint candidates on different "
+            "settlement targets (one in-place APPLY + FORK children) ship "
+            "together. A second APPLY to an already-applied variant is skipped as "
+            "an unreconstructable whole-config merge (our candidates are complete "
+            "config.yaml files, not diffs) and that skip is recorded in the audit "
+            "— the honest reconstruction of the paper's Alg.1-vs-App-B.1 double "
+            "semantics. Non-default is noted in experiment.lock provenance."
         ),
     )
     parser.add_argument(
@@ -5861,6 +5984,11 @@ def setup(args: Any, run_dir: Path) -> dict[str, Any]:
         _judge_dict = _serialize_processor(LLMJudgeProcessor(judge_model=args.meta_model))
         if _judge_dict:
             original_base = _dcs.replace(original_base, processors=[*original_base.processors, _judge_dict])
+
+    # --step-countdown (default off): additively append the countdown processor to
+    # the deployed config so candidates authored from it inherit it. Off leaves H0
+    # byte-identical; benchmarks/ is untouched.
+    original_base = _maybe_add_step_countdown(original_base, getattr(args, "step_countdown", "off"))
 
     # Freeze the baseline (H0) to V0/config.yaml — the root variant's config.
     v0_dir = run_dir / "V0"

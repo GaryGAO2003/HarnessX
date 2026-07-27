@@ -37,7 +37,11 @@ Sonnet-4.6/GPT-5.4/Qwen+Opus-4.6(M-15;§7.7 自认开源 meta 未测);轮数/床
 **缺失**:round-global K_t 协调器(M-16;**注:现行"每轮单目标变体"政策下
 candidates-per-round=4 实质等效 round-global,协调器仅多目标时才需要**);
 **bucket-disjoint multi-ship**(M-17,App B.1 p.34 与 Algorithm 1 单 ship 是论文
-内部两套语义 H1,我方按 Algorithm 1 读);Digester prompt(论文未公开,0% 可采)。
+内部两套语义 H1;**Jul-27 已接为可切换臂 `--ship-policy`,默认 `first_wins`=
+Algorithm 1 字节等同;`bucket_disjoint` 只实现 sound 部分[不同结算目标多发=1 APPLY
++N FORK 子 + 按桶占用登记],同变体二次 APPLY 因整配置候选无可靠合并原语而跳过并
+记审计——Phase-1 裁定与 file:line 证据见 SPEC §7.14**);Digester prompt(论文未
+公开,0% 可采)。
 
 **审计新发现(最有价值)**:**论文 App B.1 公开了 Planner prompt 全文、Evolver
 ~60%、Critic ~70%——我方采纳 0%,全部自写 OURS 重建。免费保真度在桌上没拿。**
@@ -71,5 +75,6 @@ candidates-per-round=4 实质等效 round-global,协调器仅多目标时才需�
 ## 4. 论文内部矛盾(佐证我方 digest)
 
 Algorithm 1 单 ship ↔ App B.1 multi-ship(H1);iterates_from 在 B.1 模板但不在
-Table 9(H7);App C "19 runs" ↔ 主文 "15 configurations"(H8)。我方按 Algorithm 1
-读并记 M-17。
+Table 9(H7);App C "19 runs" ↔ 主文 "15 configurations"(H8)。我方**默认**按
+Algorithm 1 读(M-17),并把 App B.1 接为 `--ship-policy bucket_disjoint` 可切换臂
+(Phase-1 裁定:整配置候选下同变体合并欠定义,SPEC §7.14)。

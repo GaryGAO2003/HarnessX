@@ -277,6 +277,35 @@ def test_headline_counts_failures_as_run_totals_across_rounds() -> None:
     assert "| 8 / 1 / 1 |" not in text
 
 
+def test_to_json_serialises_to_dict_verbatim_including_run_totals() -> None:
+    """EXP-E08 closure: ``to_json`` is a pure serialisation of ``to_dict`` and
+    adds no keys of its own, so the run-total triple lands in the JSON unchanged
+    and the two outputs cannot drift."""
+    report = _report(
+        _result("a", 0, 0, budget_exhaustions=2),
+        _result("b", 0, 0, infra_failures=1),
+        _result("a", 1, 0, budget_exhaustions=1),
+        _result("b", 1, 1, infra_failures=1),
+    )
+    payload = report.to_dict()
+    # to_dict carries the run-total triple (summed over every settled round).
+    assert payload["attempts_run_total"] == 8
+    assert payload["infra_failures_run_total"] == 2
+    assert payload["budget_exhaustions_run_total"] == 3
+    # to_json is exactly json.dumps(to_dict, ...): the two cannot drift.
+    assert report.to_json() == json.dumps(
+        payload, ensure_ascii=False, indent=2, sort_keys=True
+    )
+    # and the run-total keys are present, unchanged, in the parsed JSON.
+    from_json = json.loads(report.to_json())
+    for key in (
+        "attempts_run_total",
+        "infra_failures_run_total",
+        "budget_exhaustions_run_total",
+    ):
+        assert from_json[key] == payload[key]
+
+
 @pytest.mark.parametrize("kwargs", [{"n_pass": 3, "n_att": 2}, {"n_pass": -1, "n_att": 2}])
 def test_impossible_results_are_rejected(kwargs) -> None:
     with pytest.raises(ValueError):

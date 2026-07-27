@@ -680,6 +680,15 @@ class RunReport:
         return payload
 
     def to_json(self, *, level_map: Mapping[str, int] | None = None, k: int | None = None) -> str:
+        """Serialise :meth:`to_dict` verbatim (JSON).
+
+        EXP-E08 closure: ``to_json`` is a pure serialisation of ``to_dict`` and
+        adds no keys of its own, so the run-total triple (``attempts_run_total`` /
+        ``infra_failures_run_total`` / ``budget_exhaustions_run_total``) and its
+        last-round companions land in the JSON exactly as ``to_dict`` exposes
+        them — the two outputs cannot drift. ``test_reporting`` pins this
+        (``to_json`` parses back equal to ``to_dict``, run-total keys present).
+        """
         return json.dumps(self.to_dict(level_map=level_map, k=k), ensure_ascii=False, indent=2, sort_keys=True)
 
     def to_markdown(self, *, level_map: Mapping[str, int] | None = None, k: int | None = None) -> str:

@@ -18,7 +18,9 @@ with deterministic stubs (SPEC §8.3/§8.4):
 * ``evolve(variant, round_idx) -> candidate | Sequence[candidate] | None``
   returns one proposed edit or a Critic-ranked gate queue for that variant.
   ``None`` or an empty sequence means "no candidate this round". Queue order is
-  preserved, and the first deterministic APPLY/FORK wins.
+  preserved; under the default ``first_wins`` policy the first deterministic
+  APPLY/FORK wins, while under ``bucket_disjoint`` (M-17, App B.1) the queue is
+  scanned on and every bucket-disjoint ship is kept.
 * ``evaluate(candidate, T_k, round_idx) -> {task: (n_pass, n_att)}`` — the
   candidate's pass@2 outcome on **only** the tasks routed to its variant
   (§4.5 "tested only against tasks routed to k").
@@ -35,7 +37,10 @@ One round, in order (SPEC §8.4)
 2. For each variant with a non-empty ``T_k``: ``evolve`` it, and evaluate its
    ranked candidates on ``T_k`` in the supplied order (the narrowed evaluation).
 3. ``gate`` each attempted candidate: a REJECT is archived and advances the
-   queue; the first APPLY/FORK is selected and the rest are skipped.
+   queue. Under ``first_wins`` the first APPLY/FORK is selected and the rest are
+   skipped; under ``bucket_disjoint`` every APPLY/FORK whose edit bucket is not
+   already claimed this round is selected (a second APPLY to an already-applied
+   variant is skipped as an unreconstructable whole-config merge, M-17).
 4. Apply the decision to the pool: APPLY merges into the variant; FORK branches a
    new variant (retiring the weakest first if the pool is full, then re-routing
    the orphans); REJECT leaves the variant and archives the reason.
@@ -93,6 +98,21 @@ DEFAULT_MIN_FORK = (1, 1)
 #: The engine bound only prevents a custom callback from returning an
 #: unexpectedly large per-variant queue.
 DEFAULT_MAX_CANDIDATES = 4
+
+#: Round-settlement ship policies (M-17, SPEC §7.14).
+#:
+#: * ``first_wins`` (default) — Algorithm 1 (paper p.9): the first deterministic
+#:   APPLY/FORK in a variant's ranked queue ships and the rest are skipped. This
+#:   is byte-identical to the pre-M-17 engine.
+#: * ``bucket_disjoint`` — App B.1 (paper p.34): ship every ranked candidate in
+#:   order, skipping any whose edit *bucket* was already claimed by an
+#:   earlier-ranked ship this round, so bucket-disjoint candidates on different
+#:   settlement targets can ship together. A second APPLY to a variant already
+#:   applied this round is skipped as unreconstructable (see
+#:   :meth:`VariantPoolEngine._multiship_skip_reason`): our candidates are whole
+#:   ``config.yaml`` files, not diffs, and no sound field-level merge of two
+#:   whole configs exists in the repo (M-17 Phase-1 finding).
+SHIP_POLICIES = ("first_wins", "bucket_disjoint")
 
 #: pass@2 attempt count used to encode the ledger-derived before-state of a task
 #: (SPEC §6.1 p.15). ``(2, 2)`` = the variant already solves it, ``(0, 2)`` = it
@@ -182,6 +202,7 @@ class VariantPoolEngine:
         retirement_metric: str = "task_macro",
         max_candidates_per_variant: int = DEFAULT_MAX_CANDIDATES,
         record_selected_results: bool = True,
+        ship_policy: str = "first_wins",
     ) -> None:
         if patience < 1:
             raise ValueError(f"patience must be >= 1, got {patience}")
@@ -195,6 +216,10 @@ class VariantPoolEngine:
             raise ValueError(
                 "max_candidates_per_variant must be >= 1, "
                 f"got {max_candidates_per_variant}"
+            )
+        if ship_policy not in SHIP_POLICIES:
+            raise ValueError(
+                f"ship_policy must be one of {SHIP_POLICIES}, got {ship_policy!r}"
             )
         self.pool = pool
         self.ledger = ledger
@@ -211,6 +236,10 @@ class VariantPoolEngine:
         # and therefore suppress these narrower gate measurements. The default
         # preserves the standalone engine's historical ledger behaviour.
         self.record_selected_results = record_selected_results
+        #: Round-settlement policy (M-17, SPEC §7.14). ``first_wins`` is the
+        #: Algorithm-1 reading and the byte-identical default; ``bucket_disjoint``
+        #: is the App B.1 ranked multi-ship arm.
+        self.ship_policy = ship_policy
         #: Global idle counter (SPEC §6.6: single idle, aligned with Algorithm 1).
         self._idle = 0
 
@@ -253,6 +282,14 @@ class VariantPoolEngine:
 
         result = RoundResult(round_idx=round_idx, variant_count=len(self.pool))
         pending: list[_PendingCandidate] = []
+        # Round-global multi-ship bookkeeping (ship_policy == "bucket_disjoint").
+        # ``claimed_buckets`` holds the edit buckets already taken by a shipped
+        # candidate this round; ``applied_variants`` holds variants that already
+        # received an APPLY this round (a second APPLY would need a whole-config
+        # merge that is not soundly reconstructable — M-17 Phase-1). Both stay
+        # empty and unread under the default ``first_wins`` policy.
+        claimed_buckets: set[str] = set()
+        applied_variants: set[str] = set()
 
         # Phase 1 — evaluate and gate every freeze-time variant against exactly
         # the same pool/ledger snapshot. No APPLY/FORK/retire/record mutation is
@@ -325,8 +362,27 @@ class VariantPoolEngine:
                 )
 
                 if gate_result.decision in (Decision.APPLY, Decision.FORK):
-                    result.per_variant_pass[variant_id] = dict(tk_eval)
-                    result.selected_candidate_ids[variant_id] = candidate_id
+                    # Under bucket_disjoint, a gate-approved candidate may still be
+                    # skipped by the ranked multi-ship rule (App B.1 p.34). Under
+                    # first_wins this always returns None, so the block below is the
+                    # unchanged Algorithm-1 first-wins settlement.
+                    skip_reason = self._multiship_skip_reason(
+                        gate_result.decision,
+                        variant_id,
+                        candidate,
+                        claimed_buckets,
+                        applied_variants,
+                    )
+                    if skip_reason is not None:
+                        # The gate approved it; the policy did not ship it. Record
+                        # the audit reason on the diagnostic already added above and
+                        # keep scanning the ranked queue for a later, still-shippable
+                        # candidate on an unclaimed bucket.
+                        result.candidate_diagnostics[candidate_id].skipped_reason = skip_reason
+                        continue
+                    if variant_id not in result.selected_candidate_ids:
+                        result.per_variant_pass[variant_id] = dict(tk_eval)
+                        result.selected_candidate_ids[variant_id] = candidate_id
                     pending.append(
                         _PendingCandidate(
                             variant_id=variant_id,
@@ -336,19 +392,29 @@ class VariantPoolEngine:
                             tk_eval=tk_eval,
                         )
                     )
-                    for skipped_id, _ in admitted[position + 1 :]:
-                        self._add_diagnostic(
-                            result,
-                            CandidateDiagnostic(
-                                candidate_id=skipped_id,
-                                variant_id=variant_id,
-                                skipped_reason=(
-                                    f"earlier candidate {candidate_id} selected "
-                                    f"{gate_result.decision.value}"
+                    # A shipped candidate claims its buckets round-globally; a
+                    # shipped APPLY also claims its target variant against a second
+                    # (unmergeable) APPLY this round.
+                    claimed_buckets.update(self._candidate_buckets(candidate))
+                    if gate_result.decision is Decision.APPLY:
+                        applied_variants.add(variant_id)
+                    if self.ship_policy != "bucket_disjoint":
+                        for skipped_id, _ in admitted[position + 1 :]:
+                            self._add_diagnostic(
+                                result,
+                                CandidateDiagnostic(
+                                    candidate_id=skipped_id,
+                                    variant_id=variant_id,
+                                    skipped_reason=(
+                                        f"earlier candidate {candidate_id} selected "
+                                        f"{gate_result.decision.value}"
+                                    ),
                                 ),
-                            ),
-                        )
-                    break
+                            )
+                        break
+                    # bucket_disjoint: keep scanning the ranked queue so a
+                    # bucket-disjoint later candidate can also ship this round.
+                    continue
 
                 # A rejected candidate is fully archived, then the next ranked
                 # candidate gets its own scoped evaluation and gate.
@@ -365,7 +431,10 @@ class VariantPoolEngine:
             else:
                 # Preserve the legacy single-candidate curve point: when every
                 # candidate rejects, expose the final attempted candidate here.
-                if last_rejected_eval is not None:
+                # Under bucket_disjoint the loop always completes (no first-wins
+                # break), so guard against clobbering a curve point already set by
+                # a shipped candidate for this variant.
+                if last_rejected_eval is not None and variant_id not in result.selected_candidate_ids:
                     result.per_variant_pass[variant_id] = dict(last_rejected_eval)
 
         # Phase 2 — compute one deterministic capacity/retirement plan and only
@@ -484,7 +553,13 @@ class VariantPoolEngine:
                 round_idx,
             )
             result.forked.append(child.variant_id)
-            result.decisions[item.variant_id] = Decision.FORK
+            # Under bucket_disjoint a variant may both APPLY (mutating itself) and
+            # spawn a FORK child the same round; the in-place APPLY is that
+            # variant's outcome, so do not overwrite it with FORK. The child is
+            # recorded in ``result.forked`` either way. Under first_wins a variant
+            # never has both, so this is byte-identical there.
+            if result.decisions.get(item.variant_id) is not Decision.APPLY:
+                result.decisions[item.variant_id] = Decision.FORK
 
             # The child embodies the candidate evaluated on the entire T_k.
             # Record successes *and failures* from that whole scoped evaluation.
@@ -552,6 +627,70 @@ class VariantPoolEngine:
         if not others:
             return None
         return min(others, key=lambda variant_id: (self._retirement_score(variant_id), variant_id))
+
+    def _multiship_skip_reason(
+        self,
+        decision: Decision,
+        variant_id: str,
+        candidate: Any,
+        claimed_buckets: set[str],
+        applied_variants: set[str],
+    ) -> str | None:
+        """Return an audit reason to skip a gate-approved candidate, or ``None``.
+
+        Only the ``bucket_disjoint`` policy (App B.1 p.34) can skip a candidate
+        the gate approved; ``first_wins`` always returns ``None`` here (its own
+        first-wins break, not this method, ends the queue). Two skip reasons,
+        checked in the paper's order:
+
+        1. **Bucket already claimed** — the candidate carries an edit bucket a
+           higher-ranked ship already took this round. This is App B.1's verbatim
+           rule ("skipping any whose bucket is already claimed this round").
+        2. **Unreconstructable same-variant APPLY** — the candidate is a second
+           APPLY to a variant already applied this round. Our candidates are
+           whole ``config.yaml`` files authored against the round-start config,
+           not diffs, and the repo has no sound field-level merge of two whole
+           configs (M-17 Phase-1: ``compute_changeset`` is a diff *producer*
+           only; ``HarnessConfig`` has no prompt/template field — templates live
+           inside the ``processors`` list — so per-bucket field ownership is not
+           separable, and ``compute_changeset`` cannot even see config-scalar
+           edits). Shipping the second APPLY would last-write-wins clobber the
+           first, so we skip it and record the ambiguity honestly rather than
+           silently discard a candidate the paper's prose implies could ship.
+        """
+        if self.ship_policy != "bucket_disjoint":
+            return None
+        overlap = self._candidate_buckets(candidate) & claimed_buckets
+        if overlap:
+            return (
+                "ship_skipped: bucket-disjoint policy — bucket(s) "
+                f"{sorted(overlap)} already claimed by an earlier-ranked ship "
+                "this round (App B.1 p.34)"
+            )
+        if decision is Decision.APPLY and variant_id in applied_variants:
+            return (
+                "ship_skipped: bucket-disjoint same-variant apply requires config "
+                "merge (unreconstructable from whole-config candidates)"
+            )
+        return None
+
+    @staticmethod
+    def _candidate_buckets(candidate: Any) -> frozenset[str]:
+        """The candidate's declared edit buckets (Table 9 p.36), or empty.
+
+        Reads ``candidate.manifest.bucket`` (a :class:`CandidateArtifact`) or
+        ``candidate.bucket`` (a bare :class:`ChangeManifest`); an opaque
+        candidate that declares neither claims — and collides with — nothing.
+        """
+        manifest = getattr(candidate, "manifest", None)
+        raw = getattr(manifest, "bucket", None)
+        if raw is None:
+            raw = getattr(candidate, "bucket", None)
+        if not raw:
+            return frozenset()
+        if isinstance(raw, str):
+            return frozenset({raw})
+        return frozenset(str(bucket) for bucket in raw)
 
     def _apply_candidate(self, variant: Any, candidate: Any) -> None:
         """Merge an applied candidate into its variant (C1: outcome only).

@@ -90,6 +90,43 @@ class QueueScripted:
         return {task: full[task] for task in t_k}
 
 
+class BucketCand:
+    """An opaque candidate that also declares an edit ``bucket`` (M-17).
+
+    It has no ``.manifest``, so the gate treats it opaquely and the decision is
+    the pure seesaw (as in :class:`Cand`); the extra ``.bucket`` is what the
+    ``bucket_disjoint`` ship policy reads via ``engine._candidate_buckets``.
+    """
+
+    def __init__(self, candidate_id: str, target_variant: str, bucket) -> None:
+        self.candidate_id = candidate_id
+        self.target_variant = target_variant
+        self.bucket = list(bucket)
+
+
+class BucketQueue:
+    """Per-variant Critic-ranked queues of :class:`BucketCand` with outcomes."""
+
+    def __init__(
+        self,
+        queues: dict[str, list[BucketCand]],
+        outcomes: dict[str, dict[str, tuple[int, int]]],
+    ) -> None:
+        self.queues = queues
+        self.outcomes = outcomes
+        self.evolve_calls: list[tuple[str, int]] = []
+        self.evaluate_calls: list[str] = []
+
+    def evolve(self, variant, round_idx):
+        self.evolve_calls.append((variant.variant_id, round_idx))
+        return list(self.queues.get(variant.variant_id, []))
+
+    def evaluate(self, candidate, t_k, round_idx):  # noqa: ARG002 - scripted round
+        self.evaluate_calls.append(candidate.candidate_id)
+        full = self.outcomes[candidate.candidate_id]
+        return {task: full[task] for task in t_k}
+
+
 def _artifact(tmp_path, candidate_id: str, *, target_variant: str = "V0") -> CandidateArtifact:
     """A complete prompt-only artifact suitable for the real manifest gate."""
     candidate_dir = tmp_path / candidate_id
@@ -963,3 +1000,251 @@ def test_min_fork_must_be_a_positive_pair(min_fork) -> None:
         VariantPoolEngine(
             pool, SuccessLedger(), Router(), evaluate=lambda *a: {}, evolve=lambda *a: None, min_fork=min_fork
         )
+
+
+# ===========================================================================
+# 10. Ship policy — M-17 App B.1 ranked bucket-disjoint multi-ship
+# ===========================================================================
+
+
+def _mk(ledger, pool, *, tasks=("old", "new")):
+    """Route ``old`` as solved-by-V0 and ``new`` as unsolved (fork/apply fuel)."""
+    ledger.record("V0", "old", 2, 2, 0)
+    pool.add_root("cfg/V0.yaml", "j/V0.md", tasks=set(tasks))
+
+
+def test_ship_policy_defaults_to_first_wins() -> None:
+    pool = VariantPool(K=1)
+    pool.add_root("cfg/V0.yaml", "j/V0.md", tasks={"a"})
+    engine = VariantPoolEngine(
+        pool, SuccessLedger(), Router(), evaluate=lambda *a: {}, evolve=lambda *a: None
+    )
+    assert engine.ship_policy == "first_wins"
+
+
+@pytest.mark.parametrize("bad", ["", "first-wins", "bucketdisjoint", "off"])
+def test_ship_policy_rejects_unknown_value(bad) -> None:
+    pool = VariantPool(K=1)
+    pool.add_root("cfg/V0.yaml", "j/V0.md", tasks={"a"})
+    with pytest.raises(ValueError):
+        VariantPoolEngine(
+            pool, SuccessLedger(), Router(), evaluate=lambda *a: {}, evolve=lambda *a: None, ship_policy=bad
+        )
+
+
+def test_first_wins_and_bucket_disjoint_diverge_on_the_same_queue() -> None:
+    """Identity pin: the same ranked queue ships one under first_wins (the break)
+    and both disjoint-bucket candidates under bucket_disjoint (the scan-on)."""
+
+    def build():
+        ledger = SuccessLedger()
+        pool = VariantPool(K=4)
+        _mk(ledger, pool)
+        a = BucketCand("C-R1-01", "V0", ["prompt"])
+        b = BucketCand("C-R1-02", "V0", ["tools"])
+        driver = BucketQueue(
+            {"V0": [a, b]},
+            {
+                "C-R1-01": {"old": (0, 2), "new": (2, 2)},  # regress old, improve new -> FORK
+                "C-R1-02": {"old": (0, 2), "new": (2, 2)},  # same seesaw, disjoint bucket
+            },
+        )
+        return ledger, pool, driver
+
+    # first_wins (default): the first fork wins, the queue breaks, the rest are
+    # skipped *without evaluation* with the legacy reason — byte-identical.
+    ledger, pool, driver = build()
+    fw = VariantPoolEngine(pool, ledger, Router(), evaluate=driver.evaluate, evolve=driver.evolve)
+    fw_res = fw.run_round(1, {"old", "new"})
+    assert driver.evaluate_calls == ["C-R1-01"]
+    assert fw_res.forked == ["V1"]
+    assert fw_res.candidate_diagnostics["C-R1-02"].skipped_reason == (
+        "earlier candidate C-R1-01 selected fork"
+    )
+    assert fw_res.candidate_diagnostics["C-R1-02"].decision is None  # never gated
+
+    # bucket_disjoint: the queue is scanned on and both disjoint forks ship.
+    ledger, pool, driver = build()
+    bd = VariantPoolEngine(
+        pool, ledger, Router(), evaluate=driver.evaluate, evolve=driver.evolve, ship_policy="bucket_disjoint"
+    )
+    bd_res = bd.run_round(1, {"old", "new"})
+    assert driver.evaluate_calls == ["C-R1-01", "C-R1-02"]
+    assert bd_res.forked == ["V1", "V2"]
+    assert bd_res.candidate_diagnostics["C-R1-02"].skipped_reason is None
+    assert bd_res.candidate_diagnostics["C-R1-02"].decision is Decision.FORK
+
+
+def test_bucket_disjoint_ships_an_apply_and_a_disjoint_fork_the_same_round() -> None:
+    """(a) One in-place APPLY + one FORK child on disjoint buckets both ship."""
+    ledger = SuccessLedger()
+    pool = SpyPool(K=4)
+    _mk(ledger, pool)
+    apply_c = BucketCand("C-R1-01", "V0", ["prompt"])
+    fork_c = BucketCand("C-R1-02", "V0", ["tools"])
+    driver = BucketQueue(
+        {"V0": [apply_c, fork_c]},
+        {
+            "C-R1-01": {"old": (2, 2), "new": (2, 2)},  # improve new, keep old -> APPLY
+            "C-R1-02": {"old": (0, 2), "new": (2, 2)},  # improve new, regress old -> FORK
+        },
+    )
+    settled: list[tuple[str, str]] = []
+    engine = VariantPoolEngine(
+        pool, ledger, Router(), evaluate=driver.evaluate, evolve=driver.evolve, ship_policy="bucket_disjoint"
+    )
+    engine._apply_candidate = lambda variant, candidate: settled.append(  # type: ignore[method-assign]
+        (variant.variant_id, candidate.candidate_id)
+    )
+
+    result = engine.run_round(1, {"old", "new"})
+
+    # Both ranked candidates evaluated (no first-wins break).
+    assert driver.evaluate_calls == ["C-R1-01", "C-R1-02"]
+    # V0 mutated in place; the disjoint fork spawned a child (different targets).
+    assert result.decisions["V0"] is Decision.APPLY  # not clobbered by the fork
+    assert result.forked == ["V1"]
+    assert result.selected_candidate_ids["V0"] == "C-R1-01"
+    assert result.shipped is True
+    assert settled == [("V0", "C-R1-01"), ("V1", "C-R1-02")]
+    assert result.candidate_diagnostics["C-R1-01"].decision is Decision.APPLY
+    assert result.candidate_diagnostics["C-R1-01"].skipped_reason is None
+    assert result.candidate_diagnostics["C-R1-02"].decision is Decision.FORK
+    assert result.candidate_diagnostics["C-R1-02"].skipped_reason is None
+
+
+def test_bucket_disjoint_skips_a_candidate_whose_bucket_is_already_claimed() -> None:
+    """(b) A later candidate sharing any claimed bucket is skipped (App B.1)."""
+    ledger = SuccessLedger()
+    pool = VariantPool(K=4)
+    _mk(ledger, pool)
+    first = BucketCand("C-R1-01", "V0", ["prompt"])
+    shadow = BucketCand("C-R1-02", "V0", ["prompt", "config"])  # shares 'prompt'
+    driver = BucketQueue(
+        {"V0": [first, shadow]},
+        {
+            "C-R1-01": {"old": (2, 2), "new": (2, 2)},  # APPLY, claims 'prompt'
+            "C-R1-02": {"old": (2, 2), "new": (2, 2)},  # would APPLY, but 'prompt' taken
+        },
+    )
+    engine = VariantPoolEngine(
+        pool, ledger, Router(), evaluate=driver.evaluate, evolve=driver.evolve, ship_policy="bucket_disjoint"
+    )
+    result = engine.run_round(1, {"old", "new"})
+
+    assert result.decisions == {"V0": Decision.APPLY}
+    assert result.forked == []
+    assert result.selected_candidate_ids == {"V0": "C-R1-01"}
+    skipped = result.candidate_diagnostics["C-R1-02"]
+    assert skipped.decision is Decision.APPLY  # the gate approved it
+    assert skipped.skipped_reason is not None
+    assert "already claimed" in skipped.skipped_reason
+    assert "prompt" in skipped.skipped_reason
+
+
+def test_bucket_disjoint_skips_a_second_same_variant_apply_as_unreconstructable() -> None:
+    """(c) A second APPLY to an already-applied variant is skipped, even on a
+    disjoint bucket, because whole-config candidates cannot be soundly merged."""
+    ledger = SuccessLedger()
+    pool = VariantPool(K=4)
+    _mk(ledger, pool)
+    first = BucketCand("C-R1-01", "V0", ["prompt"])
+    second = BucketCand("C-R1-02", "V0", ["config"])  # disjoint bucket, but 2nd APPLY to V0
+    driver = BucketQueue(
+        {"V0": [first, second]},
+        {
+            "C-R1-01": {"old": (2, 2), "new": (2, 2)},  # APPLY
+            "C-R1-02": {"old": (2, 2), "new": (2, 2)},  # APPLY on a disjoint bucket
+        },
+    )
+    engine = VariantPoolEngine(
+        pool, ledger, Router(), evaluate=driver.evaluate, evolve=driver.evolve, ship_policy="bucket_disjoint"
+    )
+    result = engine.run_round(1, {"old", "new"})
+
+    assert result.decisions == {"V0": Decision.APPLY}
+    assert result.forked == []
+    second_diag = result.candidate_diagnostics["C-R1-02"]
+    assert second_diag.decision is Decision.APPLY  # gate approved; policy skipped
+    assert second_diag.skipped_reason == (
+        "ship_skipped: bucket-disjoint same-variant apply requires config "
+        "merge (unreconstructable from whole-config candidates)"
+    )
+
+
+def test_bucket_disjoint_same_variant_multi_fork_without_retirement() -> None:
+    """(d-i) Two disjoint-bucket forks from one variant both spawn children when
+    the pool has spare capacity (no retirement needed)."""
+    ledger = SuccessLedger()
+    pool = SpyPool(K=4)
+    _mk(ledger, pool)
+    f1 = BucketCand("C-R1-01", "V0", ["prompt"])
+    f2 = BucketCand("C-R1-02", "V0", ["tools"])
+    driver = BucketQueue(
+        {"V0": [f1, f2]},
+        {
+            "C-R1-01": {"old": (0, 2), "new": (2, 2)},  # FORK
+            "C-R1-02": {"old": (0, 2), "new": (2, 2)},  # FORK, disjoint bucket
+        },
+    )
+    engine = VariantPoolEngine(
+        pool, ledger, Router(), evaluate=driver.evaluate, evolve=driver.evolve, ship_policy="bucket_disjoint"
+    )
+    result = engine.run_round(1, {"old", "new"})
+
+    assert result.decisions["V0"] is Decision.FORK
+    assert result.forked == ["V1", "V2"]
+    assert result.retired == []
+    assert pool.retire_calls == []
+    assert len(pool) == 3
+    assert [parent for parent, _, _ in pool.fork_calls] == ["V0", "V0"]
+    assert driver.evaluate_calls == ["C-R1-01", "C-R1-02"]
+
+
+def test_bucket_disjoint_preserves_multi_variant_fork_retire_capacity() -> None:
+    """(d-ii) The App B.1 policy leaves ``_plan_forks`` capacity/retire/reassign
+    planning intact: this is the multi-variant full-pool multi-fork test rerun
+    under bucket_disjoint (forks on different variants carry no buckets, so the
+    settled outcome is identical to first_wins)."""
+    ledger = SuccessLedger()
+    router = Router()
+    pool = SpyPool(K=4)
+    pool.add_root(
+        "cfg/V0.yaml",
+        "j/V0.md",
+        tasks={"new0", "old0", "new1", "old1", "orphan2", "orphan3"},
+    )
+    pool.fork("V0", {"new1", "old1"}, 0)  # V1
+    pool.fork("V0", {"orphan2"}, 0)  # V2
+    pool.fork("V0", {"orphan3"}, 0)  # V3
+    pool.fork_calls.clear()
+
+    ledger.record("V0", "old0", 2, 2, 0)
+    ledger.record("V1", "old1", 2, 2, 0)
+    ledger.record("V2", "orphan2", 2, 2, 0)
+    ledger.record("V3", "orphan3", 2, 2, 0)
+    scripted = Scripted(
+        {
+            ("V0", 1): {"new0": (2, 2), "old0": (0, 2)},
+            ("V1", 1): {"new1": (2, 2), "old1": (0, 2)},
+        }
+    )
+    engine = VariantPoolEngine(
+        pool,
+        ledger,
+        router,
+        evaluate=scripted.evaluate,
+        evolve=scripted.evolve,
+        ship_policy="bucket_disjoint",
+    )
+
+    result = engine.run_round(1, {"new0", "old0", "new1", "old1", "orphan2", "orphan3"})
+
+    assert result.decisions["V0"] is Decision.FORK
+    assert result.decisions["V1"] is Decision.FORK
+    assert result.retired == ["V2", "V3"]
+    assert result.forked == ["V4", "V5"]
+    assert pool.reassign_calls == [{"orphan2", "orphan3"}]
+    assert pool.fork_calls == [("V0", {"new0"}, 1), ("V1", {"new1"}, 1)]
+    assert set(pool.variants) == {"V0", "V1", "V4", "V5"}
+    assert len(pool) == pool.K

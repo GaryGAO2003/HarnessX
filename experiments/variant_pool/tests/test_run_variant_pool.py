@@ -614,6 +614,68 @@ def test_lock_records_runtime_values_and_resolved_provenance(tmp_path):
     assert "YOUR_PROVIDER_ID" not in rendered
 
 
+# --- M-17: --ship-policy wiring (arg parsing + byte-safe lock provenance) ----
+
+
+def test_ship_policy_cli_defaults_to_first_wins_and_validates_choices() -> None:
+    parser = rvp.build_arg_parser()
+    assert parser.parse_args([]).ship_policy == "first_wins"
+    assert parser.parse_args(["--ship-policy", "bucket_disjoint"]).ship_policy == "bucket_disjoint"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--ship-policy", "nonsense"])
+
+
+def _ship_policy_lock_fixture(tmp_path, **overrides):
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text("harness: frozen\n", encoding="utf-8")
+    prompt = tmp_path / "prompt.j2"
+    prompt.write_text("You are the deployed GAIA agent.", encoding="utf-8")
+    data = tmp_path / "tasks.json"
+    data.write_text(
+        json.dumps([{"task_id": "a", "Question": "q", "answer": "a", "Level": 2}]),
+        encoding="utf-8",
+    )
+
+    class _Registry:
+        @staticmethod
+        def list_names():
+            return ["WebFetch"]
+
+    class _Base:
+        tool_registry = _Registry()
+        processors = [
+            {
+                "_target_": "harnessx.processors.context.system_prompt.SystemPromptProcessor",
+                "system_builder": {"template_path": str(prompt)},
+            }
+        ]
+
+    args = _Args(data_path=str(data), **overrides)
+    return args, baseline, _Base()
+
+
+def test_lock_leaves_a_default_ship_policy_unrecorded(tmp_path) -> None:
+    """first_wins (default) emits no ship_policy provenance — the lock of a
+    default run stays byte-identical (the force-gate byte-safe pattern)."""
+    args, baseline, base = _ship_policy_lock_fixture(tmp_path)
+    lock = rvp._build_experiment_lock(
+        args=args, run_tag="t", baseline_config_path=baseline, original_base=base
+    )
+    assert not any("ship_policy" in warning for warning in lock.provenance_warnings)
+
+
+def test_lock_notes_a_non_default_ship_policy_as_auditable_provenance(tmp_path) -> None:
+    """bucket_disjoint records exactly one auditable provenance note (M-17)."""
+    args, baseline, base = _ship_policy_lock_fixture(tmp_path, ship_policy="bucket_disjoint")
+    lock = rvp._build_experiment_lock(
+        args=args, run_tag="t", baseline_config_path=baseline, original_base=base
+    )
+    notes = [w for w in lock.provenance_warnings if "ship_policy=bucket_disjoint" in w]
+    assert len(notes) == 1
+    assert "M-17" in notes[0]
+    assert "App B.1" in notes[0]
+
+
 # ===========================================================================
 # (d) target eligibility: a fork child with no trajectories is not targeted
 # ===========================================================================
