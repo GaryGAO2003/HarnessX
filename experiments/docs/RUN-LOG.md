@@ -275,8 +275,24 @@
   期望:L2 误杀解除 + replay 真 120s + 提交纪律已愈 ⇒ 候选首次大概率抵达评测与门,
   K=8 分化窗口打开。
 
+### a1pilot2 — 夜车二号:管线全通,门前三堵新墙(¥16.70)
+- 修复栈全部生效:**6/6 候选抵达评测**(一号车 0/6)——L2 路由指令解堵 Critic、
+  replay 帽 120s 首次真实生效、no-commit 0/6。仍 R0-R3 早停(6/6 门前被拒)。
+- 三堵墙解剖:①2× processor 桶死 L2(**M-22 v1 只盖 tools 的边界成为约束**;meta
+  连提 processor 候选=它看见 F2 空手死想装处理器,方向正确);②2× "新工具从未被
+  调用"诚实拒(**工具采用瓶颈**:注册≠使用;论文 C-R10-02 桶=[tools,prompt,config]
+  ——工具须耦合教 agent 使用的 prompt 改动,我方 meta 未做);③2× improved=∅
+  (残余未解题=结构地板,prompt 类啃不动)。
+- 主池方差仍凶:pass@2 0.50→0.67→**0.83**→0.58(drift −0.25)——ever-solved 棘轮
+  +高方差使 APPLY 随轮次递难,fork 通道(improved≥1∧regressed≥1)因 improved=∅
+  未开。
+- → 夜车三号前置修复:M-22 **v2 processor 认证**(以 replay 冒烟实跑为证据:config
+  canonicalize+replay 通过 ⇒ 注册 processor 必已在真实循环执行;弱于 tools 的序列化
+  探针但同精神,标注 OURS-v2 待晨间复核)+ 契约加**工具-采用耦合**要求(tools 桶候选
+  必须含指导使用的 prompt 改动 + predicted 任务触发说明)。
+
 ### 会话成本合计(实测)
-¥194.14 → ¥133.86(**¥60.28**:十五个 run;a1pilot ¥9.33;a1pilot2 另计)
+¥194.14 → ¥117.16(**¥76.98**:十六个 run;a1pilot2 ¥16.70;夜车三号另计)
 
 ### 本日提交索引(全部已推 lab)
 | commit | 内容 |
