@@ -318,6 +318,34 @@
 - 读数:ship 数 >0 = 点火成功(旱灾系床构成,flash 无罪)/ =0 = 地板证据加强
   (升 pro 试验进入议程,需充值)。
 
+### a1big1 — 执行记录:R1 中段被会话事件误杀(Jul-27,无效跑)
+- 时间线:launch 15:54:26 → R0 结算 16:43(~50 min)→ R1 管线 16:50-17:04 →
+  C-R1-01 门评 17:04-17:54(50 min)→ **诚实拒 ROUNDTRIP_L2**("new tool was never
+  invoked during candidate evaluation")→ C-R1-02 门评 17:54 起 → **18:42:15 进程死**。
+  死因=Claude 会话 /compact 连带终止后台 shell(外因,非代码缺陷);无 resume 机制,
+  R1 未结算。实测花费 ¥103.01 → ¥91.81 = **¥11.20**。
+- **免费带回的情报(全部落盘 runs/a1big1,留作 forensics)**:
+  1. **R0 基线 pilot30 = 15/30(pass@2 50%)**:11 题 2/2、4 题 1/2(软柿子:
+     023e9d44 / 23dd907f / 42d4198c / 6b078778)、15 题 0/2——扩床确实带进可翻余量;
+  2. R1 Planner(论文 prompt)聚出两大失败簇:封锁源(6 题,tools+config 桶)/
+     预算耗尽不合成(3 题,processor 桶),与 pilot12 诊断同构但簇更大;
+  3. C-R1-01(bing_search_tool + SystemPromptProcessor,tools+prompt 双桶)过 replay
+     (经 retry_01)后死于 L2:**adoption-coupling(prompt 提及新工具)不足以保证
+     flash 实际调用它**——M-22 乙机器自证按设计诚实拒,该规则首次实战裁决;
+  4. C-R1-02(ForcedAnswerSynthesisProcessor,processor 单桶)被杀时门评第 48 分钟,
+     判决未出;
+  5. M-22 Critic 路由指令实战生效:critic_review 逐字 "not grounds for rejection per
+     runtime rule",L2 证据裁决正确下放确定性门。
+- 台账裁定:a1big1 计为**无效跑(外因中止)**,不进效果口径;点火判决顺延 a1big2。
+
+### a1big2 — 点火实验重启(Jul-27 18:50:58 起,进行中)
+- CLI 与 a1big1 逐字相同(仅 --run-tag);起跑余额 **¥91.81**;HEAD=9519f82(a1big1
+  在 7bd24cd,间隔提交均为默认关闭的加法特性+文档,693/0,两跑行为等同);
+- **新 SOP:付费跑一律脱会话启动**——WMI `Win32_Process.Create` 拉起 cmd 启动器,
+  父链挂 WmiPrvSE,会话压缩/中断杀不到;启动器位于 runs/(gitignored,含密钥不入库);
+  会话内只挂可牺牲哨兵(仅报完成,被杀无损于跑);
+- 预算:重花 R0+R1 ≈ ¥11,全程预估落点 ¥25-40,可支配 ¥70 内,地板 ¥30 安全。
+
 ### 会话成本合计(实测)
 ¥194.14 → ¥103.01(**¥91.13**:十七个 run;a1big1 另计)
 
