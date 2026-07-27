@@ -141,12 +141,39 @@ def _manifest(
     )
 
 
-def _artifact(manifest: ChangeManifest, tmp_path: Path) -> CandidateArtifact:
-    """Wrap a manifest as the structured candidate the gate unwraps at stage 4."""
+def _artifact(
+    manifest: ChangeManifest,
+    tmp_path: Path,
+    *,
+    config_path: Path | None = None,
+) -> CandidateArtifact:
+    """Wrap a manifest as the structured candidate the gate unwraps at stage 4.
+
+    ``config_path`` defaults to an uncreated ``candidate.yaml`` (the gate never
+    loads it). The v2 processor path derives ``_meta_scratch/REPLAY.md`` from this
+    path's parent, so tests that exercise it pass an explicit config under a real
+    candidate dir and drop a REPLAY.md beside it via :func:`_write_replay`.
+    """
     return CandidateArtifact(
-        config_path=tmp_path / "candidate.yaml",  # never created; gate does not load it
+        config_path=config_path or (tmp_path / "candidate.yaml"),
         manifest=manifest,
         target_variant=manifest.target_variant,
+    )
+
+
+def _write_replay(config_path: Path, *, ok: bool) -> None:
+    """Write a candidate's ``_meta_scratch/REPLAY.md`` next to its config.
+
+    Mirrors ``harnessx/meta_harness/replay.py`` ``render_report_md``: the title is
+    "# Replay gate passed" on a pass and "# Replay gate failed" (REPLAY_FAIL-style)
+    otherwise. The pin is the real marker read from ``runs/a1pilot2`` artifacts.
+    """
+    scratch = Path(config_path).parent / "_meta_scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    title = "# Replay gate passed" if ok else "# Replay gate failed"
+    (scratch / "REPLAY.md").write_text(
+        f"{title}\n\nConfig under test: `{config_path}`\n\n## `__synthetic_smoke__`\n",
+        encoding="utf-8",
     )
 
 
@@ -436,8 +463,13 @@ def test_no_identifiable_target_tool_is_a_reject(tmp_path) -> None:
     assert "cannot identify which tool" in result.archive_reason
 
 
-def test_processor_only_bucket_matches_the_builtin_declared_only(tmp_path) -> None:
-    """Item 3d: processor bucket without tools stays declared-only (built-in FAIL)."""
+def test_processor_only_bucket_without_replay_matches_the_builtin_declared_only(tmp_path) -> None:
+    """A processor bucket with NO replay artifact stays declared-only (built-in FAIL).
+
+    This is the OURS-v2 fallback: no ``_meta_scratch/REPLAY.md`` beside the config
+    (``_artifact`` points at an uncreated ``candidate.yaml``), so the certifier keeps
+    the byte-identical built-in FAIL and records nothing.
+    """
     stub = _StubRecipe(tmp_path)
     manifest = _manifest(buckets=("processor",), tool_path=None)
     art = _artifact(manifest, tmp_path)
@@ -452,6 +484,7 @@ def test_processor_only_bucket_matches_the_builtin_declared_only(tmp_path) -> No
     assert certified.decision is None
     # byte-identical to the built-in declared-only path
     assert certified.archive_reason == builtin.archive_reason
+    assert "bucket=['processor']" in certified.archive_reason
     # a delegated (non-certified) case records nothing under l2_certification
     assert "l2_certification" not in stub._candidate_meta.get("C-R1-01", {})
 
@@ -469,6 +502,171 @@ def test_non_code_prompt_bucket_is_exempt_like_the_builtin(tmp_path) -> None:
     assert result.passed is True
     assert result.decision is Decision.APPLY
     assert "l2_certification" not in stub._candidate_meta.get("C-R1-01", {})
+
+
+# ===========================================================================
+# OURS-v2 — processor-bucket certification from replay-execution evidence
+# (SPEC §7.11 v2, pending morning review; a1pilot2 processor deaths)
+# ===========================================================================
+
+
+def _proc_artifact(tmp_path: Path, *, buckets, tool_path=None):
+    """A candidate under a real candidate dir so REPLAY.md has a home beside config.
+
+    Returns ``(artifact, config_path)``; drop a REPLAY.md beside ``config_path``
+    with :func:`_write_replay` to exercise the v2 processor-replay path.
+    """
+    manifest = _manifest(buckets=buckets, tool_path=tool_path)
+    config_path = tmp_path / "cand" / "C-R1-01" / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    return _artifact(manifest, tmp_path, config_path=config_path), config_path
+
+
+def test_processor_only_certified_from_passing_replay_smoke(tmp_path) -> None:
+    """v2 happy path: processor-only + passing REPLAY.md -> stage 4 passes, recorded."""
+    stub = _StubRecipe(tmp_path)
+    art, config_path = _proc_artifact(tmp_path, buckets=("processor",))
+    _write_replay(config_path, ok=True)
+    spy = _SpyFactory()
+
+    result = _run(
+        stub, art, parent_config=tmp_path / "p.yaml", tk_results=_IMPROVE,
+        serializer_factory=spy,
+    )
+
+    assert result.passed is True
+    assert result.decision is Decision.APPLY  # stage 5 sees the improvement
+    # the tools serialization probe is never taken for a processor candidate
+    assert spy.calls == 0
+    cert = stub._candidate_meta["C-R1-01"]["l2_certification"]
+    assert cert["outcome"] == "certified_processor_replay"
+    assert cert["provenance"] == "OURS_machine_certified_v2"
+    assert cert["tool"] is None
+    assert cert["output_chars"] is None
+    assert "OURS-v2" in cert["note"]
+    assert "real execution evidence" in cert["note"]
+
+
+def test_processor_only_replay_missing_is_unchanged_fail(tmp_path) -> None:
+    """v2: no REPLAY.md beside the config -> byte-identical built-in FAIL, no record."""
+    stub = _StubRecipe(tmp_path)
+    art, _config_path = _proc_artifact(tmp_path, buckets=("processor",))
+    # deliberately do NOT write REPLAY.md
+    builtin = run_gate(art, tmp_path / "p.yaml", SuccessLedger(), _FLAT)
+
+    result = _run(
+        stub, art, parent_config=tmp_path / "p.yaml", tk_results=_FLAT,
+        serializer_factory=_surviving_factory,
+    )
+
+    assert result.failed_stage is GateStage.ROUNDTRIP_L2
+    assert result.decision is None
+    assert result.archive_reason == builtin.archive_reason
+    assert "l2_certification" not in stub._candidate_meta.get("C-R1-01", {})
+
+
+def test_processor_only_replay_fail_marker_is_unchanged_fail(tmp_path) -> None:
+    """v2: a REPLAY.md carrying the fail title (no pass marker) -> unchanged FAIL."""
+    stub = _StubRecipe(tmp_path)
+    art, config_path = _proc_artifact(tmp_path, buckets=("processor",))
+    _write_replay(config_path, ok=False)  # "# Replay gate failed" — REPLAY_FAIL-style
+    builtin = run_gate(art, tmp_path / "p.yaml", SuccessLedger(), _FLAT)
+
+    result = _run(
+        stub, art, parent_config=tmp_path / "p.yaml", tk_results=_FLAT,
+        serializer_factory=_surviving_factory,
+    )
+
+    assert result.failed_stage is GateStage.ROUNDTRIP_L2
+    assert result.decision is None
+    assert result.archive_reason == builtin.archive_reason
+    assert "l2_certification" not in stub._candidate_meta.get("C-R1-01", {})
+
+
+def test_processor_declared_evidence_still_defers_no_replay_read(tmp_path) -> None:
+    """甲 wins for processor too: a declared entry defers to the built-in, no probe/replay."""
+    stub = _StubRecipe(tmp_path)
+    manifest = _manifest(buckets=("processor",), tool_path=None, declared=True)
+    config_path = tmp_path / "cand" / "C-R1-01" / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_replay(config_path, ok=True)  # present but must be ignored (declared wins)
+    art = _artifact(manifest, tmp_path, config_path=config_path)
+    spy = _SpyFactory()
+
+    result = _run(
+        stub, art, parent_config=tmp_path / "p.yaml", tk_results=_IMPROVE,
+        serializer_factory=spy,
+    )
+
+    assert result.passed is True
+    assert result.decision is Decision.APPLY
+    assert spy.calls == 0
+    # deferred to the built-in declaration path -> no machine record written
+    assert "l2_certification" not in stub._candidate_meta.get("C-R1-01", {})
+
+
+def test_tools_only_still_takes_the_v1_probe_even_beside_a_passing_replay(tmp_path) -> None:
+    """Tools-bucket behaviour is unchanged: v1 serialization probe, not the replay path."""
+    stub = _StubRecipe(tmp_path)
+    art, config_path = _proc_artifact(tmp_path, buckets=("tools",), tool_path="tools/MyTool")
+    _write_replay(config_path, ok=True)  # a passing replay must NOT short-circuit tools
+    sessions = _wire_candidate_dir(stub, "C-R1-01", tmp_path)
+    _write_tool_session(sessions, "MyTool", "surviving-output", external=False)
+    spy = _SpyFactory()
+
+    result = _run(
+        stub, art, parent_config=tmp_path / "p.yaml", tk_results=_IMPROVE,
+        serializer_factory=spy,
+    )
+
+    assert result.passed is True
+    assert spy.calls == 1  # the v1 probe path WAS taken
+    cert = stub._candidate_meta["C-R1-01"]["l2_certification"]
+    assert cert["outcome"] == "certified"  # NOT certified_processor_replay
+    assert cert["provenance"] == "OURS_machine_certified"
+    assert cert["tool"] == "MyTool"
+
+
+def test_mixed_tools_processor_invoked_takes_the_tools_probe(tmp_path) -> None:
+    """Mixed tools+processor with the tool invoked -> tools rule wins (v1 probe)."""
+    stub = _StubRecipe(tmp_path)
+    art, config_path = _proc_artifact(
+        tmp_path, buckets=("tools", "processor"), tool_path="tools/MyTool"
+    )
+    _write_replay(config_path, ok=True)  # present; the tools rule ignores it
+    sessions = _wire_candidate_dir(stub, "C-R1-01", tmp_path)
+    _write_tool_session(sessions, "MyTool", "surviving-output", external=False)
+    spy = _SpyFactory()
+
+    result = _run(
+        stub, art, parent_config=tmp_path / "p.yaml", tk_results=_IMPROVE,
+        serializer_factory=spy,
+    )
+
+    assert result.passed is True
+    assert spy.calls == 1
+    assert stub._candidate_meta["C-R1-01"]["l2_certification"]["outcome"] == "certified"
+
+
+def test_mixed_tools_processor_never_invoked_still_honest_rejects(tmp_path) -> None:
+    """The processor path never rescues a mixed candidate whose tool never ran."""
+    stub = _StubRecipe(tmp_path)
+    art, config_path = _proc_artifact(
+        tmp_path, buckets=("tools", "processor"), tool_path="tools/MyTool"
+    )
+    _write_replay(config_path, ok=True)  # a passing replay must NOT rescue it
+    _wire_candidate_dir(stub, "C-R1-01", tmp_path)  # no session files -> tool never invoked
+
+    result = _run(
+        stub, art, parent_config=tmp_path / "p.yaml", tk_results=_FLAT,
+        serializer_factory=_surviving_factory,
+    )
+
+    assert result.failed_stage is GateStage.ROUNDTRIP_L2
+    assert result.decision is None
+    cert = stub._candidate_meta["C-R1-01"]["l2_certification"]
+    assert cert["outcome"] == "no_invocation"  # NOT certified_processor_replay
+    assert "never invoked" in result.archive_reason
 
 
 # ===========================================================================

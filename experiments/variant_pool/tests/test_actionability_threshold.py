@@ -65,3 +65,25 @@ def test_paper_brief_spells_out_the_capability_evidence_type_vocabulary() -> Non
     brief = rvp.PAPER_MANIFEST_SCHEMA_BRIEF
     assert "python_package, http_endpoint, builtin_tool, filesystem, other" in brief
     assert "use 'other' when unsure" in brief
+
+
+def test_repo_brief_requires_tool_adoption_coupling() -> None:
+    # runs/a1pilot2: two tool candidates died because the worker never invoked
+    # the new tool (registered != used). The repo contract must couple a new tool
+    # to prompt guidance that drives its adoption (paper's C-R10-02 = tools+prompt+config).
+    brief = rvp.REPO_MANIFEST_SCHEMA_BRIEF
+    assert "A candidate that ADDS a tool MUST also modify the system prompt template" in brief
+    assert "registered-but-never-invoked tool cannot produce capability evidence" in brief
+    assert "predicted_affected" in brief  # repo journal vocabulary
+    assert "C-R10-02 ships tools+prompt+config together" in brief
+
+
+def test_paper_brief_also_requires_tool_adoption_coupling_in_paper_vocab() -> None:
+    # The paper brief carries the same requirement, adapted to paper vocabulary
+    # (predicted_impact.tasks_will_unlock) — the journal `predicted_affected` key
+    # only appears in the brief's own prohibition, never in this new requirement.
+    brief = rvp.PAPER_MANIFEST_SCHEMA_BRIEF
+    assert "A candidate that ADDS a tool MUST also modify the system prompt template" in brief
+    assert "predicted_impact.tasks_will_unlock" in brief
+    assert "must list tasks where that trigger" in brief
+    assert "registered-but-never-invoked tool cannot produce capability evidence" in brief

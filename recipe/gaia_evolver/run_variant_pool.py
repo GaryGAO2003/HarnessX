@@ -209,6 +209,13 @@ FORCE_GATE_MODES = ("off", "apply", "fork")
 L2_CERT_MODES = ("auto", "off")
 DEFAULT_L2_CERT = "auto"
 
+#: The pass-marker replay.py writes as the first line of ``REPLAY.md`` on a
+#: passing smoke (``harnessx/meta_harness/replay.py`` ``render_report_md`` ->
+#: "# Replay gate passed"; the fail path titles it "# Replay gate failed").
+#: Pinned from real artifacts under ``recipe/gaia_evolver/runs/a1pilot2`` — the
+#: OURS-v2 processor-bucket certification reads it (see :func:`_make_l2_certifier`).
+_REPLAY_PASS_MARKER = "# Replay gate passed"
+
 #: --aegis-digester — Phase A1 of the LLM-AEGIS reconstruction
 #: (experiments/docs/REPRO-COMPLETION-PLAN.md). The paper's Digester (§4.3) is
 #: LLM-driven; our current adapter is a deterministic approximation.
@@ -323,7 +330,13 @@ PAPER_MANIFEST_SCHEMA_BRIEF = (
     "For tools/processor buckets, at least ONE capability_evidence claim MUST "
     "contain the phrase 'Level 2' asserting the tool return survives provider "
     "serialization (the example's second entry is the reference shape) — the "
-    "deterministic gate rejects code candidates without it at ROUNDTRIP_L2."
+    "deterministic gate rejects code candidates without it at ROUNDTRIP_L2. "
+    "A candidate that ADDS a tool MUST also modify the system prompt template (or "
+    "an instruction the worker sees) telling the agent WHEN to use the new tool, "
+    "and `predicted_impact.tasks_will_unlock` must list tasks where that trigger "
+    "fires — a registered-but-never-invoked tool cannot produce capability evidence "
+    "and is rejected at the gate (runs/a1pilot2: two candidates died exactly this "
+    "way; the paper's C-R10-02 ships tools+prompt+config together)."
 )
 
 # --manifest-mode repo — the caller adapts the meta-agent's repo-native products
@@ -349,6 +362,12 @@ REPO_MANIFEST_SCHEMA_BRIEF = (
     "(2) one entry whose claim contains 'Level 2' asserting the tool return "
     "survives provider serialization to the model, with the observed evidence "
     "(e.g. \"tool output of N chars appeared intact in the next model message\"). "
+    "A candidate that ADDS a tool MUST also modify the system prompt template (or "
+    "an instruction the worker sees) telling the agent WHEN to use the new tool, "
+    "and its `predicted_affected` tasks must be ones where that trigger fires. A "
+    "registered-but-never-invoked tool cannot produce capability evidence and is "
+    "rejected at the gate (runs/a1pilot2: two candidates died exactly this way; the "
+    "paper's C-R10-02 ships tools+prompt+config together). "
     "Never fabricate: only claim what you observed in this session."
 )
 
@@ -828,14 +847,28 @@ def _forced_gate_banner(mode: str) -> str:
 # This is measurement, not a softened gate (the 墓碑 old road): an honest reject
 # stands when the tool was never invoked (no evidence possible) or the real
 # output does not survive serialization (a C-R10-02-class catch, more informative
-# than "not declared"). Meta-declared evidence, the non-code exemption, and the
-# processor bucket (declared-only in v1) all keep the built-in ``_declared_level2``
-# behaviour. Injected only for ``--manifest-mode repo`` paper-candidate runs; the
-# paper manifest arm is untouched (faithful arm), and legacy opaque candidates
-# have no manifest-backed stage 4 to certify. Recorded as deviation M-22. The gate
-# callable is injected through the engine's existing seam
-# (``VariantPoolEngine(..., gate=...)`` -> ``run_gate(..., check_roundtrip=...)``,
+# than "not declared"). Meta-declared evidence and the non-code exemption keep the
+# built-in ``_declared_level2`` behaviour. Injected only for ``--manifest-mode
+# repo`` paper-candidate runs; the paper manifest arm is untouched (faithful arm),
+# and legacy opaque candidates have no manifest-backed stage 4 to certify. Recorded
+# as deviation M-22. The gate callable is injected through the engine's existing
+# seam (``VariantPoolEngine(..., gate=...)`` -> ``run_gate(..., check_roundtrip=...)``,
 # gate.py:384-410); nothing under experiments/ or harnessx/ is modified.
+#
+# OURS-v2 (pending morning review): the processor bucket was declared-only in v1
+# (a1pilot2: two processor candidates died ``ROUNDTRIP_L2: no Level-2 round-trip
+# evidence for bucket=['processor']``). A processor adds no model-visible return to
+# serialize, so v1's probe has nothing to certify. v2 certifies a PROCESSOR-only,
+# undeclared candidate from REPLAY-EXECUTION evidence instead: reaching the gate
+# means evolve's internal replay smoke PASSED with this config, and every
+# registered processor is an unconditional run-loop hook (harnessx/core/processor.py),
+# so it executed inside the real run. We verify the artifact — the candidate's
+# ``_meta_scratch/REPLAY.md`` (sibling of the winning attempt's config, located as
+# ``_finalize_slot`` locates manifest.yaml) exists and carries the pass marker. This
+# is weaker than the tools serialization probe (real execution evidence, not
+# serialization survival). Mixed tools+processor keeps the tools rule: a tool that
+# was added still takes the v1 probe and honest-rejects if it was never invoked —
+# the processor path never rescues it.
 
 
 def _real_tool_serializer() -> Callable[[str], Any]:
@@ -1020,6 +1053,7 @@ def _l2_record(
     output_chars: int | None,
     note: str,
     passed: bool,
+    provenance: str = "OURS_machine_certified",
 ) -> tuple[bool, str]:
     """Write the machine-certification audit into the recipe's candidate meta.
 
@@ -1027,13 +1061,15 @@ def _l2_record(
     the ``(passed, reason)`` pair stage 4 expects. A PASS reason is tagged as ours;
     a FAIL reason is the bare note so the archived ``ROUNDTRIP_L2: <note>`` reads as
     the specific catch (empty return / dropped content / never invoked / no target).
+    ``provenance`` defaults to the v1 tag; the OURS-v2 processor path passes
+    ``OURS_machine_certified_v2``.
     """
     record = {
         "outcome": outcome,
         "tool": tool,
         "output_chars": output_chars,
         "note": note,
-        "provenance": "OURS_machine_certified",
+        "provenance": provenance,
     }
     try:
         recipe._candidate_meta.setdefault(candidate_id, {})["l2_certification"] = record
@@ -1044,6 +1080,59 @@ def _l2_record(
     return False, note
 
 
+def _l2_certify_processor_replay(
+    recipe: Any,
+    candidate: Any,
+    candidate_id: str,
+    manifest: ChangeManifest,
+) -> tuple[bool, str]:
+    """Stage-4 certification for a PROCESSOR-only candidate (OURS-v2, pending morning review).
+
+    v1's probe certifies a tool's model-visible return by re-running it through the
+    provider serializer; a processor adds no such return (it is an unconditional
+    run-loop hook, ``harnessx/core/processor.py``), so there is nothing to
+    serialize. Instead this certifies from REPLAY-EXECUTION evidence: the candidate
+    only reaches this gate because evolve's internal replay smoke PASSED with this
+    config, and a passing replay drives the real run loop end to end -> every
+    registered processor executed. We verify that artifact: the candidate's
+    ``_meta_scratch/REPLAY.md`` — sibling of the winning attempt's ``config.yaml``,
+    located exactly as :meth:`VariantPoolRecipe._finalize_slot` locates
+    ``manifest.yaml`` (``config_path.parent / "_meta_scratch" / <file>``) — exists
+    and carries :data:`_REPLAY_PASS_MARKER`.
+
+    This is weaker than the tools serialization probe (real execution evidence, not
+    serialization survival). A missing ``REPLAY.md`` or one without the pass marker
+    (e.g. REPLAY_FAIL-style "# Replay gate failed" content) keeps the built-in FAIL
+    unchanged (:func:`_declared_level2`) and records nothing, so the archived
+    ``ROUNDTRIP_L2`` reason is byte-identical to today's processor rejection.
+    """
+    config_path = getattr(candidate, "config_path", None)
+    if config_path is not None:
+        replay_path = Path(config_path).parent / "_meta_scratch" / "REPLAY.md"
+        if replay_path.is_file():
+            try:
+                text = replay_path.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001 - an unreadable artifact is treated as absent
+                text = ""
+            if _REPLAY_PASS_MARKER in text:
+                return _l2_record(
+                    recipe,
+                    candidate_id,
+                    outcome="certified_processor_replay",
+                    tool=None,
+                    output_chars=None,
+                    note=(
+                        "processor executed in passing replay smoke (OURS-v2; weaker "
+                        "than the tools serialization probe — real execution "
+                        "evidence, not serialization survival)"
+                    ),
+                    passed=True,
+                    provenance="OURS_machine_certified_v2",
+                )
+    # No passing replay artifact: unchanged built-in FAIL, recording nothing.
+    return _declared_level2(manifest)
+
+
 def _make_l2_certifier(
     recipe: Any,
     candidate: Any,
@@ -1052,29 +1141,42 @@ def _make_l2_certifier(
 ) -> Callable[[Any], tuple[bool, str]]:
     """Build the stage-4 ``check_roundtrip`` for one candidate (SPEC §7.11).
 
-    Receives the manifest the gate unwraps (gate.py:409). Cases 甲/exempt/processor
-    defer to the built-in :func:`_declared_level2` (meta wins / no code / declared-
-    only); a tool-bucket manifest with no declared Level-2 entry is machine-
-    certified from the candidate's real eval-trajectory tool output.
+    Receives the manifest the gate unwraps (gate.py:409). Cases 甲/exempt/opaque
+    defer to the built-in :func:`_declared_level2` (meta wins / no code). A
+    tool-bucket manifest with no declared Level-2 entry is machine-certified from
+    the candidate's real eval-trajectory tool output (v1); a PROCESSOR-only,
+    undeclared candidate is certified from replay-execution evidence
+    (:func:`_l2_certify_processor_replay`, OURS-v2, pending morning review).
     """
 
     def _check(manifest: Any) -> tuple[bool, str]:
-        # 甲 (declared) / non-code exempt / processor-only (declared-only, v1):
-        # all keep the built-in stage-4 behaviour exactly.
+        # 甲 (declared) / non-code exempt / opaque: keep the built-in stage-4
+        # behaviour exactly.
         if (
             not isinstance(manifest, ChangeManifest)
             or manifest.level2_evidence() is not None
             or not manifest.needs_code_verification()
-            or "tools" not in set(manifest.bucket)
         ):
             return _declared_level2(manifest)
 
-        # 乙: tools bucket, no declared evidence -> certify from the real run.
         candidate_id = manifest.candidate_id or str(getattr(candidate, "candidate_id", "") or "")
         target_variant = str(getattr(candidate, "target_variant", "") or manifest.target_variant or "")
         candidate_config = getattr(candidate, "config_path", None)
 
+        # Distinguish tools involvement from processor-only via the same
+        # target-derivation logic the tools path uses below.
         targets = _l2_target_tool_names(manifest, parent_config, candidate_config)
+
+        # PROCESSOR-only (OURS-v2, pending morning review): a code candidate that
+        # adds/changes NO tool and does not claim the tools bucket. v1's tool-output
+        # serialization probe has nothing to probe, so certify from REPLAY-EXECUTION
+        # evidence. Mixed tools+processor keeps the tools rule (targets non-empty, or
+        # the tools bucket, falls through to the v1 probe; a never-invoked tool still
+        # honest-rejects there — the processor path never rescues it).
+        if not targets and "tools" not in set(manifest.bucket):
+            return _l2_certify_processor_replay(recipe, candidate, candidate_id, manifest)
+
+        # 乙: tools bucket, no declared evidence -> certify from the real run.
         if not targets:
             return _l2_record(
                 recipe,

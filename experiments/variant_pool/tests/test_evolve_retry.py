@@ -209,7 +209,11 @@ def test_repo_mode_injects_journal_acceptance_not_the_paper_schema() -> None:
     assert brief["manifest_mode"] == "repo"
     assert "journal vocabulary" in brief["manifest_instructions"]
     assert "levers" in brief["manifest_instructions"]
-    assert "C-R10-02" not in brief["manifest_instructions"]
+    # Repo mode must not inject the paper's Table 9 SCHEMA. ``Table 9`` is the
+    # schema marker (the paper-mode test asserts it present). The tool-adoption
+    # coupling note cites the paper's C-R10-02 as a one-line motivating example,
+    # so C-R10-02 alone is no longer a valid "no paper schema" proxy.
+    assert "Table 9" not in brief["manifest_instructions"]
     assert "did not commit to a final decision" in brief["decision_contract_requirement"]
 
 
