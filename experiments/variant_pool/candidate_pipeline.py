@@ -56,6 +56,11 @@ class PipelineContext:
     memo_path: Path | None = None
     regressions: tuple[str, ...] = ()
     failure_buckets: tuple[str, ...] = ()
+    #: F-B: the subset of ``regressions`` a shipped APPLY/FORK config change
+    #: caused. ``None`` (default) = strict accountability (byte-identical veto);
+    #: a tuple = shipped_only accountability (only these hard-gate). Forwarded to
+    #: :class:`~experiments.variant_pool.critic.CriticContext`.
+    shipped_regressions: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "current_config_path", Path(self.current_config_path))
@@ -720,6 +725,7 @@ class CandidatePipeline:
                 digests=digests,
                 regressions=context.regressions,
                 failure_buckets=context.failure_buckets,
+                shipped_regressions=context.shipped_regressions,
             ),
             candidates=candidates,
         )

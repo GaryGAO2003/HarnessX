@@ -150,6 +150,8 @@ from experiments.variant_pool.critic import (
     CriticStage,
     DeterministicCritic,
     RevisionRequest,
+    demoted_regression_concern,
+    regressions_for_gate,
 )
 from experiments.variant_pool.evidence import EvidenceStore, RejectedCandidate, TaskDigest
 from experiments.variant_pool.experiment_lock import (
@@ -200,6 +202,28 @@ MANIFEST_MODES = ("repo", "paper")
 DEFAULT_MANIFEST_MODE = "repo"
 #: One Critic-style revision is allowed on a no-config outcome (paper §4.3).
 DEFAULT_EVOLVE_RETRY = 1
+
+#: --search-backend (W1). ``chain`` (default) keeps the built-in ``WebSearch``
+#: fallback chain byte-identical; ``serper`` swaps a Serper-first drop-in
+#: (``harnessx.tools.contrib.serper_search``) into the deployed H0 registry.
+SEARCH_BACKENDS = ("chain", "serper")
+DEFAULT_SEARCH_BACKEND = "chain"
+
+#: --evolve-commit-bounce (W1/F-A). ``off`` (default) is byte-identical; ``on``
+#: lets a no-config slot get ONE short, tiny-budget "commit a decision" bounce
+#: before it is failed (treats the meta-agent's empty-handed early ``end_turn``).
+EVOLVE_COMMIT_BOUNCE_MODES = ("off", "on")
+DEFAULT_EVOLVE_COMMIT_BOUNCE = "off"
+#: The bounce runs a strictly bounded continuation so it is cheap: <= 15 steps.
+_BOUNCE_MAX_STEPS = 15
+
+#: --regression-accountability (F-B). ``strict`` (default) is byte-identical: any
+#: active regression can trigger the whole-round no-op veto. ``shipped_only`` only
+#: hard-gates regressions a shipped APPLY/FORK config change actually caused;
+#: rejected-candidate gate regressions and zero-ship inter-round variance are
+#: demoted to (visible, non-blocking) ``strategy_concerns``.
+REGRESSION_ACCOUNTABILITY_MODES = ("strict", "shipped_only")
+DEFAULT_REGRESSION_ACCOUNTABILITY = "strict"
 
 #: --force-gate — TEMPORARY plumbing-probe modes. ``off`` is the default and
 #: keeps the deterministic gate byte-identical; ``apply``/``fork`` override the
@@ -1680,6 +1704,9 @@ async def _evolve_candidate_with_retry(
     base_evolve_kwargs: Mapping[str, Any],
     max_retries: int,
     paper_evolver_guidance: str | None = None,
+    commit_bounce: str = "off",
+    bounce_max_steps: int = _BOUNCE_MAX_STEPS,
+    bounce_audit: "dict[str, Any] | None" = None,
 ) -> _EvolveOutcome:
     """Run ``slot_agent.evolve``; on a *no-config* outcome, retry with feedback.
 
@@ -1733,6 +1760,38 @@ async def _evolve_candidate_with_retry(
                     exc,
                 )
                 continue
+            # F-A (--evolve-commit-bounce on): retries are exhausted and the slot
+            # STILL produced no config.yaml. Before failing, give it exactly one
+            # short, tiny-budget "commit a decision now" bounce. Only a genuine
+            # no-config outcome (DECISION_REQUIRED.md present) is eligible — a raw
+            # error (timeout, validator failure) is never bounced. When
+            # commit_bounce == "off" this whole block is skipped and the original
+            # ``raise`` runs verbatim, so the default path is byte-identical.
+            if commit_bounce == "on" and decision_path.is_file():
+                bounce_feedback = decision_path.read_text(encoding="utf-8")
+                bounce_yaml = await _run_commit_bounce(
+                    slot_agent=slot_agent,
+                    slot=slot,
+                    manifest_mode=manifest_mode,
+                    target_variant=target_variant,
+                    planner_brief=planner_brief,
+                    base_evolve_kwargs=base_evolve_kwargs,
+                    decision_feedback=bounce_feedback,
+                    paper_evolver_guidance=paper_evolver_guidance,
+                    bounce_max_steps=bounce_max_steps,
+                )
+                if bounce_audit is not None:
+                    bounce_audit["bounce_used"] = True
+                    bounce_audit["bounce_outcome"] = (
+                        "shipped_via_bounce" if bounce_yaml is not None else "still_missing"
+                    )
+                if bounce_yaml is not None:
+                    return _EvolveOutcome(
+                        config_path=Path(bounce_yaml),
+                        attempts=attempt + 2,  # + the one bounce invocation
+                        retries=attempt,
+                        decision_required_history=(*decision_history, bounce_feedback),
+                    )
             raise
         return _EvolveOutcome(
             config_path=Path(new_yaml),
@@ -1741,6 +1800,91 @@ async def _evolve_candidate_with_retry(
             decision_required_history=tuple(decision_history),
         )
     raise AssertionError("unreachable: retry loop exited without return/raise")
+
+
+#: The bounce directive injected into the meta-agent's ``TASK.md`` (F-A). Its
+#: wording deliberately reuses the ``DECISION_REQUIRED.md`` generator's two-valid-
+#: endings phrasing (``harnessx/meta_harness/agent.py`` ``_write_missing_config_findings``:
+#: "Choose exactly one ... Either choice is valid; missing config.yaml is not").
+_COMMIT_BOUNCE_DIRECTIVE = (
+    "FINAL COMMIT STEP (bounce). This is a short, strictly bounded continuation "
+    f"(<= {_BOUNCE_MAX_STEPS} steps). Do NOT start new analysis or research. Your "
+    "previous session ended with analysis but never wrote `config.yaml`. End THIS "
+    "turn by choosing exactly one valid ending: (1) SHIP — write "
+    "`output_dir/config.yaml` with your best change; or (2) EXPLICIT NO-OP — copy "
+    "the current config byte-for-byte with `cp <current_config> "
+    "output_dir/config.yaml`. Either choice is valid; a missing `config.yaml` is not."
+)
+
+
+async def _run_commit_bounce(
+    *,
+    slot_agent: Any,
+    slot: "CandidateSlot",
+    manifest_mode: str,
+    target_variant: str,
+    planner_brief: Mapping[str, Any],
+    base_evolve_kwargs: Mapping[str, Any],
+    decision_feedback: str,
+    paper_evolver_guidance: str | None,
+    bounce_max_steps: int,
+) -> "Path | None":
+    """One short, tiny-budget continuation asking the meta-agent to commit a decision.
+
+    F-A. ``MetaAgent.evolve`` runs a *fresh* session each call and exposes no
+    resume seam, so the mechanically-reliable "continuation" is a fresh evolve
+    that (a) carries the prior session's ``DECISION_REQUIRED.md`` text — which
+    includes the meta-agent's own last-assistant excerpt, i.e. where it stalled —
+    back through the existing ``prior_decision_required_feedback`` contract seam,
+    (b) adds the explicit two-valid-endings :data:`_COMMIT_BOUNCE_DIRECTIVE`, and
+    (c) runs under a shrunken step budget (``<= bounce_max_steps``). It writes to
+    an isolated ``<slot>/bounce`` dir so a partial write cannot contaminate the
+    base slot. Returns the produced ``config.yaml`` path, or ``None`` if the
+    bounce also failed to commit (the caller then takes the normal failure path).
+    Never raises — a failed bounce must not become a new failure mode.
+    """
+    bounce_dir = Path(slot.output_dir) / "bounce"
+    bounce_dir.mkdir(parents=True, exist_ok=True)
+    bounce_brief = dict(planner_brief)
+    bounce_brief["commit_bounce_directive"] = _COMMIT_BOUNCE_DIRECTIVE
+    contract = _build_candidate_contract(
+        manifest_mode=manifest_mode,
+        suggested_candidate_id=slot.suggested_candidate_id,
+        target_variant=target_variant,
+        planner_brief=bounce_brief,
+        decision_feedback=decision_feedback,
+        paper_evolver_guidance=paper_evolver_guidance,
+    )
+    slot_agent.set_candidate_contract(contract)
+
+    # Shrink the step budget for the bounce (best-effort: a stub agent may not
+    # expose ``max_steps``). Restored in ``finally`` so the slot agent is left as
+    # it was found.
+    prev_steps = getattr(slot_agent, "max_steps", None)
+    if isinstance(prev_steps, int) and prev_steps > 0:
+        try:
+            slot_agent.max_steps = min(int(bounce_max_steps), prev_steps)
+        except Exception:  # noqa: BLE001 - budget shrink is best-effort
+            pass
+    try:
+        new_yaml = await slot_agent.evolve(
+            output_dir=bounce_dir,
+            **dict(base_evolve_kwargs),
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed bounce is not fatal
+        logger.warning(
+            "[%s] commit bounce did not produce config.yaml: %s",
+            slot.suggested_candidate_id,
+            exc,
+        )
+        return None
+    finally:
+        if isinstance(prev_steps, int):
+            try:
+                slot_agent.max_steps = prev_steps
+            except Exception:  # noqa: BLE001
+                pass
+    return Path(new_yaml) if new_yaml is not None else None
 
 
 @dataclass
@@ -3226,7 +3370,10 @@ class _LLMCritic:
         notes.extend(repair_notes)
 
         # -- whole-round regression veto (parity with DeterministicCritic) ---
-        veto = self._regression_veto(context, candidates, rejected_ids)
+        # F-B: demoted (non-shipped) regressions become visible, non-blocking
+        # concerns; strict accountability returns none, so ``notes`` is unchanged.
+        veto, demoted_concerns = self._regression_veto(context, candidates, rejected_ids)
+        notes.extend(demoted_concerns)
         if veto is not None:
             return CriticReview(
                 rejections=tuple(rejections),
@@ -3307,7 +3454,7 @@ class _LLMCritic:
         context: CriticContext,
         candidates: tuple[CandidateArtifact, ...],
         rejected_ids: set[str],
-    ) -> str | None:
+    ) -> "tuple[str | None, tuple[str, ...]]":
         """The DeterministicCritic whole-round veto, reused so the LLM cannot bypass it.
 
         ``DeterministicCritic._unresolved_regressions`` is a stateless staticmethod;
@@ -3315,19 +3462,33 @@ class _LLMCritic:
         duplicating it and without touching critic.py. Computed over the surviving
         (non-rejected) candidates, matching how the deterministic Critic computes it
         over its post-audit eligible set.
+
+        Returns ``(veto_reason_or_None, demoted_concerns)``. F-B: under shipped_only
+        accountability only shipped-caused regressions can produce the veto; the
+        rest are returned as demoted ``strategy_concerns``. Strict accountability
+        (``context.shipped_regressions is None``) puts every regression in the gate
+        set and returns no demoted concerns, so the veto is byte-identical.
         """
         surviving = [
             candidate for candidate in candidates if candidate.candidate_id not in rejected_ids
         ]
+        gate_regressions, demoted_regressions = regressions_for_gate(context)
+        demoted_concerns = tuple(
+            demoted_regression_concern(task_id)
+            for task_id in DeterministicCritic._unresolved_regressions(
+                demoted_regressions, surviving
+            )
+        )
         unresolved = DeterministicCritic._unresolved_regressions(
-            context.regressions, surviving
+            gate_regressions, surviving
         )
         if not unresolved:
-            return None
-        return (
+            return None, demoted_concerns
+        veto = (
             "whole-round no-op: regressions were neither handled in tasks_at_risk "
             f"nor explained: {', '.join(unresolved)}"
         )
+        return veto, demoted_concerns
 
     # -- LLM plumbing / fallback ---------------------------------------------
 
@@ -3422,6 +3583,31 @@ class VariantPoolRecipe:
         self.evolve_retry = int(getattr(args, "evolve_retry", DEFAULT_EVOLVE_RETRY))
         if self.evolve_retry < 0:
             raise ValueError(f"evolve_retry must be >= 0, got {self.evolve_retry}")
+        # --evolve-commit-bounce (F-A). ``off`` (default) is byte-identical.
+        self.evolve_commit_bounce = str(
+            getattr(args, "evolve_commit_bounce", DEFAULT_EVOLVE_COMMIT_BOUNCE)
+        )
+        if self.evolve_commit_bounce not in EVOLVE_COMMIT_BOUNCE_MODES:
+            raise ValueError(
+                f"evolve_commit_bounce must be one of {EVOLVE_COMMIT_BOUNCE_MODES}, "
+                f"got {self.evolve_commit_bounce!r}"
+            )
+        # --regression-accountability (F-B). ``strict`` (default) is byte-identical.
+        self.regression_accountability = str(
+            getattr(args, "regression_accountability", DEFAULT_REGRESSION_ACCOUNTABILITY)
+        )
+        if self.regression_accountability not in REGRESSION_ACCOUNTABILITY_MODES:
+            raise ValueError(
+                f"regression_accountability must be one of {REGRESSION_ACCOUNTABILITY_MODES}, "
+                f"got {self.regression_accountability!r}"
+            )
+        #: F-B: rounds in which each variant's deployed config changed via an
+        #: APPLY/FORK ship. Accumulated across rounds in ``_reconcile`` (never reset
+        #: per round) and read by ``_shipped_caused_regressions`` to classify which
+        #: regressions a shipped change actually caused. Only consulted under
+        #: ``regression_accountability == 'shipped_only'``; in ``strict`` mode it is
+        #: written but never read, so ``strict`` runs stay byte-identical.
+        self._config_change_rounds: dict[str, list[int]] = {}
         # --force-gate: TEMPORARY plumbing probe. ``off`` keeps the gate
         # byte-identical (the engine receives the real ``run_gate``); ``apply``/
         # ``fork`` override the final decision to exercise the settlement chain.
@@ -3977,6 +4163,7 @@ class VariantPoolRecipe:
                 self.actionability_threshold
             ),
         )
+        _regressions = self._recent_regressions(variant)
         context = PipelineContext(
             round_idx=round_idx,
             target_variant=vid,
@@ -3984,8 +4171,15 @@ class VariantPoolRecipe:
             trajectories_dir=trajectories_dir,
             output_root=output_root,
             memo_path=Path(variant.journal_path),
-            regressions=self._recent_regressions(variant),
+            regressions=_regressions,
             failure_buckets=self._failure_buckets(variant),
+            # F-B: only classify shipped-caused regressions under shipped_only;
+            # ``None`` keeps the veto byte-identical in the default strict mode.
+            shipped_regressions=(
+                self._shipped_caused_regressions(variant, _regressions)
+                if self.regression_accountability == "shipped_only"
+                else None
+            ),
         )
         pipeline_result = await pipeline.run(context)
         self._pipeline_results[vid] = pipeline_result
@@ -4032,6 +4226,10 @@ class VariantPoolRecipe:
             "replay_model": self.model_config,
             "replay_max_cost_usd": min(0.5, float(self.args.max_cost)),
         }
+        # F-A: the bounce writes bounce_used / bounce_outcome here when
+        # --evolve-commit-bounce is on; it stays ``{}`` (and the ``**`` merges add
+        # nothing) when off, so the default audit is byte-identical.
+        bounce_audit: dict[str, Any] = {}
         try:
             outcome = await _evolve_candidate_with_retry(
                 slot_agent=slot_agent,
@@ -4049,6 +4247,9 @@ class VariantPoolRecipe:
                 paper_evolver_guidance=(
                     _PAPER_EVOLVER_GUIDANCE if self.aegis_prompts == "paper" else None
                 ),
+                commit_bounce=self.evolve_commit_bounce,
+                bounce_max_steps=_BOUNCE_MAX_STEPS,
+                bounce_audit=bounce_audit,
             )
         except Exception as exc:  # noqa: BLE001 - adapter converts to ProposalFailure
             self._candidate_meta[slot_id] = {
@@ -4058,6 +4259,7 @@ class VariantPoolRecipe:
                 "retries": self.evolve_retry,
                 "parse_status": "no_config_after_retry",
                 "paper_only_gaps": [],
+                **bounce_audit,
             }
             raise RuntimeError(
                 f"MetaAgent proposal failed for {slot_id}: {exc}"
@@ -4071,6 +4273,7 @@ class VariantPoolRecipe:
             "retries": outcome.retries,
             "parse_status": "ok",
             "paper_only_gaps": [],
+            **bounce_audit,
         }
         self._candidate_meta[slot_id] = meta
 
@@ -4197,6 +4400,52 @@ class VariantPoolRecipe:
             if len(ordered) >= 2 and ordered[-2].solved and not ordered[-1].solved:
                 regressions.append(task_id)
         return tuple(sorted(regressions))
+
+    def _shipped_caused_regressions(
+        self, variant: Any, regressions: Sequence[str]
+    ) -> tuple[str, ...]:
+        """The subset of ``regressions`` a shipped APPLY/FORK config change caused (F-B).
+
+        A regression is a task whose last two settled digests went solved ->
+        unsolved (the same rule as :meth:`_recent_regressions`). It is
+        *shipped-caused* when a config change (APPLY/FORK, tracked in
+        ``self._config_change_rounds``) landed on the failing carrier lineage
+        strictly after the last passing round and at or before the failing round —
+        i.e. the failing eval ran under a newly-shipped config, not the one the
+        task last passed under. With zero ships (``self._config_change_rounds``
+        empty) nothing is shipped-caused, so every flagged regression is classified
+        as a rejected-candidate gate regression or zero-ship inter-round variance
+        (runs/a1big4 R2/R3). Only consulted under ``shipped_only`` accountability.
+        """
+        regression_set = set(regressions)
+        if not regression_set:
+            return ()
+        # Exact fast path: no config has ever changed -> nothing is shipped-caused.
+        if not any(self._config_change_rounds.values()):
+            return ()
+        routed = set(variant.routed_tasks)
+        history: dict[str, list[TaskDigest]] = {}
+        for digest in self.evidence.iter_digests():
+            if digest.task_id in routed:
+                history.setdefault(digest.task_id, []).append(digest)
+        shipped: list[str] = []
+        for task_id in regression_set:
+            digests = history.get(task_id)
+            if not digests or len(digests) < 2:
+                continue
+            ordered = sorted(digests, key=lambda item: (item.round_idx, item.variant_id))
+            prev, last = ordered[-2], ordered[-1]
+            if not (prev.solved and not last.solved):
+                continue  # defensive: only classify genuine solved->unsolved flips
+            low, high = prev.round_idx, last.round_idx
+            carriers = {prev.variant_id, last.variant_id}
+            if any(
+                low < change_round <= high
+                for carrier in carriers
+                for change_round in self._config_change_rounds.get(carrier, ())
+            ):
+                shipped.append(task_id)
+        return tuple(sorted(shipped))
 
     def _failure_buckets(self, variant: Any) -> tuple[str, ...]:
         """Latest settled failure categories for the target's routed tasks."""
@@ -4551,6 +4800,8 @@ class VariantPoolRecipe:
                 self._last_traj_dir[vid] = traj_dir
                 self._adopt_candidate_memo(candidate_id, variant.journal_path)
                 self._reconcile_status[vid] = "applied"
+                # F-B: this variant's deployed config changed this round (APPLY).
+                self._config_change_rounds.setdefault(vid, []).append(result.round_idx)
             elif decision is Decision.FORK:
                 self._reconcile_status[vid] = "fork_parent_unchanged"
 
@@ -4590,6 +4841,8 @@ class VariantPoolRecipe:
             if candidate_id is not None:
                 self._adopt_candidate_memo(candidate_id, child.journal_path)
             self._reconcile_status[child_id] = "fork_child_active"
+            # F-B: the fork child is deployed with a newly-shipped config this round.
+            self._config_change_rounds.setdefault(child_id, []).append(result.round_idx)
 
     def _adopt_candidate_memo(self, candidate_id: str, journal_path: Path) -> None:
         """Promote only the selected slot's private memo into its live lineage."""
@@ -5406,6 +5659,90 @@ def _step_countdown_provenance(mode: str) -> "str | None":
     )
 
 
+def _maybe_use_serper_backend(config: Any, backend: str) -> Any:
+    """Swap the ``WebSearch`` tool for the Serper-first drop-in when ``backend == 'serper'``.
+
+    W1. ``chain`` (default) returns the *same* config object unchanged, so H0 and
+    every candidate derived from it stay byte-identical and ``harnessx/tools/contrib``
+    is never even imported. ``serper`` replaces the live H0 tool_registry's
+    ``WebSearch`` entry in place with ``serper_web_search_tool`` (identical
+    name/description/schema, Serper-first fn). Because the swapped-in tool carries
+    ``__hx_target__``, when the H0 config is serialised to ``V0/config.yaml`` the
+    entry round-trips as a ``tool_registry.custom`` import path, so every candidate
+    authored FROM H0 resolves ``WebSearch`` to the same Serper backend. Only the
+    recipe layer is touched; ``harnessx/`` and ``benchmarks/`` are not.
+    """
+    if backend == "chain":
+        return config
+    if backend != "serper":
+        raise ValueError(f"--search-backend must be one of {SEARCH_BACKENDS}, got {backend!r}")
+    from harnessx.tools.contrib.serper_search import serper_web_search_tool
+
+    registry = getattr(config, "tool_registry", None)
+    tools = getattr(registry, "_tools", None)
+    if isinstance(tools, dict) and "WebSearch" in tools:
+        # In-place, replace=True: keeps the tool name "WebSearch" so the worker is
+        # unaware and the lock's tool_registry name list is unchanged.
+        registry.register(serper_web_search_tool, replace=True)
+    else:
+        logger.warning(
+            "--search-backend serper: no 'WebSearch' tool in the H0 registry to swap; "
+            "leaving the tool set unchanged"
+        )
+    return config
+
+
+def _search_backend_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--search-backend`` (same pattern as ``--step-countdown``).
+
+    Returns ``None`` for the default ``chain`` (the lock stays byte-identical);
+    a provenance warning otherwise.
+    """
+    if mode == DEFAULT_SEARCH_BACKEND:
+        return None
+    return (
+        f"search_backend={mode} ENABLED (W1): the deployed H0 WebSearch tool was "
+        "replaced by the Serper-first drop-in (harnessx.tools.contrib.serper_search), "
+        "so the frozen h0.config_sha256 reflects WebSearch moving from tool_registry."
+        "builtin to tool_registry.custom. The tool name/description/schema are "
+        "unchanged and a 'chain' run's config + lock stay byte-identical"
+    )
+
+
+def _evolve_commit_bounce_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--evolve-commit-bounce`` (F-A).
+
+    Returns ``None`` for the default ``off`` (the lock stays byte-identical); a
+    provenance warning otherwise.
+    """
+    if mode == DEFAULT_EVOLVE_COMMIT_BOUNCE:
+        return None
+    return (
+        f"evolve_commit_bounce={mode} ENABLED (F-A): a no-config meta slot gets one "
+        f"short (<= {_BOUNCE_MAX_STEPS} steps) 'commit a decision' bounce before it is "
+        "failed. This adds meta-agent invocations (audited as bounce_used / "
+        "bounce_outcome) and can turn an otherwise-failed attempt into a settled "
+        "config.yaml, so it is not comparable byte-for-byte with an 'off' run"
+    )
+
+
+def _regression_accountability_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--regression-accountability`` (F-B).
+
+    Returns ``None`` for the default ``strict`` (the lock stays byte-identical); a
+    provenance warning otherwise.
+    """
+    if mode == DEFAULT_REGRESSION_ACCOUNTABILITY:
+        return None
+    return (
+        f"regression_accountability={mode} ENABLED (F-B): the whole-round no-op veto "
+        "hard-gates only regressions a shipped APPLY/FORK config change caused; "
+        "rejected-candidate gate regressions and zero-ship inter-round variance are "
+        "demoted to non-blocking strategy_concerns. This changes which rounds no-op, "
+        "so it is not comparable byte-for-byte with a 'strict' run"
+    )
+
+
 def _build_experiment_lock(
     *,
     args: Any,
@@ -5503,6 +5840,21 @@ def _build_experiment_lock(
     _sc_warn = _step_countdown_provenance(str(getattr(args, "step_countdown", "off")))
     if _sc_warn:
         warnings.append(_sc_warn)
+
+    # --search-backend / --evolve-commit-bounce / --regression-accountability
+    # provenance. Same byte-safe pattern: each records a warning ONLY when the flag
+    # is non-default, so a fully-default run's lock stays byte-identical.
+    for _flag_warn in (
+        _search_backend_provenance(str(getattr(args, "search_backend", DEFAULT_SEARCH_BACKEND))),
+        _evolve_commit_bounce_provenance(
+            str(getattr(args, "evolve_commit_bounce", DEFAULT_EVOLVE_COMMIT_BOUNCE))
+        ),
+        _regression_accountability_provenance(
+            str(getattr(args, "regression_accountability", DEFAULT_REGRESSION_ACCOUNTABILITY))
+        ),
+    ):
+        if _flag_warn:
+            warnings.append(_flag_warn)
 
     return ExperimentLock(
         experiment_id=run_tag,
@@ -5927,6 +6279,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "variable. Default: 1."
         ),
     )
+    parser.add_argument(
+        "--search-backend",
+        choices=SEARCH_BACKENDS,
+        default=DEFAULT_SEARCH_BACKEND,
+        help=(
+            "WebSearch backend for the deployed H0 config and every candidate "
+            "authored from it (W1). 'chain' (default) is byte-identical to the "
+            "built-in SerpAPI->Tavily->Wikipedia+Bing->DuckDuckGo chain. 'serper' "
+            "swaps in a Serper-first (serper.dev, SERPER_API_KEY) drop-in that "
+            "falls back to that same chain on a missing key / empty result / error."
+        ),
+    )
+    parser.add_argument(
+        "--evolve-commit-bounce",
+        choices=EVOLVE_COMMIT_BOUNCE_MODES,
+        default=DEFAULT_EVOLVE_COMMIT_BOUNCE,
+        help=(
+            "F-A: what to do when a meta-agent slot ends its session with analysis "
+            "but no config.yaml. 'off' (default) fails the attempt immediately "
+            "(byte-identical). 'on' first gives the SAME slot one short, strictly "
+            f"bounded (<= {_BOUNCE_MAX_STEPS} steps) 'commit a decision now' bounce "
+            "(write config.yaml or an explicit cp no-op) before failing. At most "
+            "one bounce per attempt; bounce_used / bounce_outcome are audited."
+        ),
+    )
+    parser.add_argument(
+        "--regression-accountability",
+        choices=REGRESSION_ACCOUNTABILITY_MODES,
+        default=DEFAULT_REGRESSION_ACCOUNTABILITY,
+        help=(
+            "F-B: which regressions may trigger the whole-round no-op veto. "
+            "'strict' (default) is byte-identical: any active regression can veto "
+            "the round. 'shipped_only' hard-gates only regressions an actually "
+            "shipped APPLY/FORK config change caused; rejected-candidate gate "
+            "regressions and zero-ship inter-round variance are demoted to "
+            "non-blocking strategy_concerns."
+        ),
+    )
     return parser
 
 
@@ -5989,6 +6379,13 @@ def setup(args: Any, run_dir: Path) -> dict[str, Any]:
     # the deployed config so candidates authored from it inherit it. Off leaves H0
     # byte-identical; benchmarks/ is untouched.
     original_base = _maybe_add_step_countdown(original_base, getattr(args, "step_countdown", "off"))
+
+    # --search-backend (default chain): swap WebSearch for the Serper-first drop-in
+    # in the deployed config so candidates authored from it inherit it. 'chain'
+    # leaves H0 byte-identical (same object, no contrib import); harnessx/ untouched.
+    original_base = _maybe_use_serper_backend(
+        original_base, getattr(args, "search_backend", DEFAULT_SEARCH_BACKEND)
+    )
 
     # Freeze the baseline (H0) to V0/config.yaml — the root variant's config.
     v0_dir = run_dir / "V0"

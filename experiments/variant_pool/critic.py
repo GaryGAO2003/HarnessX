@@ -40,6 +40,42 @@ class CriticContext:
     digests: tuple[TaskDigest, ...] = ()
     regressions: tuple[str, ...] = ()
     failure_buckets: tuple[str, ...] = ()
+    #: F-B (--regression-accountability). The subset of ``regressions`` a shipped
+    #: APPLY/FORK config change actually caused. ``None`` (default) = strict
+    #: accountability: EVERY regression may trigger the whole-round no-op veto
+    #: (byte-identical legacy behaviour). A tuple = shipped_only accountability:
+    #: only these hard-gate; the rest are demoted to ``strategy_concerns``.
+    shipped_regressions: tuple[str, ...] | None = None
+
+
+def regressions_for_gate(
+    context: "CriticContext",
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split ``context.regressions`` into (hard-gating, demoted-to-concerns).
+
+    F-B. Strict accountability (``context.shipped_regressions is None``): every
+    regression may hard-gate and nothing is demoted, so the whole-round veto is
+    byte-identical to the legacy behaviour. shipped_only accountability
+    (``shipped_regressions`` is a tuple): only regressions a shipped APPLY/FORK
+    change caused may hard-gate; the rest are demoted to visible, non-blocking
+    ``strategy_concerns``. Order within ``context.regressions`` is preserved.
+    """
+    if context.shipped_regressions is None:
+        return tuple(context.regressions), ()
+    shipped = set(context.shipped_regressions)
+    gating = tuple(task_id for task_id in context.regressions if task_id in shipped)
+    demoted = tuple(task_id for task_id in context.regressions if task_id not in shipped)
+    return gating, demoted
+
+
+def demoted_regression_concern(task_id: str) -> str:
+    """The ``strategy_concern`` recorded for a regression that was NOT hard-gated (F-B)."""
+    return (
+        f"regression {task_id} not hard-gated (regression-accountability=shipped_only): "
+        "no shipped APPLY/FORK config change caused it (rejected-candidate gate "
+        "regression or zero-ship inter-round variance); surfaced for visibility, "
+        "not blocking the round"
+    )
 
 
 @dataclass(frozen=True)
@@ -177,8 +213,15 @@ class DeterministicCritic:
         }
         unexplored_buckets = tuple(sorted(set(context.failure_buckets) - used_buckets))
 
+        # F-B: only shipped-caused regressions hard-gate under shipped_only
+        # accountability; the rest are demoted to concerns. Strict accountability
+        # (shipped_regressions is None) puts every regression in ``gate_regressions``
+        # and leaves ``demoted_regressions`` empty, so this is byte-identical.
+        gate_regressions, demoted_regressions = regressions_for_gate(context)
+        for task_id in self._unresolved_regressions(demoted_regressions, eligible):
+            concerns.add(demoted_regression_concern(task_id))
         unresolved_regressions = self._unresolved_regressions(
-            context.regressions,
+            gate_regressions,
             eligible,
         )
         if unresolved_regressions:
