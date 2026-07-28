@@ -18,7 +18,10 @@ Final−Peak 对比根本没成形。⇒ **保真修复在解决可见性(床/�
 ## 1. 差距矩阵要点(五态:verbatim / 声明偏差 M-xx / OURS 近似 / 缺失 / 顺延)
 
 **verbatim(核心纪律全对上)**:seesaw 全史回退判定(gate.py:194-210 ↔ §4.1 p.8)、
-三路判定、per-variant seesaw 范围、fork/retire 机制、至多一次修订、pass@2 无偏
+三路判定、per-variant seesaw **测试集**范围(候选只在 T_k 评测,§4.5;**勘误
+2026-07-28,双盲审计 NEW-1:回退基线为全局 ever_solved(§4.1 读),与 §4.5 的
+per-variant 隔离不对称——测试集层面 verbatim、基线层面系双读,详 M-23**)、
+fork/retire 机制、至多一次修订、pass@2 无偏
 估计量逐公式(reporting.py:188-210 ↔ App A.3 Eq6)、patience=3、max-steps 20、
 concurrency 10、meta 200 步、Table 9 六字段全匹配(+我方扩展另列)。
 

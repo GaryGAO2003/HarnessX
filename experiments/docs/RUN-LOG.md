@@ -457,6 +457,28 @@
   worker=flash,等预算到位即冻结开跑**。
 - 附:decomp 前提判据②(变体间按簇对比度)首批真数据已在本跑产生,S1 判读时并入。
 
+### 双盲流程审计(Jul-28 晚,用户令;A 论文侧/B 代码侧/C 仲裁,三 agent 隔离)
+- **设计**:A 只读 PDF(禁代码/文档)、B 只读 .py(禁论文/一切 .md/git log)、C 先盲
+  仲裁两图再开台账对账——检验 M-xx 申报完备度,防申报清单锚定;
+- **判决(FLOW-DIVERGENCE-VERDICT.md,commit 95375d5)**:23 条偏差,~83% 已申报
+  (台账质量高);**NEW ×3 全部藏在 K>1 的 seesaw 语义里**(K=1 探针原理上测不到,
+  这正是逃过此前所有审计的原因):
+  1. **NEW-1(高危)**:回退基线=全局跨变体 ever_solved,改进基线=per-variant,
+     不对称——变体 k 对"任何变体解过的任务"背负不回退义务;**S1(K=8)必然显形,
+     冻结前须用户终裁基线读法** → 已立 **M-23**;
+  2. NEW-2(低):R0 纯基线轮 ⇒ num_rounds=15 实得 14 适应轮(off-by-one)→ **M-24**,
+     S1 冻结时选 16 轮或申报换算;
+  3. NEW-3(中):门判定 before/after 来自两条独立 pass@2 采样流(决策层方差,
+     非 M-08 报告层)→ M-07 尾注扩写;
+- MISDECLARED ×1:GAP-AUDIT §1 "per-variant seesaw 范围=verbatim" 过度声明已勘误
+  (测试集层 verbatim、基线层双读);台账过期 ×3:M-12/M-16/M-18 已按实跑事实
+  加 [更新] 注记(主循环以 runtime 知识修正了 C 的保守草稿:全 LLM 已在 7 场实跑
+  盖章,非"code-present, not-live-tested");DEVIATIONS §4 加 CORRECTION 横幅;
+- 副产品:A 侧 15 条 UNSPECIFIED "几乎逐条命中 M-xx"=台账预言力的独立确认;
+  B 侧三条意外设计(账本由结算后全量流垄断/五关实三关/α 双默认退化)全数为真。
+- **S1 冻结新增两决策项(用户)**:①M-23 回退基线三选(全局/仅本变体/本簇);
+  ②M-24 轮数(16 轮对齐 vs 申报 14 适应轮)。
+
 ### 断点续跑机制落地(Jul-28 晚,coder 实现+主循环验收,commit 86ff8d1)
 - `--resume <run>`:轮边界重建(pool_state 谱系回放 SuccessLedger、active_pool 快照
   重建 config 路径、stale-final-ship 侦测);**lock 护栏含 provenance_warnings 比对**
