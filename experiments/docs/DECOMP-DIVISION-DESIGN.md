@@ -25,7 +25,7 @@
 | 选项 | 机制 | 调研判定(GAIA 级实测锚点) |
 |---|---|---|
 | D1 前置规划器→类型化 DAG | 每任务一次轻量分解调用 → **小固定分类学**子任务 DAG | LLMCompiler 3.7×延迟/6.7×成本降+~9%准确(多跳 QA 非 GAIA);HuggingGPT 的 {task,id,dep,args} 槽式 schema 便宜可路由。**v1 推荐载体** |
-| D2 类型化模板 | 任务分类 → 固定阶段链 | AgentOrchestra 5 角色累积消融 36.5→83.4(GAIA);deep-research 综述固定四段。**被 D1 吸收**(固定分类学=D2 的实质,套在 D1 的 DAG 里) |
+| D2 类型化模板 | 任务分类 → 固定阶段链 | AgentOrchestra(现题 TEA Protocol,6 版)累积消融 **36.54→89.04**(GAIA;勘误 Jul-28:旧记 36.5→83.4 系版本漂移,且增益主要靠 **Tool-Generator agent 非分解本身**);deep-research 综述固定四段。**被 D1 吸收**(固定分类学=D2 的实质,套在 D1 的 DAG 里) |
 | D3 orchestrator-worker | 执行中动态委派(Magentic-One 双台账) | GAIA 38.0±5.5,去台账 −31%(分解状态承重的实证);但角色手工、~2-5× token、与不可动 run loop 冲突最大。**否决 v1** |
 | D4 演化分解策略 | 分解 policy 作为 harness 组件交 AEGIS 演化 | GPTSwarm GAIA 18.45 vs 9.70;DAAO 比 MaAS +8.33% 且 64% 成本;**推理期反而更便宜**(离线搜索+按查询分配)。**留 v2**(与论文机制同构=终局形态,但冷启动+方差,先立 v1 基线) |
 | 补:涌现特化 | QD/种群小生境(AC/DC 档案、MaAS supernet) | 全部在权重/架构层——**无人做过 harness-config 特化涌现:我们的缝** |
@@ -35,15 +35,20 @@
 - **分类学**:三系统独立收敛于 4-5 类 → v1 取 **search/retrieve · browse/extract ·
   compute/reason · verify/synthesize** 四类,禁递归再分解(防过度分解级联);
 - **P-A 信用分配裁决依据**:Who&When 步级归因仅 **14.2%**、AgentProp 判官步级
-  **κ=0.43-0.57**、Shapley 系对基线敏感 ⇒ **子任务级 LLM 判官出局**;真值=确定性
+  **κ=0.432**(三 LLM 集成,单作者床;勘误 Jul-28:旧记 0.43-0.57 的上界未证已删)、
+  Shapley 系对基线敏感 ⇒ **子任务级 LLM 判官出局**;真值=确定性
   任务级门(before/after exact-match),按类信用**观察式累积**(某变体承接某类的
   任务通过率),零额外 rollout;leave-one-slot-out 只作校准用;
-- **级联控制**:静态分解重试成本 +80.5%(2605.15425);阶段间 verify-then-proceed
-  门实测 −23pp 幻觉但**模型依赖**(Gemini 上无效)——旗控实现,flash 上先测后信;
+- **级联控制**:静态分解重试成本 ≈+80%(2605.15425;勘误 Jul-28:非原文字面数,由
+  51.7%/73.2% 反推,且属 **coding-agent 域非 GAIA**,引用须带双 caveat);阶段间
+  verify-then-proceed 门实测 −23pp 幻觉但**模型依赖**(Gemini 上无效)——旗控实现,
+  flash 上先测后信;
 - **冷启动**:per-(variant×subtype) 细胞计数在 103×pass@2 规模下可辨识性存疑
   (调研开放题 #1)——回退整任务簇先验(现 AEGIS 路由)直至类计数累积;
 - **Q6**:推理时 web agent 上"分解收益 vs 指派收益"的干净拆分**无人做过**
-  (最近者 2603.06859 是 RL 训练期且关键数字开卷未见,已标未验)⇒ 2×2 即贡献。
+  (勘误 Jul-28:2603.06859 实为 "Exact Is Easier"——**信用分配 LOO/反事实**,旧记
+  "RL 训练期"系误标;它不占 2×2 的位,反而是我方 LOO 信用方案的**最佳正面先例**,
+  应正引;Q6 结论暂仍成立但原锚点作废,详 DECOMP-RESEARCH-DOSSIER)⇒ 2×2 即贡献。
 
 ## 2.2 v1 推荐包(待用户拍板)
 
