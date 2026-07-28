@@ -176,6 +176,13 @@ from experiments.variant_pool.manifest import (
 )
 from experiments.variant_pool.pool import VariantPool
 from experiments.variant_pool.reporting import CandidateTaskResult, RunReport, TaskResult
+from experiments.variant_pool.resume import (
+    annotate_resume_provenance,
+    apply_resume_state,
+    load_resume_state,
+    lock_blocking_diffs,
+    plan_resume,
+)
 from experiments.variant_pool.router import Router
 from experiments.variant_pool.target import STRATEGIES as TARGET_STRATEGIES
 from experiments.variant_pool.target import select_target_variant
@@ -3787,11 +3794,18 @@ class VariantPoolRecipe:
     # driver
     # ------------------------------------------------------------------
 
-    def run(self) -> list[RoundResult]:
-        """Run up to ``num_rounds`` rounds, reconciling config lineage between them."""
+    def run(self, start_round: int = 0) -> list[RoundResult]:
+        """Run up to ``num_rounds`` rounds, reconciling config lineage between them.
+
+        ``start_round`` (default 0, byte-identical to the original loop) lets
+        ``--resume`` continue from the round after the last settled one; the
+        engine/pool/ledger must already be rehydrated (see
+        :func:`experiments.variant_pool.resume.apply_resume_state`) before the
+        first resumed round.
+        """
         all_ids = {t.task_id for t in self.tasks if t.task_id}
         results: list[RoundResult] = []
-        for round_idx in range(int(self.args.num_rounds)):
+        for round_idx in range(int(start_round), int(self.args.num_rounds)):
             self._round_candidates = {}
             self._round_traj_dir = {}
             self._round_records = {}
@@ -6021,6 +6035,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evolve-steps", type=int, default=EVOLVE_MAX_STEPS)
     parser.add_argument("--evolve-wall-clock", type=int, default=EVOLVE_WALL_CLOCK_S)
     parser.add_argument("--run-tag", default=None, help="Label for this run's runs/<tag>/ dir.")
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help=(
+            "Resume an interrupted run: a run tag under runs/ or a path to its dir. "
+            "Rebuilds engine state from the last settled round and continues to --num-rounds "
+            "or early stop. Mutually exclusive with --clean; --run-tag is derived from the dir."
+        ),
+    )
     _default_data = str(Path(__file__).resolve().parent / "data" / "webthinker_gaia_dev.json")
     parser.add_argument("--data-path", default=_default_data, help="Local GAIA JSON (webthinker schema); '' = HF download.")
     parser.add_argument("--attachments-dir", default=None, help="Dir of per-task attachment files.")
@@ -6431,15 +6454,27 @@ def main() -> None:
             raise SystemExit(f"{flag} must be a concrete runtime value; unresolved placeholders are not runnable")
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    # --resume (default off): validate + resolve the target dir and derive
+    # --run-tag from it. Returns None when not resuming, so the path below is
+    # byte-identical to the pre-resume flow.
+    resume_dir = plan_resume(args, RUNS_DIR)
     run_tag = args.run_tag or time.strftime("pool_%Y%m%d-%H%M%S")
-    run_dir = RUNS_DIR / run_tag
+    run_dir = resume_dir if resume_dir is not None else RUNS_DIR / run_tag
     if args.clean and run_dir.exists():
         shutil.rmtree(run_dir)
         logger.info("Cleaned %s", run_dir)
-    elif run_dir.exists() and any(run_dir.iterdir()):
+    elif resume_dir is None and run_dir.exists() and any(run_dir.iterdir()):
         logger.warning("--run-tag %r already exists and is non-empty; output will interleave. Use --clean.", run_tag)
     run_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Run outputs -> %s (pool_k=%d)", run_dir, args.pool_k)
+
+    # setup() re-freezes V0/config.yaml unconditionally; on resume, keep the
+    # frozen baseline so a lock rejection cannot leave a different-H0 config behind.
+    _v0_backup: bytes | None = None
+    if resume_dir is not None:
+        _v0_cfg = run_dir / "V0" / "config.yaml"
+        if _v0_cfg.is_file():
+            _v0_backup = _v0_cfg.read_bytes()
 
     deps = setup(args, run_dir)
 
@@ -6449,7 +6484,36 @@ def main() -> None:
         baseline_config_path=deps["baseline_config_path"],
         original_base=deps["original_base"],
     )
-    lock.save(run_dir)
+
+    resume_state = None
+    if resume_dir is not None:
+        resume_state = load_resume_state(
+            run_dir, candidate_mode=str(getattr(args, "candidate_mode", "paper"))
+        )
+        existing_lock = ExperimentLock.load(run_dir)
+        blocking = lock_blocking_diffs(lock, existing_lock)
+        if blocking:
+            if _v0_backup is not None:
+                (run_dir / "V0" / "config.yaml").write_bytes(_v0_backup)
+            raise SystemExit(
+                "--resume refused: experiment.lock.json is inconsistent with this process "
+                "(comparability first; there is no --force bypass). Differences "
+                "(this run -> on-disk lock):\n  - " + "\n  - ".join(blocking)
+            )
+        annotate_resume_provenance(run_dir, existing_lock, resumed_at_round=resume_state.next_round)
+        lock = existing_lock  # the frozen family lock stays authoritative
+        for _note in resume_state.warnings:
+            logger.warning("[resume] %s", _note)
+        logger.info(
+            "[resume] continuing %s from R%d (%d settled round(s), idle=%d, %d variant(s))",
+            run_dir,
+            resume_state.next_round,
+            len(resume_state.settled_rounds),
+            resume_state.idle,
+            len(resume_state.variants),
+        )
+    else:
+        lock.save(run_dir)
 
     recipe = VariantPoolRecipe(
         args=args,
@@ -6463,7 +6527,11 @@ def main() -> None:
     )
     recipe.report.lock_sha256 = lock.sha256()
     try:
-        recipe.run()
+        if resume_state is not None:
+            apply_resume_state(recipe, resume_state)
+            recipe.run(start_round=resume_state.next_round)
+        else:
+            recipe.run()
     finally:
         recipe.close()
 
