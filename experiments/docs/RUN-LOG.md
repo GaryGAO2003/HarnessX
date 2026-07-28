@@ -407,6 +407,23 @@
 - 点火四部曲总账:a1big1 ¥11.20 + a1big2 ¥0.14 + a1big3 ¥6.58 + a1big4 ¥25.31 =
   **¥43.23**;余额 **¥59.78**,地板 ¥30 未破。
 
+### 修复三件套施工(Jul-28 下午,coder 实现+主循环验收,commit e45d48d)
+- **W1 搜索后端**:重大更正——上游 `web_search.py:354` 本就带 SerpAPI/Tavily 正规 API
+  后端,四场点火全程 keyless 跑在降级爬虫链上(坏环境半自找);经济选型定 Serper
+  (serper.dev,$1/千次,与 SerpAPI 是两家),repo 不原生支持故新增
+  `harnessx/tools/contrib/serper_search.py`(同名同 schema 换后端,worker 无感知;
+  `__hx_target__` 保证候选继承);key 已实测(验证查询首名命中昨夜 403 整夜的正确页面);
+- **W2 交付弹回** + **W3 问责修龄**:详 SPEC §7.15;W3 对 a1big4 R2/R3 实例地面真值
+  验证(两轮均正确降级放行);
+- 测试 693→**733 全绿**(主循环亲跑);默认全字节等同;三新旗标 provenance 记录齐。
+
+### fixsmoke1 — 三件套点火 smoke(Jul-28 16:16 起,进行中;用户令"先跑smoke试试")
+- calib6 × 2 轮 × K=2 × 全 LLM × 论文 prompt,**三旗全开**(serper / bounce on /
+  shipped_only)+ SERPER_API_KEY;脱会话 SOP 启动,哨兵在位;
+- 早期验证(起跑 2 分钟):部署配置实锤 WebSearch=custom serper 路径、lock provenance
+  正确;出现 1 次设计内回落(Serper 空结果→原链兜底,403 仅 2 条 vs a1big4 风暴级)。
+- 验收点:①403 比例大降 ②管线完整走通 ③shipped_only 不误废轮 ④(机会性)bounce 首秀。
+
 ### 会话成本合计(实测)
 ¥194.14 → ¥103.01(**¥91.13**:十七个 run;a1big1 另计)
 
