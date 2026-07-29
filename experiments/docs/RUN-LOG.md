@@ -525,3 +525,12 @@
   verbatim abstract 纠正为"整 query 路由、无分解"——"占位/证伪通道必须一手 verbatim"
   再添实证案例。
 - **状态:方法终裁与 coder 开工均待用户令;本批零付费跑,零上游改动。**
+
+### S1 冻结裁定落锤 + M1 decomp 开工(Jul-29 晚,用户逐项裁决)
+- ①方法按建议(D1-lite 头牌 + B0/B1/B2 臂梯 + B3 旗标二期)②**开工令**
+  ③step-countdown 关 ④M-23 开关化 `--regression-baseline {global,per_variant}`
+  默认 global + per_variant 消融(论文两读张力,用户规则"没明写就开关+对照",
+  本簇读弃)⑤`--num-rounds 16`。详 SPEC §7.17;DEVIATIONS M-23 行已记裁定。
+- M1 构建工单发 coder:subtask_pipeline.py + `--decomp-eval` 接线 + 测试;基线 755;
+  硬约束=零上游改动/默认字节等同/零网络测试/不 commit(主循环验收后提交)。
+- M-23 接线排 M1 之后(同 run_variant_pool.py 防冲突),S1 冻结前完成。

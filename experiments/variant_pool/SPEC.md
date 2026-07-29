@@ -615,3 +615,19 @@ forceprobe1 R2 暴露断路:`context.regressions` 只流入 Critic,meta 全然�
 ## 7.16 `--resume`:轮边界断点续跑(Jul-28,用户令"加 checkpoint 机制";commit 86ff8d1,733→755)
 
 **语义**:暂停=任意时刻杀进程;`--resume <run>` 从最后已结算轮重建、自下一轮续跑,损失 ≤ 进行中的那一轮;与 `--clean` 互斥;默认不传=字节等同。**重建原料与保真等级**(`experiments/variant_pool/resume.py`):Ledger 经 `SuccessLedger.record` 按轮回放 `active_pool_measurements` = 字节精确(与 `_record_settled_active_outcomes` 同一折叠路径,W21 冻结基线不漂);路由分区/idle/next_id(全谱系扫描防退役 id 复用)/created_round/journal 命名 = 直接重建;**保守面如实申报**:部署 config_path 从 `R<r>/active_pool/<vid>/config.yaml` 逐轮快照取最新(末结算轮 APPLY 无新快照 → `stale:_ship` 侦测+警告,交下轮 evolve 前滚,不静默猜);parent_id 仅单 FORK 轮可无歧义恢复;随机路由臂(epsilon>0)的 RNG 流位置不持久化 → 重播种+警告(默认臂不抽签=精确)。**lock 护栏**(`lock_blocking_diffs`,无 force 旁路):比对 `h0/models/dataset/hyperparams/env` **+ `provenance_warnings`**——六个旗臂(force-gate/ship-policy/step-countdown/search-backend/commit-bounce/regression-accountability)全记录于后者,漏比即给"参数漂移续跑"开门,故为承重比对项;忽略 created_at/experiment_id/git_sha(代码漂移已被 h0 捕获)。`resume_provenance` 以顶层键追加(`from_json` 忽略未知键 ⇒ lock sha 不变,后续护栏比对稳定)。legacy_single 模式含并发 fork 的轮 = 配对真歧义 ⇒ 拒绝续跑(不猜)。已知限:pre-resume 轮的 RunReport/round_summaries 不重建(崩溃时本就未写),`pool_states.json` 经预载保持完整,per-round `pool_state.json` 为早期轮权威。
+
+## 7.17 S1 冻结裁定包 + decomp v1 方法终裁(Jul-29,用户逐项落锤)
+
+1. **decomp 方法**:按 DESIGN §7 建议冻结——静态 D1-lite 四类型分解头牌;B0/B1/B2
+   臂梯(DESIGN §7.1;B0 = `--decomp-pool-from` 缺省纯 h0 = fresh-spawn 类比臂);
+   B3 池感知画像降维为旗标臂(二期;画像限 S1 冻结统计,禁臂内账本条件化)。
+   **coder 开工令已下**(纯代码零 API 费;付费跑仍受 E0/资金/用户明令门控)。
+2. **step-countdown:S1 关**(论文无此机制,关 = 贴论文;旗标保留供后续消融)。
+3. **M-23 回退基线**:论文未明写(§4.1 全局读 vs §4.5 per-variant 隔离,两读张力)⇒
+   按用户规则"没明写就开关化 + 对照":新旗 `--regression-baseline {global, per_variant}`,
+   **默认 global**(§4.1 字面 = 现行 ledger.py:265-267 行为 = 字节等同);per_variant 作
+   S1 消融臂;"本簇"第三读**弃**(收敛二臂)。接线排 M1 构建之后(同
+   run_variant_pool.py 防冲突),**S1 冻结前必须落地**。
+4. **轮数:`--num-rounds 16`**(= 论文 15 适应轮,M-24 对齐读法;报告口径以适应轮计)。
+
+预算档:按 M0-BUDGET-BRIEF v4 分期制执行(首期 ¥2,000,导师谈判中),不再单列档位裁定。
