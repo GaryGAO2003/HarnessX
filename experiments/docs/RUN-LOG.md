@@ -503,3 +503,25 @@
 | 881199a | L2 机器自证(乙+甲,M-22;527/0;真盘集成验证) |
 | 2f11cd7 | worker 裁决 Flash(SPEC §7.13 + 证据档案) |
 | e384636 | P1 三分计数 / P2 目标资格(轨迹∩路由任务)/ to_dict run-total + organic1 里程碑台账(535/0) |
+
+### decomp 方法双路文献扫描 + v1 终裁建议(Jul-29,用户令"先思考方法/深搜 25-26/制定骨架不写细节")
+- 两路 researcher(A 方法扫 / B 占位核验)报告落盘:`DECOMP-LITSCAN-A-METHODS.md` /
+  `DECOMP-LITSCAN-B-OCCUPANCY.md`;设计文档新增 §7 终裁建议 + §7.1 臂梯 + §8 骨架。
+- **A 判决:D1-lite 站得住**(25-26 无方法同时满足简单+GAIA 实证+免训练;唯一类型化
+  路由 Uno-Orchestra 需 SFT 61k+GRPO 且精度输 AgentOrchestra 1.4pp);**JoyAgent 消融
+  纯分解 70.3 < 单体 ReAct 71.5(GAIA)= "分解单独无用"第三证 ⇒ E0 门升承重设计、
+  论文头条钉臂间差**。
+- **B 判决:α(持久演化池分工)= 部分占**——AOrchestra L3 亲验 fresh-spawn 即弃
+  (原句 "Each SubAgent runs in a FRESH container…previous work will be lost"),
+  幸存缝 = seesaw 演化池上的 (variant×type) 路由分工;**β(池感知动态分解)= 部分占
+  近拥挤**——AOP/Topaz/FlyRoute 成分皆占、合取未占,降维为 B3 旗标臂(画像限 S1
+  冻结统计,禁臂内账本条件化=鸡生蛋+非平稳)。
+- 臂梯 v1.1:新增 **B0 = 分解 + 纯 h0**(fresh-spawn 类比臂,`--decomp-pool-from`
+  缺省即得,零建设成本)⇒ B1−B0 = 池底座收益 / **B2−B1 = 指派收益(头条)** /
+  B2−B0 = 演化池 vs 即弃头对头(port+beat 要件)。
+- 🔴 撞车监测(高):Wentao Zhang/Bo An 组两半已齐(AgentOrchestra 2506.12508 +
+  Autogenesis 2604.15034),尚无整合单篇(至 2026-07);最好防御 = 8 月内跑完 B 臂。
+- 纪律事件:B 路 PDF 摘要器对 FlyRoute 的 leading 提问虚构三条肯定答,经中性提示取
+  verbatim abstract 纠正为"整 query 路由、无分解"——"占位/证伪通道必须一手 verbatim"
+  再添实证案例。
+- **状态:方法终裁与 coder 开工均待用户令;本批零付费跑,零上游改动。**

@@ -89,3 +89,76 @@ S1 论文效果基线(pilot 校准 → 冻结 → A0/A1 正式跑)→ S2 方法�
 - headroom 与对比度显著 ⇒ 回到 §2.2 菜单拍板(D1-lite 为默认推荐);
 - ≈0 ⇒ 分工改进前提存疑,改进方向重议(候选:先做引导分化——planner brief 定向
   不同 bucket——再谈分工;或转向 D4 演化分解本身作为贡献)。
+
+## 7. v1 方法终裁建议(Jul-29,双路文献扫描后;**待用户终裁**)
+
+> 输入:`DECOMP-LITSCAN-A-METHODS.md`(25-26 方法扫)+ `DECOMP-LITSCAN-B-OCCUPANCY.md`
+> (占位核验)。建设顺序已由用户令(Jul-29)提前:骨架先行,付费跑仍受 E0/资金门控。
+
+**建议:静态 D1-lite 为头牌载体;"池能力感知动态分解"降维为分解器可选输入
+(B3 旗标臂,二期);E3 式难度门记 backlog 不入 v1。**
+
+依据(承重证据均 ≥L2,细节见两份 LITSCAN):
+1. **A 路判决"D1-lite 站得住"**:25-26 文献两桶不相交——简单免训练的全部 off-GAIA
+   (TDP/AdaptOrch/E3,且赢的是成本非精度);GAIA 级的全是重框架或需训练。唯一做了
+   类型化子任务路由的 Uno-Orchestra 需 SFT 61k+GRPO 且精度输 AgentOrchestra 1.4pp
+   ⇒ **免训练类型化分工 on GAIA = 空位,恰是 D1-lite 所在格**。
+2. **负信号三连,E0 门升承重**:JoyAgent 消融纯分解 70.3 < 单体 ReAct 71.5(GAIA)
+   + AgentOrchestra 增益靠 Tool-Generator + Magentic-One 靠台账 ⇒ 分解单独无用是
+   **已知结论**;论文立论改写为"分工能否救活分解",头条钉死臂间差(见 §7.1 臂梯)。
+3. **B 路 α = 部分占**:AOrchestra(L3 亲验:*"Each SubAgent runs in a FRESH
+   container…previous work will be lost"*,无池/无 fork-retire)/ AgentOrchestra
+   (固定手工角色)/ MonoScale(无分解)⇒ 幸存缝 = **持久 seesaw 演化 harness-config
+   池上的 (variant×type) 分工**;port+beat 成立,须"演化池 vs fresh-spawn"头对头
+   (§7.1 B0 臂免费提供)。
+4. **B 路 β = 部分占近拥挤**:AOP(静态能力描述)/ Topaz(静态画像 decompose-then-
+   route)/ FlyRoute(演化画像但整 query 无分解)⇒ 成分皆占、合取未占;β 非独立
+   贡献,是 α 的精化层 ⇒ 只配旗标臂;若跑,related work 必须引 AOP+Topaz+FlyRoute+
+   TacoMAS+CBBA/SMART-LLM 谱系。
+
+**统计护栏(动态为何不能当头牌)**:臂间对比要求分解恒定(file: 重放通道跨臂复用
+同一份分解 JSON),池感知分解会把"分解差异"混进"分工差异";B3 的画像必须来自
+**S1 冻结统计**(`--decomp-profile-from <S1目录>`),禁用臂内 (variant×type) 账本
+作条件(鸡生蛋 + 治疗非平稳)。
+
+**🔴 撞车监测(高)**:Wentao Zhang/Bo An 组两半已齐(AgentOrchestra 分解路由 +
+Autogenesis 演化 lifecycle),尚无整合单篇(至 2026-07)。最好的防御 = 8 月内跑完
+B 臂;监测其 H2 新作,引用告警挂起。
+
+### 7.1 臂梯(v1.1,替代 §5 两臂制;B0 为 Jul-29 新增,骨架白送)
+
+| 臂 | 配置 | 回答什么 |
+|---|---|---|
+| A0 / A1 | 现 AEGIS K=1 / K=8(= S1 双臂) | 论文复现效果 |
+| **B0** | 分解 + 纯 h0 单变体(`--decomp-pool-from` 缺省) | fresh-spawn 类比臂(AOrchestra 式通用即弃执行器;其工具合成不复现,声明限制) |
+| B1 | 分解 + 演化池 + single/round_robin(冻结时二选一) | 池底座收益(B1−B0);隔离分解收益 |
+| B2 | 分解 + 演化池 + ledger 路由 | **指派收益(B2−B1)= 论文核心数字**;B2−B0 = 演化池 vs fresh-spawn 头对头 |
+| B3(二期,可不跑) | B2 + S1 画像注入分解器 | 池感知分解增量(合取缝) |
+
+## 8. v1 代码骨架(Jul-29 冻结接口层;细节由 coder 工单展开,未开工)
+
+```
+experiments/variant_pool/subtask_pipeline.py        ← 唯一新模块(+tests)
+├── SubtaskSpec / DecompPlan      {id, type∈{search,browse,compute,verify}, instruction, dep}
+│                                 校验:JSON/类型/DAG/禁递归/数量帽 → 拓扑序
+├── Decomposer                    decompose(task, profile=None) → DecompPlan
+│   ├── LlmDecomposer             静态:profile=None;B3:注入 S1 冻结池画像(同类一参)
+│   ├── FileDecomposer            oracle 注入(E0)+ 跨臂重放(B0/B1/B2 同分解)+ 测试
+│   └── fallback                  解析失败 → 整任务直跑,记 fallback 率(上报指标)
+├── SubtaskRouter                 {single, round_robin, ledger};ledger=(variant×type)
+│                                 Laplace 同式,min-obs 冷启动回退任务级路由
+├── PipelineExecutor              串行 DAG;session_runner 依赖注入(测试 stub 点)
+├── Synthesizer                   变体无关聚合(meta 直调,复用现有答案抽取/归一化)
+├── TypeCreditLedger              观察式信用:终答案过任务级门后记入所有 (variant×type)
+└── PoolProfile                   S1 簇级统计 → 冻结能力简报(B3 输入)
+
+recipe/gaia_evolver/run_variant_pool.py             ← 接线(仿 --resume 分支先例)
+└── --decomp-eval 评测专用模式:载冻结池(复用 resume 池重建)→ 逐题流水线 × pass-k
+    → 现有 pass@2 无偏估计 → decomp_manifest + 每题 JSONL + (variant×type) 矩阵落盘
+    旗标:--decomp-source {llm,file:} / --decomp-routing / --decomp-pool-from
+         --decomp-profile-from / --decomp-max-subtasks / --decomp-verify-gate(默认全关)
+```
+
+骨架五性质:gate/engine/harnessx 零接触;全旗控默认关=字节等同;分解落盘可重放
+(跨臂配对,方差减半);评测模式不进演化轮(绕开 P-A seesaw 污染);oracle 通道
+使 E0 零新代码。backlog:E3 难度门旗标、并行子任务、LOO 校准工具。
