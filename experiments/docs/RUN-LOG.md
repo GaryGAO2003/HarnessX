@@ -556,3 +556,15 @@
   跨纪元形态对照,不作同口径幅度比较。产物已归档主树 runs/labsmoke1,worktree 已拆。
 - 意义:**S1 的现金成本降至 Serper 零头,8/3 资金死线实质解除**;剩余门=导师 usage
   确认(实验级负载许可)+ M1/M-23 落地 + S1 冻结包 + 用户开跑令。
+
+### M1 分解层构建验收(Jul-29 晚,coder 实现 + 主循环验收;755→**829 全绿亲跑**)
+- 交付:`experiments/variant_pool/subtask_pipeline.py`(772 行,import-pure,runner
+  依赖注入)+ run_variant_pool.py 接线(**+351/−0 纯加法**)+ 两测试文件(+74 条);
+- 验收抽查:diff 形状(0 删除)/ 829 亲跑 12.9s / 字节稳定专测在位 / 主分发位置
+  正确(setup 后、lock/recipe 前,与 --resume 硬互斥)/ harnessx/ 零改动 /
+  --regression-baseline 零触碰(留下一工单);
+- 关键语义裁定五条记 SPEC §7.18(GT 哨兵防子任务级 LLM judge 误触发 / 冷启动回退 /
+  确定性轮转 / 去重记信用 / decomp_plans.json 跨臂重放通道);772 行超 350-550 估算
+  系 docstring 密度对齐 repo 规范,验收接受;
+- 下一工单(即发 coder):M-23 `--regression-baseline` 开关(§7.17-3)+ lock 捕获
+  `DEEPSEEK_API_BASE`(labsmoke1 provenance 缺口),S1 冻结前落地。

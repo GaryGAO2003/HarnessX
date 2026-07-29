@@ -182,6 +182,8 @@ from experiments.variant_pool.resume import (
     load_resume_state,
     lock_blocking_diffs,
     plan_resume,
+    rebuild_pool,
+    replay_ledger,
 )
 from experiments.variant_pool.router import Router
 from experiments.variant_pool.target import STRATEGIES as TARGET_STRATEGIES
@@ -6340,6 +6342,89 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "non-blocking strategy_concerns."
         ),
     )
+    # --- M1 task-decomposition x variant-division (evaluation-only) ---------
+    # SPEC §7.17 / DESIGN §7-8. Every flag defaults to off / current behaviour;
+    # nothing below runs unless --decomp-eval is passed, so the default arg
+    # namespace and control flow stay byte-identical.
+    parser.add_argument(
+        "--decomp-eval",
+        action="store_true",
+        help=(
+            "Evaluation-only M1 mode: load a frozen pool, run each task through "
+            "the static D1-lite subtask pipeline pass-k times, score with the "
+            "deterministic task-level gate, and write decomp_* artefacts. Does NOT "
+            "enter the evolution loop (no gate/seesaw/critic). Off = default."
+        ),
+    )
+    parser.add_argument(
+        "--decomp-source",
+        default="llm",
+        help=(
+            "Where decompositions come from. 'llm' (default) = one meta-model call "
+            "per task (repair-retry once, else fall back to whole-task). "
+            "'file:<path>' = oracle JSON keyed by task_id (E0 / cross-arm replay / tests)."
+        ),
+    )
+    parser.add_argument(
+        "--decomp-routing",
+        choices=("single", "round_robin", "ledger"),
+        default="single",
+        help=(
+            "Subtask->variant assignment. 'single' (default) = every subtask to the "
+            "task-level routed variant. 'round_robin' = deterministic rotation over "
+            "the pool. 'ledger' = observational (variant x subtask_type) Laplace "
+            "win-rate; cold cells (< --decomp-ledger-min-obs) fall back to task-level."
+        ),
+    )
+    parser.add_argument(
+        "--decomp-pool-from",
+        default=None,
+        help=(
+            "Run dir whose last settled pool_state is rebuilt as the frozen pool "
+            "(B1/B2 arms). Default (unset) = pure-h0 single variant = B0 "
+            "(fresh-spawn analogue)."
+        ),
+    )
+    parser.add_argument(
+        "--decomp-profile-from",
+        default=None,
+        help=(
+            "Optional run dir; its frozen pool statistics become a compact "
+            "per-variant profile injected into the decomposition prompt (B3, "
+            "two-phase). Unset = static decomposition, prompt carries no profile "
+            "segment."
+        ),
+    )
+    parser.add_argument(
+        "--decomp-max-subtasks",
+        type=int,
+        default=5,
+        help="Upper bound on subtasks per task (schema validation). Default 5.",
+    )
+    parser.add_argument(
+        "--decomp-subtask-max-steps",
+        type=int,
+        default=None,
+        help="Per-subtask step cap. Default (unset) inherits --max-steps.",
+    )
+    parser.add_argument(
+        "--decomp-ledger-min-obs",
+        type=int,
+        default=3,
+        help=(
+            "Min (variant x subtask_type) observations before ledger routing trusts "
+            "a cell; below it the subtask falls back to the task-level route. Default 3."
+        ),
+    )
+    parser.add_argument(
+        "--decomp-verify-gate",
+        choices=("off", "on"),
+        default="off",
+        help=(
+            "off (default) = no intermediate verification. on = after each non-verify "
+            "subtask a light meta check runs; a failed check retries that subtask once."
+        ),
+    )
     return parser
 
 
@@ -6435,6 +6520,260 @@ def setup(args: Any, run_dir: Path) -> dict[str, Any]:
     }
 
 
+def _load_decomp_pool(args: Any, deps: dict[str, Any], run_dir: Path):
+    """Resolve the frozen pool for ``--decomp-eval`` (provider-free, testable).
+
+    ``--decomp-pool-from <run_dir>`` rebuilds the last settled pool and replays
+    its ledger (B1/B2). The default (unset) is a pure-h0 single variant = B0,
+    the fresh-spawn analogue (DESIGN §7.1). Returns
+    ``(pool, variant_ids, task_level_choice, pool_source)`` where
+    ``task_level_choice(task_id) -> variant_id`` is the paper's deployment-time
+    argmax route (trivially ``V0`` under a single variant).
+    """
+    task_ids = [t.task_id for t in deps["tasks"] if t.task_id]
+    pool_from = getattr(args, "decomp_pool_from", None)
+    if pool_from:
+        state = load_resume_state(
+            Path(pool_from), candidate_mode=str(getattr(args, "candidate_mode", "paper"))
+        )
+        pool = rebuild_pool(state, K=max(int(state.next_id), len(state.variants), 1))
+        ledger = replay_ledger(state, SuccessLedger())
+        router = Router()
+        before_round = int(state.next_round)
+        variant_ids = sorted(pool.variants, key=lambda v: int(v[1:]) if v[1:].isdigit() else 0)
+        pool_source = {"path": str(pool_from), "round": int(state.last_settled_round)}
+
+        def task_level_choice(task_id: str) -> str:
+            if len(variant_ids) == 1:
+                return variant_ids[0]
+            try:
+                return router.route(task_id, pool, ledger, before_round=before_round)
+            except Exception:  # noqa: BLE001 - unrouted task -> deployment cold-start
+                return router.cold_start(task_id, pool, ledger, before_round=before_round)
+
+        return pool, variant_ids, task_level_choice, pool_source
+
+    # B0: pure-h0 single variant (fresh-spawn analogue).
+    pool = VariantPool(K=1)
+    pool.add_root(deps["baseline_config_path"], run_dir / "learnings.md", tasks=task_ids)
+    variant_ids = ["V0"]
+    pool_source = {"path": None, "round": None, "mode": "h0_single"}
+
+    def task_level_choice(_task_id: str) -> str:
+        return "V0"
+
+    return pool, variant_ids, task_level_choice, pool_source
+
+
+def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
+    """Evaluation-only M1 decomposition mode (SPEC §7.17; DESIGN §7-8).
+
+    Loads a frozen pool, runs each task through the static D1-lite subtask
+    pipeline pass-k times, scores the synthesised answer with the deterministic
+    task-level gate, and writes decomp_manifest.json / decomp_tasks.jsonl /
+    decomp_summary.json / decomp_plans.json. Never enters the evolution loop;
+    never touches gate/seesaw/critic. Wires the real seams to the pure classes
+    in :mod:`experiments.variant_pool.subtask_pipeline`.
+    """
+    from harnessx.core.events import Message
+
+    from experiments.variant_pool.reporting import pass_at_k
+    from experiments.variant_pool.subtask_pipeline import (
+        FileDecomposer,
+        LlmDecomposer,
+        PipelineExecutor,
+        SessionResult,
+        SubtaskRouter,
+        Synthesizer,
+        TypeCreditLedger,
+        VerifyGate,
+        build_pool_profile,
+    )
+
+    # --- validate decomp args (fail fast, provider-free) -------------------
+    source = str(getattr(args, "decomp_source", "llm"))
+    if source != "llm" and not source.startswith("file:"):
+        raise SystemExit(f"--decomp-source must be 'llm' or 'file:<path>', got {source!r}")
+    routing = str(getattr(args, "decomp_routing", "single"))
+    subtask_max_steps = getattr(args, "decomp_subtask_max_steps", None)
+    if subtask_max_steps is None:
+        subtask_max_steps = int(args.max_steps)
+    max_subtasks = int(getattr(args, "decomp_max_subtasks", 5))
+    min_obs = int(getattr(args, "decomp_ledger_min_obs", 3))
+
+    pipeline_eval = deps["pipeline_eval"]
+    model_config = deps["model_config"]
+
+    pool, variant_ids, task_level_choice, pool_source = _load_decomp_pool(args, deps, run_dir)
+    variant_config = {vid: Path(v.config_path) for vid, v in pool.variants.items()}
+
+    # --- B3 pool profile (optional; static == None) ------------------------
+    profile_text: str | None = None
+    profile_source: str | None = None
+    prof_from = getattr(args, "decomp_profile_from", None)
+    if prof_from:
+        profile_text = build_pool_profile(prof_from)
+        profile_source = str(prof_from)
+
+    # --- meta completion seam (decompose / synthesis / verify) -------------
+    meta_provider = _make_provider(args.meta_model, args.provider_id)
+
+    async def _complete(prompt: str) -> str:
+        response = await meta_provider.complete([Message(role="user", content=prompt)], [])
+        return str(getattr(response, "content", "") or "")
+
+    # --- deterministic task-level scorer (exact-match gate) ----------------
+    async def _score(final_output: str, ground_truth: str) -> bool:
+        result = await pipeline_eval.evaluate_answer(final_output or "", ground_truth or "")
+        return bool(result.passed)
+
+    # --- shared components --------------------------------------------------
+    credit_ledger = TypeCreditLedger()
+    subtask_router = SubtaskRouter(routing, variant_ids=variant_ids, ledger=credit_ledger, min_obs=min_obs)
+    synthesizer = Synthesizer(_complete)
+    verify_gate = (
+        VerifyGate(_complete) if str(getattr(args, "decomp_verify_gate", "off")) == "on" else None
+    )
+    if source.startswith("file:"):
+        decomposer = FileDecomposer.from_path(source[len("file:") :], max_subtasks=max_subtasks)
+    else:
+        decomposer = LlmDecomposer(_complete, max_subtasks=max_subtasks, profile_text=profile_text)
+
+    sessions_root = run_dir / "decomp_sessions"
+    sessions_root.mkdir(parents=True, exist_ok=True)
+
+    def _make_runner(parent_task: GAIATask):
+        async def _runner(*, instruction, variant_id, max_steps, subtask_id, subtask_type) -> "SessionResult":
+            safe_tid = str(parent_task.task_id).replace("/", "_").replace("\\", "_").replace(":", "_")
+            sess_dir = sessions_root / safe_tid / f"{subtask_id}-{variant_id}"
+            round_config = _prepare_round_config(variant_config[variant_id], _make_journal(sess_dir))
+            # Non-empty sentinel ground truth: keeps the reused rollout path from
+            # firing the empty-GT LLM judge on a subtask (its pass/score is unused;
+            # only the deterministic task-level gate over the synthesis is scored).
+            sub_task = GAIATask(
+                task_id=f"{parent_task.task_id}::{subtask_id}",
+                description=instruction,  # model-facing content = the subtask instruction
+                question=instruction,
+                level=parent_task.level,
+                final_answer="[decomp-subtask: not scored]",
+                max_steps=int(max_steps),
+            )
+            record = await _rollout_once(
+                sub_task,
+                0,
+                label=f"decomp-{variant_id}",
+                model_config=model_config,
+                round_config=round_config,
+                pipeline_eval=pipeline_eval,
+                max_cost=float(args.max_cost),
+            )
+            return SessionResult(
+                output=str(record.get("final_output") or ""),
+                steps=int(record.get("steps") or 0),
+                cost_usd=float(record.get("cost_usd") or 0.0),
+            )
+
+        return _runner
+
+    pass_k = int(args.pass_k)
+    jsonl_path = run_dir / "decomp_tasks.jsonl"
+    rows: list[dict] = []
+    plans_out: dict[str, list] = {}
+    totals = {"cost": 0.0, "attempts": 0, "fallbacks": 0}
+
+    async def _amain() -> None:
+        with jsonl_path.open("w", encoding="utf-8") as handle:
+            for task in sorted(deps["tasks"], key=lambda t: t.task_id):
+                choice = task_level_choice(task.task_id)
+                executor = PipelineExecutor(
+                    runner=_make_runner(task),
+                    scorer=_score,
+                    decomposer=decomposer,
+                    router=subtask_router,
+                    synthesizer=synthesizer,
+                    credit_ledger=credit_ledger,
+                    verify_gate=verify_gate,
+                    subtask_max_steps=subtask_max_steps,
+                )
+                n_pass = 0
+                for attempt in range(pass_k):
+                    result = await executor.run_attempt(
+                        task_id=task.task_id,
+                        task_text=task.question,
+                        ground_truth=task.final_answer or "",
+                        attempt=attempt,
+                        task_level_choice=choice,
+                        profile=profile_text,
+                    )
+                    totals["attempts"] += 1
+                    totals["cost"] += result.cost_usd
+                    if result.passed:
+                        n_pass += 1
+                    if result.fallback:
+                        totals["fallbacks"] += 1
+                    elif task.task_id not in plans_out and result.plan is not None:
+                        plans_out[task.task_id] = result.plan.to_records()
+                    handle.write(json.dumps(result.to_json(), ensure_ascii=False) + "\n")
+                rows.append({"task_id": task.task_id, "round_idx": 0, "n_att": pass_k, "n_pass": n_pass})
+
+    asyncio.run(_amain())
+
+    # pass@2 via the reporting estimator (A.3 formula 6), clamped like run.py.
+    if rows:
+        acc = 0.0
+        for row in rows:
+            k_eff = min(pass_k, row["n_att"])
+            acc += pass_at_k(row["n_att"], row["n_pass"], k_eff) if row["n_att"] else 0.0
+        pass_at_score = acc / len(rows)
+    else:
+        pass_at_score = 0.0
+
+    manifest = {
+        "mode": "decomp_eval",
+        "decomp_source": source,
+        "decomp_routing": routing,
+        "decomp_max_subtasks": max_subtasks,
+        "decomp_subtask_max_steps": subtask_max_steps,
+        "decomp_ledger_min_obs": min_obs,
+        "decomp_verify_gate": str(getattr(args, "decomp_verify_gate", "off")),
+        "pass_k": pass_k,
+        "num_tasks": len(rows),
+        "max_steps": int(args.max_steps),
+        "max_cost": float(args.max_cost),
+        "model": args.model,
+        "meta_model": args.meta_model,
+        "pool_source": pool_source,
+        "profile_source": profile_source,
+    }
+    summary = {
+        "pass_at_k": pass_at_score,
+        "k": pass_k,
+        "num_tasks": len(rows),
+        "total_attempts": totals["attempts"],
+        "fallback_rate": (totals["fallbacks"] / totals["attempts"]) if totals["attempts"] else 0.0,
+        "total_cost_usd": round(totals["cost"], 6),
+        "credit_matrix": credit_ledger.matrix(),
+        "rows": rows,
+    }
+    (run_dir / "decomp_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    (run_dir / "decomp_summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    (run_dir / "decomp_plans.json").write_text(
+        json.dumps(plans_out, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    logger.info(
+        "[decomp-eval] pass@%d=%.3f over %d task(s); fallback_rate=%.3f; cost=$%.3f",
+        pass_k,
+        pass_at_score,
+        len(rows),
+        summary["fallback_rate"],
+        totals["cost"],
+    )
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
     if args.pass_k < 1:
@@ -6452,6 +6791,11 @@ def main() -> None:
     ):
         if not value or "YOUR_PROVIDER" in str(value).upper():
             raise SystemExit(f"{flag} must be a concrete runtime value; unresolved placeholders are not runnable")
+
+    if getattr(args, "decomp_eval", False) and args.resume:
+        raise SystemExit(
+            "--decomp-eval is an evaluation-only mode and cannot be combined with --resume"
+        )
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     # --resume (default off): validate + resolve the target dir and derive
@@ -6477,6 +6821,13 @@ def main() -> None:
             _v0_backup = _v0_cfg.read_bytes()
 
     deps = setup(args, run_dir)
+
+    # --decomp-eval (default off): evaluation-only M1 mode. Runs the frozen-pool
+    # subtask pipeline and returns before the evolution loop / lock / recipe are
+    # built. When off, this branch is skipped and the flow below is byte-identical.
+    if getattr(args, "decomp_eval", False):
+        _run_decomp_eval(args, run_dir, deps)
+        return
 
     lock = _build_experiment_lock(
         args=args,

@@ -631,3 +631,27 @@ forceprobe1 R2 暴露断路:`context.regressions` 只流入 Critic,meta 全然�
 4. **轮数:`--num-rounds 16`**(= 论文 15 适应轮,M-24 对齐读法;报告口径以适应轮计)。
 
 预算档:按 M0-BUDGET-BRIEF v4 分期制执行(首期 ¥2,000,导师谈判中),不再单列档位裁定。
+
+## 7.18 `--decomp-eval`:M1 分解×分工评测层落地(Jul-29,§7.17-1 的实施;755→829)
+
+**语义**:评测专用模式——载冻结池(`--decomp-pool-from`;缺省=纯 h0 单变体=**B0 臂**)
+→ 每题 pass-k 次分解流水线(分解→子任务路由→串行执行→变体无关 synthesis)→ 现有
+pass@2 无偏估计出分;**不进演化轮,gate/seesaw/critic 零接触**;与 `--resume` 互斥
+(硬拒)。九旗默认全关/中性,默认路径字节等同(专测
+`test_default_path_never_touches_decomp_code`)。模块 `subtask_pipeline.py` import-pure
+(零 recipe/harnessx 依赖,runner 注入);接线纯加法(run_variant_pool.py +351/−0)。
+
+**关键裁定(coder 自由裁量,主循环验收通过)**:
+1. 子任务会话带哨兵 `final_answer="[decomp-subtask: not scored]"`,使复用的 rollout
+   路径走确定性 exact-match(结果不用)而不对每个子任务触发空 GT 的 LLM judge——
+   **只有 synthesis 终答案过真门**;
+2. ledger 冷启动:Laplace (p+1)/(a+2) argmax 后,胜者细胞观测 < min-obs 则回退任务级
+   路由;平局取最小变体序号;
+3. round_robin = (crc32(task_id)+attempt+subtask_index) mod n,确定性无 RNG;
+4. 信用:终门后对本 attempt 用过的每个**去重** (variant,type) 记一次;fallback(四类
+   原因:parse_failure/oracle_missing/validation_failure/decomp_error)不记信用、跳
+   synthesis;
+5. 产物含 `decomp_plans.json`(task_id→plan)= **跨臂 file: 重放通道**(B0/B1/B2 同
+   分解配对,方差减半的机制载体)。
+
+模块 772 行超 350–550 估算,系 docstring/prompt 模板密度对齐 repo 规范,验收接受。
