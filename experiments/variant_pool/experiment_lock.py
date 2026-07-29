@@ -74,6 +74,13 @@ SPEC_VERSION = "2026-07-25"
 #: look like real values to downstream comparison code.
 UNRESOLVED = "unresolved"
 
+#: Sentinel recorded in :attr:`EnvSpec.deepseek_api_base` when no lab endpoint
+#: was injected via the ``DEEPSEEK_API_BASE`` env var — i.e. the run used the
+#: official/default provider endpoint. A real value is the lab-proxy URL; the
+#: paired API *key* is never recorded. This is a meaningful default, not an
+#: unresolved marker, so it is deliberately distinct from :data:`UNRESOLVED`.
+OFFICIAL_DEFAULT_ENDPOINT = "official-default"
+
 #: The paper's GAIA set: 103 text-only tasks, levels 39/52/12 (A.2 p.28).
 PAPER_LEVEL_DISTRIBUTION = {1: 39, 2: 52, 3: 12}
 
@@ -301,6 +308,12 @@ class EnvSpec:
     #: git sha of ``recipe/gaia_evolver/oracle_ceiling.py`` at run time — the
     #: ceiling is what M0 is measured against (SPEC §6.3).
     oracle_ceiling_sha: str = UNRESOLVED
+    #: The provider endpoint epoch (labsmoke1 provenance gap). The URL value of
+    #: the ``DEEPSEEK_API_BASE`` env var when a lab proxy was injected, else
+    #: :data:`OFFICIAL_DEFAULT_ENDPOINT`. The paired API key is never recorded.
+    #: An old lock written before this field existed parses back to the default,
+    #: so a legacy resume with no lab endpoint set stays comparable.
+    deepseek_api_base: str = OFFICIAL_DEFAULT_ENDPOINT
 
 
 @dataclass(frozen=True)

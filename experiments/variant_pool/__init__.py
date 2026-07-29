@@ -46,7 +46,9 @@ from .experiment_lock import (
 )
 from .gate import (
     DEFAULT_MIN_FORK,
+    DEFAULT_REGRESSION_BASELINE,
     GATE_SEQUENCE,
+    REGRESSION_BASELINE_MODES,
     Decision,
     GateResult,
     GateStage,
@@ -85,6 +87,7 @@ __all__ = [
     "DEFAULT_MIN_FORK",
     "DEFAULT_PATIENCE",
     "DEFAULT_PRICING",
+    "DEFAULT_REGRESSION_BASELINE",
     "DEFAULT_STALE_PRIOR",
     "FAMILY_SECTIONS",
     "GATE_SEQUENCE",
@@ -97,6 +100,7 @@ __all__ = [
     "MTOK",
     "PAPER_LEVEL_DISTRIBUTION",
     "POOL_EVENT_KINDS",
+    "REGRESSION_BASELINE_MODES",
     "ROLES",
     "SPEC_VERSION",
     "STRATEGIES",

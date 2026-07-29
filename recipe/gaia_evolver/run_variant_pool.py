@@ -161,10 +161,20 @@ from experiments.variant_pool.experiment_lock import (
     H0Freeze,
     Hyperparams,
     ModelSpec,
+    OFFICIAL_DEFAULT_ENDPOINT,
     UNRESOLVED,
     sha256_file,
 )
-from experiments.variant_pool.gate import Decision, GateResult, TaskEval, _declared_level2, run_gate
+from experiments.variant_pool.gate import (
+    DEFAULT_REGRESSION_BASELINE,
+    REGRESSION_BASELINE_GLOBAL,
+    REGRESSION_BASELINE_MODES,
+    Decision,
+    GateResult,
+    TaskEval,
+    _declared_level2,
+    run_gate,
+)
 from experiments.variant_pool.ledger import SuccessLedger
 from experiments.variant_pool.manifest import (
     CandidateArtifact,
@@ -779,6 +789,7 @@ def _forced_gate(
         tk_results: Iterable[TaskEval],
         *,
         min_fork: tuple[int, int] = DEFAULT_MIN_FORK,
+        regression_baseline: str = REGRESSION_BASELINE_GLOBAL,
         check_manifest: Callable[[Any], list[str]] | None = None,
         check_canonicalize: Callable[[Any, Any], tuple[bool, str]] | None = None,
         check_smoke: Callable[[Any], tuple[bool, str]] | None = None,
@@ -793,6 +804,7 @@ def _forced_gate(
             ledger,
             evals,
             min_fork=min_fork,
+            regression_baseline=regression_baseline,
             check_manifest=check_manifest,
             check_canonicalize=check_canonicalize,
             check_smoke=check_smoke,
@@ -1296,6 +1308,7 @@ def _l2_certifying_gate(
         tk_results: Iterable[TaskEval],
         *,
         min_fork: tuple[int, int] = DEFAULT_MIN_FORK,
+        regression_baseline: str = REGRESSION_BASELINE_GLOBAL,
         check_manifest: Callable[[Any], list[str]] | None = None,
         check_canonicalize: Callable[[Any, Any], tuple[bool, str]] | None = None,
         check_smoke: Callable[[Any], tuple[bool, str]] | None = None,
@@ -1310,6 +1323,7 @@ def _l2_certifying_gate(
             ledger,
             tk_results,
             min_fork=min_fork,
+            regression_baseline=regression_baseline,
             check_manifest=check_manifest,
             check_canonicalize=check_canonicalize,
             check_smoke=check_smoke,
@@ -3610,6 +3624,18 @@ class VariantPoolRecipe:
                 f"regression_accountability must be one of {REGRESSION_ACCOUNTABILITY_MODES}, "
                 f"got {self.regression_accountability!r}"
             )
+        # --regression-baseline (M-23). ``global`` (default) is byte-identical: the
+        # seesaw regression side keeps anchoring on the global cross-variant
+        # ever_solved set. ``per_variant`` anchors each candidate on its own
+        # variant's solve history (forwarded to the gate by the engine).
+        self.regression_baseline = str(
+            getattr(args, "regression_baseline", DEFAULT_REGRESSION_BASELINE)
+        )
+        if self.regression_baseline not in REGRESSION_BASELINE_MODES:
+            raise ValueError(
+                f"regression_baseline must be one of {REGRESSION_BASELINE_MODES}, "
+                f"got {self.regression_baseline!r}"
+            )
         #: F-B: rounds in which each variant's deployed config changed via an
         #: APPLY/FORK ship. Accumulated across rounds in ``_reconcile`` (never reset
         #: per round) and read by ``_shipped_caused_regressions`` to classify which
@@ -3790,6 +3816,7 @@ class VariantPoolRecipe:
             max_candidates_per_variant=self.candidates_per_round,
             record_selected_results=self.candidate_mode != "paper",
             ship_policy=self.ship_policy,
+            regression_baseline=self.regression_baseline,
         )
 
     # ------------------------------------------------------------------
@@ -5759,6 +5786,24 @@ def _regression_accountability_provenance(mode: str) -> "str | None":
     )
 
 
+def _regression_baseline_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--regression-baseline`` (M-23).
+
+    Returns ``None`` for the default ``global`` (the lock stays byte-identical); a
+    provenance warning otherwise.
+    """
+    if mode == DEFAULT_REGRESSION_BASELINE:
+        return None
+    return (
+        f"regression_baseline={mode} ENABLED (M-23): the gate's seesaw judges a "
+        "candidate's regressions against its OWN variant's solve history instead of "
+        "the global cross-variant ever_solved set, so a task only ever solved by a "
+        "different variant no longer counts as a regression for this candidate. This "
+        "changes which candidates apply/fork/reject, so it is not comparable "
+        "byte-for-byte with a 'global' run"
+    )
+
+
 def _build_experiment_lock(
     *,
     args: Any,
@@ -5857,9 +5902,10 @@ def _build_experiment_lock(
     if _sc_warn:
         warnings.append(_sc_warn)
 
-    # --search-backend / --evolve-commit-bounce / --regression-accountability
-    # provenance. Same byte-safe pattern: each records a warning ONLY when the flag
-    # is non-default, so a fully-default run's lock stays byte-identical.
+    # --search-backend / --evolve-commit-bounce / --regression-accountability /
+    # --regression-baseline provenance. Same byte-safe pattern: each records a
+    # warning ONLY when the flag is non-default, so a fully-default run's lock
+    # stays byte-identical.
     for _flag_warn in (
         _search_backend_provenance(str(getattr(args, "search_backend", DEFAULT_SEARCH_BACKEND))),
         _evolve_commit_bounce_provenance(
@@ -5867,6 +5913,9 @@ def _build_experiment_lock(
         ),
         _regression_accountability_provenance(
             str(getattr(args, "regression_accountability", DEFAULT_REGRESSION_ACCOUNTABILITY))
+        ),
+        _regression_baseline_provenance(
+            str(getattr(args, "regression_baseline", DEFAULT_REGRESSION_BASELINE))
         ),
     ):
         if _flag_warn:
@@ -5964,6 +6013,11 @@ def _build_experiment_lock(
         env=EnvSpec(
             seed=int(getattr(args, "seed", 0)),
             oracle_ceiling_sha=oracle_sha,
+            # labsmoke1 provenance gap: capture WHICH endpoint epoch this run used.
+            # Only the DEEPSEEK_API_BASE URL is recorded (never the paired key);
+            # unset => official/default endpoint sentinel. This enters the lock sha
+            # and blocks a cross-epoch resume (env is a lock-blocking section).
+            deepseek_api_base=os.environ.get("DEEPSEEK_API_BASE") or OFFICIAL_DEFAULT_ENDPOINT,
         ),
         provenance_warnings=tuple(warnings),
     )
@@ -6340,6 +6394,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "shipped APPLY/FORK config change caused; rejected-candidate gate "
             "regressions and zero-ship inter-round variance are demoted to "
             "non-blocking strategy_concerns."
+        ),
+    )
+    parser.add_argument(
+        "--regression-baseline",
+        choices=REGRESSION_BASELINE_MODES,
+        default=DEFAULT_REGRESSION_BASELINE,
+        help=(
+            "M-23: which solve history the gate's seesaw uses as the regression "
+            "baseline. 'global' (default) is byte-identical: a candidate regresses a "
+            "task if ANY variant ever solved it (cross-variant ever_solved). "
+            "'per_variant' judges each candidate only against its own variant's solve "
+            "history, so a task solved only by a different variant is not counted as a "
+            "regression for this candidate."
         ),
     )
     # --- M1 task-decomposition x variant-division (evaluation-only) ---------

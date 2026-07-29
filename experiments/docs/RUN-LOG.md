@@ -568,3 +568,11 @@
   系 docstring 密度对齐 repo 规范,验收接受;
 - 下一工单(即发 coder):M-23 `--regression-baseline` 开关(§7.17-3)+ lock 捕获
   `DEEPSEEK_API_BASE`(labsmoke1 provenance 缺口),S1 冻结前落地。
+
+### M-23 开关 + 端点纪元捕获验收(Jul-29 深夜,coder 实现 + 主循环验收;829→**853 亲跑**)
+- `--regression-baseline {global,per_variant}`(默认 global 字节等同,engine 条件转发;
+  per_variant 复用 TaskEval.before 的 per-variant 采样语义,零新 ledger 方法)+ 第七旗
+  入 provenance;lock env 新字段 `deepseek_api_base`(URL/官方哨兵;跨纪元续跑阻断,
+  旧 lock 向后兼容);
+- 验收:853/0 亲跑;**11 删行逐行核**=签名/调用点/注释改行,零行为删除;harnessx/
+  与 decomp 路径零触碰;详 SPEC §7.19。**S1 前代码建设至此清零。**

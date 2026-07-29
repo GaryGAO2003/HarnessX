@@ -77,7 +77,15 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
-from .gate import Decision, GateResult, GateStage, TaskEval, run_gate
+from .gate import (
+    REGRESSION_BASELINE_GLOBAL,
+    REGRESSION_BASELINE_MODES,
+    Decision,
+    GateResult,
+    GateStage,
+    TaskEval,
+    run_gate,
+)
 from .ledger import ROLLUP_MODES
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
@@ -203,6 +211,7 @@ class VariantPoolEngine:
         max_candidates_per_variant: int = DEFAULT_MAX_CANDIDATES,
         record_selected_results: bool = True,
         ship_policy: str = "first_wins",
+        regression_baseline: str = REGRESSION_BASELINE_GLOBAL,
     ) -> None:
         if patience < 1:
             raise ValueError(f"patience must be >= 1, got {patience}")
@@ -220,6 +229,11 @@ class VariantPoolEngine:
         if ship_policy not in SHIP_POLICIES:
             raise ValueError(
                 f"ship_policy must be one of {SHIP_POLICIES}, got {ship_policy!r}"
+            )
+        if regression_baseline not in REGRESSION_BASELINE_MODES:
+            raise ValueError(
+                f"regression_baseline must be one of {REGRESSION_BASELINE_MODES}, "
+                f"got {regression_baseline!r}"
             )
         self.pool = pool
         self.ledger = ledger
@@ -240,6 +254,11 @@ class VariantPoolEngine:
         #: Algorithm-1 reading and the byte-identical default; ``bucket_disjoint``
         #: is the App B.1 ranked multi-ship arm.
         self.ship_policy = ship_policy
+        #: Seesaw regression baseline (M-23). ``global`` (default) anchors on the
+        #: cross-variant ever_solved set; ``per_variant`` anchors each candidate on
+        #: its own variant history. Forwarded to the gate only when non-default, so
+        #: a ``global`` run's gate call stays byte-identical (see :meth:`run_round`).
+        self.regression_baseline = regression_baseline
         #: Global idle counter (SPEC §6.6: single idle, aligned with Algorithm 1).
         self._idle = 0
 
@@ -342,12 +361,18 @@ class VariantPoolEngine:
                     self._task_eval(variant_id, task, tk_eval[task])
                     for task in sorted(t_k)
                 ]
+                gate_kwargs: dict[str, Any] = {"min_fork": self.min_fork}
+                # M-23: forward the regression baseline only when it is non-default,
+                # so a ``global`` run's gate call — and any injected gate's
+                # signature — stays byte-identical to the pre-M-23 recipe.
+                if self.regression_baseline != REGRESSION_BASELINE_GLOBAL:
+                    gate_kwargs["regression_baseline"] = self.regression_baseline
                 gate_result = self.gate(
                     candidate,
                     variant.config_path,
                     self.ledger,
                     tk_results,
-                    min_fork=self.min_fork,
+                    **gate_kwargs,
                 )
                 self._add_diagnostic(
                     result,

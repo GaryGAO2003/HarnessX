@@ -119,6 +119,20 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
 #: silently replace the published state transition with an engineering choice.
 DEFAULT_MIN_FORK = (1, 1)
 
+#: --regression-baseline (M-23). Which solve history the seesaw's *regression*
+#: side is anchored on.
+#:
+#: ``global`` (default, W21) keeps today's behaviour byte-identical: a candidate
+#: regresses a task if **any** variant ever solved it (the full-history
+#: cross-variant :attr:`SuccessLedger.ever_solved`). ``per_variant`` (M-23)
+#: anchors instead on the candidate's *own* variant history, the same
+#: per-variant cell scope the improved side already uses — so a task only ever
+#: solved by a *different* variant is not this candidate's regression.
+REGRESSION_BASELINE_GLOBAL = "global"
+REGRESSION_BASELINE_PER_VARIANT = "per_variant"
+REGRESSION_BASELINE_MODES = (REGRESSION_BASELINE_GLOBAL, REGRESSION_BASELINE_PER_VARIANT)
+DEFAULT_REGRESSION_BASELINE = REGRESSION_BASELINE_GLOBAL
+
 
 class GateStage(Enum):
     """The ordered deterministic checks of §4.3 p.10."""
@@ -191,12 +205,19 @@ class GateResult:
 # ---------------------------------------------------------------------------
 
 
-def _classify(tk_results: Iterable[TaskEval], ledger: SuccessLedger) -> tuple[set[str], set[str]]:
+def _classify(
+    tk_results: Iterable[TaskEval],
+    ledger: SuccessLedger,
+    *,
+    regression_baseline: str = REGRESSION_BASELINE_GLOBAL,
+) -> tuple[set[str], set[str]]:
     """Split ``T_k`` into improved and regressed tasks.
 
     See the module docstring for why the two sides use different baselines.
     The categories are mutually exclusive by construction (improved needs
-    ``after >= 1``, regressed needs ``after == 0``).
+    ``after >= 1``, regressed needs ``after == 0``). ``regression_baseline``
+    selects which solve history the regressed side is judged against — see
+    :func:`_is_regression`.
     """
     improved: set[str] = set()
     regressed: set[str] = set()
@@ -205,9 +226,32 @@ def _classify(tk_results: Iterable[TaskEval], ledger: SuccessLedger) -> tuple[se
         after_passes = outcome.after[0]
         if before_passes == 0 and after_passes >= 1:
             improved.add(outcome.task_id)
-        if after_passes == 0 and ledger.is_ever_solved(outcome.task_id):
+        if after_passes == 0 and _is_regression(
+            outcome, before_passes, ledger, regression_baseline
+        ):
             regressed.add(outcome.task_id)
     return improved, regressed
+
+
+def _is_regression(
+    outcome: TaskEval,
+    before_passes: int,
+    ledger: SuccessLedger,
+    regression_baseline: str,
+) -> bool:
+    """Is an ``after == 0`` task a regression under the chosen baseline (M-23)?
+
+    ``global`` (default, W21) anchors on the full-history, cross-variant
+    :attr:`SuccessLedger.ever_solved` set. ``per_variant`` anchors on the
+    candidate's own variant instead: ``before_passes >= 1`` is exactly "this
+    variant has ever recorded a pass on the task" — the same per-variant cell
+    scope the improved side uses (the engine derives ``before`` from
+    ``SuccessLedger.cell(variant_id, task_id)`` in ``_task_eval``). A task solved
+    only by a *different* variant therefore is not this candidate's regression.
+    """
+    if regression_baseline == REGRESSION_BASELINE_PER_VARIANT:
+        return before_passes >= 1
+    return ledger.is_ever_solved(outcome.task_id)
 
 
 def _decide(improved: set[str], regressed: set[str], min_fork: tuple[int, int]) -> Decision:
@@ -230,10 +274,12 @@ def _seesaw_three_way(
     ledger: SuccessLedger,
     *,
     min_fork: tuple[int, int] = DEFAULT_MIN_FORK,
+    regression_baseline: str = REGRESSION_BASELINE_GLOBAL,
 ) -> Decision:
     """APPLY / FORK / REJECT for a candidate, on ``T_k`` only (§4.5 p.11)."""
     _validate_min_fork(min_fork)
-    improved, regressed = _classify(tk_results, ledger)
+    _validate_regression_baseline(regression_baseline)
+    improved, regressed = _classify(tk_results, ledger, regression_baseline=regression_baseline)
     return _decide(improved, regressed, min_fork)
 
 
@@ -242,6 +288,14 @@ def _validate_min_fork(min_fork: tuple[int, int]) -> None:
         raise ValueError(f"min_fork must be a (min_improve, min_regress) pair, got {min_fork!r}")
     if min_fork[0] < 1 or min_fork[1] < 1:
         raise ValueError(f"min_fork entries must be >= 1, got {min_fork!r}")
+
+
+def _validate_regression_baseline(regression_baseline: str) -> None:
+    if regression_baseline not in REGRESSION_BASELINE_MODES:
+        raise ValueError(
+            f"regression_baseline must be one of {REGRESSION_BASELINE_MODES}, "
+            f"got {regression_baseline!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +359,7 @@ def run_gate(
     tk_results: Iterable[TaskEval],
     *,
     min_fork: tuple[int, int] = DEFAULT_MIN_FORK,
+    regression_baseline: str = REGRESSION_BASELINE_GLOBAL,
     check_manifest: Callable[[Any], list[str]] | None = None,
     check_canonicalize: Callable[[Any, Any], tuple[bool, str]] | None = None,
     check_smoke: Callable[[Any], tuple[bool, str]] | None = None,
@@ -338,6 +393,7 @@ def run_gate(
     An explicitly injected check always takes precedence over the built-in one.
     """
     _validate_min_fork(min_fork)
+    _validate_regression_baseline(regression_baseline)
 
     manifest_candidate: ChangeManifest | None = None
     missing_manifest = object()
@@ -420,7 +476,7 @@ def run_gate(
                 archive_reason=f"{stage.name}: {reason}",
             )
 
-    improved, regressed = _classify(tk_results, ledger)
+    improved, regressed = _classify(tk_results, ledger, regression_baseline=regression_baseline)
     decision = _decide(improved, regressed, min_fork)
     summary = f"improved={sorted(improved)} regressed={sorted(regressed)}"
 

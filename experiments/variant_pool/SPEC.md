@@ -655,3 +655,19 @@ pass@2 无偏估计出分;**不进演化轮,gate/seesaw/critic 零接触**;与 `
    分解配对,方差减半的机制载体)。
 
 模块 772 行超 350–550 估算,系 docstring/prompt 模板密度对齐 repo 规范,验收接受。
+
+## 7.19 `--regression-baseline` + lock 端点纪元捕获(Jul-29,§7.17-3 实施 + labsmoke1 缺口修;829→853)
+
+**件一(M-23 开关)**:`--regression-baseline {global, per_variant}`,默认 global =
+现行(`ledger.is_ever_solved` 全局全史只增),默认路径字节等同(engine **条件转发**:
+仅非默认才向 gate 传 kwarg,global 调用字面不变);`per_variant` = 候选变体只对**自己**
+的解题历史负回退义务——判定复用 `TaskEval.before[0]≥1`(before 本就按 per-variant
+cell 语义采样,零新 ledger 方法、零 variant-id 进 gate 的管道)。第七旗入
+provenance_warnings,resume 护栏拦"换基线续跑"。
+**件二(端点纪元)**:lock env 节新字段 `deepseek_api_base`(记 URL 值;未设 env 记
+哨兵 `"official-default"`;**key 永不入 lock**);resume 比较解析值,旧 lock 无字段
+视同官方哨兵——跨纪元续跑(官方↔实验室)正确阻断,旧跑在官方环境续跑不受扰;
+新跑 lock sha 因新字段而变属预期(纪元入身份)。
+**验收注记**:diff 176+/11−;11 删行主循环逐行核 = 签名穿参/调用点补参/注释类改行,
+零行为删除;853/0 亲跑。M-23 不对称显形以 gate 级测试证明(路由天然把任务送回解题
+变体,引擎级双变体自然场景不存在——此为审计语义的实现级补充发现)。
