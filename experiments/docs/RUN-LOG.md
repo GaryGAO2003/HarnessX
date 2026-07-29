@@ -534,3 +534,25 @@
 - M1 构建工单发 coder:subtask_pipeline.py + `--decomp-eval` 接线 + 测试;基线 755;
   硬约束=零上游改动/默认字节等同/零网络测试/不 commit(主循环验收后提交)。
 - M-23 接线排 M1 之后(同 run_variant_pool.py 防冲突),S1 冻结前完成。
+
+### labsmoke1 — 实验室端点部署冒烟(Jul-29 17:28–17:41,用户令"部署+跑 smoke";**PASS**)
+- 背景:用户提供导师本地部署 DS V4(LiteLLM 代理 litellm.yangtzeailab.com,vLLM 0.24.0
+  TP4 后端),令模型名全小写。**部署=零代码**:litellm 原生 `DEEPSEEK_API_BASE` 环境
+  变量回退链(venv 亲验 deepseek/chat/transformation.py:261),launcher 仅换两个 env
+  (lab key + base);CLI 与 fixsmoke1 逐字同(仅 run-tag);`deepseek-v4-flash`/`-pro`
+  双档均在代理注册,模型串本就小写。
+- 前置探针 5/5 PASS:参数级 / env 级 / **工具调用**(vLLM function calling 开,命门)
+  / pro 档 / reasoning_effort=high litellm 透传(思考链返回);延迟 1–2s。
+- 冒烟从 6de5e86 隔离 worktree 跑(主树 M1 coder 施工中);床数据系 gitignore,worktree
+  需手工复制(运维注意)。结果:LAUNCHER_EXIT code=0,**13 分钟**(=fixsmoke1 同带);
+  **R0 5/6(83.3%)→ R1 6/6(100%)**,final=peak;24 attempts / **0 infra fail** /
+  预算耗尽 5/24(fixsmoke1 7/24 同带);候选 0(双轮短跑无候选相,与 fixsmoke1 同,
+  meta 候选管线深度留 S1 前置检查);现金成本 ≈¥0(lab 端点)+ Serper 零头。
+- 🔴 **provenance 缺口(S1 前必修)**:lock `models.api_base="unresolved"`——env 注入对
+  lock 不可见,官方/实验室两纪元 lock 无法区分,续跑护栏认不出换端点 ⇒ 把
+  `DEEPSEEK_API_BASE` 纳入 lock env 捕获(base URL 非密可记,key 永不入 lock),
+  **并入 M-23 接线工单**。
+- 环境代际:本跑起开"实验室端点纪元";官方 API 时代数据(fixsmoke1/a1big1-5)只作
+  跨纪元形态对照,不作同口径幅度比较。产物已归档主树 runs/labsmoke1,worktree 已拆。
+- 意义:**S1 的现金成本降至 Serper 零头,8/3 资金死线实质解除**;剩余门=导师 usage
+  确认(实验级负载许可)+ M1/M-23 落地 + S1 冻结包 + 用户开跑令。
