@@ -679,3 +679,17 @@
   Ready;主 VBS(s1k1b103_hidden.vbs)遭 auto-mode 分类器三连拦(Write×2+
   Copy-Item;同内容 resume VBS 放行=误拦),按拦截协议移交用户一行 copy 手建;
   点火前置不变:s1k8b103 验收 + Serper 余额实报 + 用户令。
+
+### Meanwhile 三线(Jul-30 晚,用户令"可以"+"另外起 subagent 研究 decomp/设计/novelty")
+- **researcher 深扫完成** → `NOVELTY-EXPDESIGN-RESEARCH.md`(deep-research+guardrails
+  skill,11 篇 L1 亲核+S5 引句,已核验/印象分节):Q1 六周新货未闭我方缝,新增承重
+  外证 2607.17044(Leni,GAIA 75.2%,组件归因范式+撞车监测)/2605.27621(LOO>LLM
+  judge)/2606.09863(judge AUROC≤0.65);**Q2 钉出致命洞=算力/token 混淆**
+  (2606.13003+OneFlow 2601.12307 一手锁死)⇒ 建议 B1 冻 round_robin、headline 改
+  B2−B1(rr)、新增 SA-matched 臂、McNemar 配对;Q3 四合取缝仍无人全占,novelty 三候
+  选按可辩护度排序(候选 1=开放实证问句式)。主循环验收:结构/纪律/一致性抽查过。
+- **E0-FREEZE-DRAFT.md v0 落笔**:语义改案 2×2(付费格仅②④,①③吃 s1k8b103 现成
+  数据);门=④−③;**四裁定项 A(2×2 改案)/B(过门阈值 +3 题或 McNemar p<0.1 草案)
+  /C(headline 改口)/D(SA-matched 新臂)呈用户**;前置=S1 验收+oracle plans 30 份。
+- 论文骨架落 MAS_Directions `research/phase4/phase 4 research/THESIS-SKELETON.md`
+  (八章×资产映射×9/5 倒排);coder 验收工具链在产(experiments/analysis/,未回)。
