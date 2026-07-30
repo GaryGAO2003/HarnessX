@@ -693,3 +693,14 @@
   /C(headline 改口)/D(SA-matched 新臂)呈用户**;前置=S1 验收+oracle plans 30 份。
 - 论文骨架落 MAS_Directions `research/phase4/phase 4 research/THESIS-SKELETON.md`
   (八章×资产映射×9/5 倒排);coder 验收工具链在产(experiments/analysis/,未回)。
+- **coder 工具链验收 PASS(主循环亲验后修一处)**:experiments/analysis/ 四模块
+  (_poolscan/curve_extract/acceptance_report/plot_curve)+ .gitignore 追加 out/;
+  亲跑复验:s1k8 六轮曲线**精确复现**(63.3/80.0/86.7/70.0/76.7/80.0,peak R2/final
+  R5/drift −6.7pp 三值对 pool_report.json 交叉核 ✓)、s1k8b103 在跑容错(R1 pending
+  不崩,R0=64.1% ✓)、多变体验证(a1big5 fork 谱系)、git 范围干净(runner 零触碰);
+  M-23 提取自 decisions+candidate_diagnostics.archive_reason(中置信,缺时如实报);
+  **修复:backend 归因误判**——原码由"日志无 serper 行"倒推 chain 后端,实为 serper
+  成功调用不进日志(s1k8 lock 明写 search_backend=serper ENABLED);已改为读
+  experiment.lock.json provenance(权威),Serper 实耗声明改口"仅 serper.dev 面板
+  可测,日志只有枯竭签名";两床重跑验证 ✓。matplotlib 缺失:plot 优雅降级,**装包
+  推迟到 s1k8b103 完跑后**(不动活跑 venv);渲染路径代码审过未实测。
