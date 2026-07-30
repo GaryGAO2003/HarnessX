@@ -51,3 +51,16 @@
 
 E0 神谕门(oracle 分解注入,`--decomp-source file:` + B0 配置)→ B0/B1/B2 分工臂
 (吃 s1k8 终池,`decomp_plans.json` 跨臂同分解)→ 视预算/时间 B3 画像臂。
+
+## 5. 点火状态回填(Jul-29 深夜)
+
+- **用户裁定(Jul-29 深夜)**:阶梯式通过 + 开跑令("可以,开始跑")——S1@30 先行;
+  分岔形态成立则加跑 **103 题确认版**(GAIA 验证集全床,~2 天/臂,与 B 臂并行排),
+  30 题版作先导、103 题版作主结果;Serper 全程口径升至 ~9-10 万次(≈$100 级,分批充);
+- s1k8 launcher 已生成(runs/s1k8_launch.cmd,含 lab 端点 env)并注册计划任务
+  `HarnessX_s1k8`(SOP v3:无触发器/电池免疫/零窗口,**状态 Ready 未点火**);
+  CLI 与 §1 逐字一致(--regression-baseline 走默认 global,不显式传);
+- **点火唯一闸 = Serper 付费额度到账**(Jul-29 探针:key 存活、免费余量近枯,
+  承不起单臂 ~1 万次);用户确认充值后 `Start-ScheduledTask HarnessX_s1k8` 即点火,
+  s1k1 于 s1k8 验收后次夜发;
+- 运维:点火当晚插电、不合盖;发前查 serper.dev 余量(本文件前置③)。
