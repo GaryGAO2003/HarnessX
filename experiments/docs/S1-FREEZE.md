@@ -61,6 +61,13 @@ E0 神谕门(oracle 分解注入,`--decomp-source file:` + B0 配置)→ B0/B1/B
   `HarnessX_s1k8`(SOP v3:无触发器/电池免疫/零窗口,**状态 Ready 未点火**);
   CLI 与 §1 逐字一致(--regression-baseline 走默认 global,不显式传);
 - **点火唯一闸 = Serper 付费额度到账**(Jul-29 探针:key 存活、免费余量近枯,
-  承不起单臂 ~1 万次);用户确认充值后 `Start-ScheduledTask HarnessX_s1k8` 即点火,
-  s1k1 于 s1k8 验收后次夜发;
+  承不起单臂 ~1 万次);用户确认充值后点火 = **同时启动两个任务**:
+  `Start-ScheduledTask HarnessX_s1k8` + `Start-ScheduledTask HarnessX_s1k8_watchdog`;
+  s1k1 于 s1k8 验收后次夜发(届时克隆三件套任务);
+- **resume 实弹认证(Jul-30 凌晨,resumedrill1 PASS 5/5)**:R2 中段整树杀→--resume
+  重建 2 结算轮精确接续、护栏放行含端点纪元字段实比、补完 exit 0、lock sha 不变;
+- **auto-resume 看门狗(Jul-30 用户令"加入")**:`experiments/ops/run_watchdog.ps1`
+  (任务 HarnessX_s1k8_watchdog)——仅进程确死才动手(活跑慢跑不杀),只拉
+  `HarnessX_s1k8_resume`(--resume 永不 --clean),**限自动续跑 2 次**,笔笔审计
+  (s1k8.watchdog.log);双分支 DryRun 验证过(有 EXIT 0 收队 / 确死报续跑);
 - 运维:点火当晚插电、不合盖;发前查 serper.dev 余量(本文件前置③)。

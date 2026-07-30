@@ -593,3 +593,14 @@
 - **结论:断电保险实弹认证完成;s1k8 点火唯一闸 = Serper 充值。** auto-resume
   看门狗(哨兵检死→自动拉续跑任务,仅 --resume 永不 --clean、限 2 次、留审计行)
   已向用户提案,待"加"字。
+
+### auto-resume 看门狗落地(Jul-30 凌晨,用户令"auto resume加入")
+- `experiments/ops/run_watchdog.ps1`(参数化 RunTag,可复用于 s1k1/B 臂;无密钥,
+  入库):**仅进程确死才动手**(python 进程消失 + 最新 EXIT 标记非 0 或缺失),
+  活跑慢跑永不杀;动作 = 拉预注册 `HarnessX_<tag>_resume` 任务(--resume 永不
+  --clean);**自动续跑硬帽 2 次**(state 文件持久,看门狗自身重启也不超帽);
+  完跑 exit 0 自动收队;笔笔审计入 `<tag>.watchdog.log`;
+- 双分支 DryRun 验证:resumedrill1(有 EXIT 0)→ 收队;伪造死跑(无标记)→
+  报 "AUTO-RESUME attempt 1/2" 不真启;
+- s1k8 三件套任务全 Ready:主跑 / 续跑 / 看门狗;点火程序更新为双 Start(主跑 +
+  看门狗),已回填 S1-FREEZE §5。
