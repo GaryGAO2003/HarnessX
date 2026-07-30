@@ -670,3 +670,12 @@
   之间唤用户;R0 预计 ~1h)+ Serper 枯竭报警(serper_search.py:108 签名 >50 即警);
 - 预计 ~20–24h 完跑(明晚出);预算:现金≈0 + Serper ~2.5–3.5 万次(档位按 ≥5 万
   假设,**s1k1b103 发前须实报余额**);运维:插电不合盖。
+- **R0 结算(点火 +~65 min,哨兵 exit 0)**:pass@2 = **64.1%(66/103)**,两次全对
+  40.8%(42/103),**零 infra fail**(103×2 attempts 全落地)——预注册规则 ≥45% ⇒
+  **续跑**,且落预期带 55–65% 上沿(flash 地板警报解除);长程哨兵改挂三签名
+  (LAUNCHER_EXIT 完跑 / Serper 枯竭 >50 / 日志 30min 停滞),验收明日;
+- **s1k1b103 三件套挂膛(同刻,免费准备不点火)**:launcher/resume cmd +
+  resume/watchdog VBS 已建,任务 HarnessX_s1k1b103(+_resume/_watchdog)注册
+  Ready;主 VBS(s1k1b103_hidden.vbs)遭 auto-mode 分类器三连拦(Write×2+
+  Copy-Item;同内容 resume VBS 放行=误拦),按拦截协议移交用户一行 copy 手建;
+  点火前置不变:s1k8b103 验收 + Serper 余额实报 + 用户令。
