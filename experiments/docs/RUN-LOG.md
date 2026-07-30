@@ -617,6 +617,23 @@
 - 预计 10–14h 完跑;续跑/看门狗/lock 端点纪元护栏全部实弹认证在先(resumedrill1);
   s1k1 待 s1k8 验收后次夜发。
 
+### 发射前论文设置复核(Jul-30,用户令"再次检查论文的实验设置";PDF §6.1/Table 4/Table 8/Fig.4/App C 亲验)
+- **对齐确认三件**:①§6.1 原句 "The full task set is evaluated every round (no subsampling)"
+  ——Algorithm 1 的 Sample batch 即全床,我方实现对齐,采样疑虑解除;②Table 8:K_t=4
+  (今晚配置已复位)、GAIA max-steps 20、meta 200 步/role 全对上;③A.3 infra 失败计
+  失败 = 我方口径同。
+- **🔴 M-25 新发现(账本缺项)**:Table 8 噪声阈 "ignored single-round pass-count delta
+  ±5%"——正文无作用点;Fig.4 图注("all inside noise"/identical-config replay 校准假峰)
+  + App C R10(+6/−1 的 −1 系轮后观测,tasks_at_risk=[],门未见)⇒ 裁定为**分析层
+  口径**,门仍零容忍;我方采纳入 S1 判读(≤±5% 记噪声带),门不改。详 M-25 行。
+- **论文自曝素材(可引)**:Fig.4 图注承认 Global 臂 = "fix-one-break-one 跑步机,
+  R1→R2 即 8 修 9 破,9 轮净增益 ≈0 全在噪声内";**identical-config replay**(R12)
+  作噪声探针 = 与我方 a1big4 噪声地板方法同构;Table 4:GAIA GPT-5.4 **Initial=73.8**
+  (其 H0 极强,Global final 49.5 = 跌破自身基线 −24.3);seeds=3/cell(Table 8)vs
+  App C "19 runs"(H8 内部张力再添一证);D.1 blocked-source 39% 主簇与我方封锁源
+  簇诊断同构。
+- 种子:论文 3/cell,我方首跑 1(既有申报);并发 10 vs 3(导师口径,墙钟差机制无关)。
+
 ### s1k8 — 完跑判决(Jul-30 10:40,5.5h;**跑干净,但 patience 早停 R5 + 全程零 fork**)
 - 曲线(pass@2):63.3 → 80.0 → **86.7(峰 R2)** → 70.0 → 76.7 → 80.0(final R5);
   final−peak = −6.7pp(keyless 噪声地板 −13.3pp 以内,不构成退化证据);final 80.0
