@@ -15,6 +15,13 @@
 > 降为动机引;配平一手 = 2604.02460 + 2606.15017;②C.1 的"truly heterogeneous
 > 反守为攻"建议——**REVERSED 已废**:OneFlow §2 定义 heterogeneous=换底座,我方
 > 同底座 config 池按其定义 homogeneous。修订后的裁 C/D 以 E0-FREEZE-DRAFT.md 为准。
+> ③(DR-E,Jul-31)Q1(b)/C.3 的 GPA 2510.08847 定位**修正**:GPA 自身即
+> reference-free 分解式判官套件("critical gap"句均为自家贡献铺垫)——是**竞品/
+> 回避锚,不是"无人做"的开放缺口**;④C.3 的 TreeMem 对比**改 regime 口径**
+> (其 §4.6 自称推理期"no extra rollout branches",高成本在训练期 G×J×K)——
+> "昂贵 MC 树"措辞废;⑤LOO=n+1 次重评非零成本,零额外 rollout 仅指观察式账本,
+> 两者分列;⑥09863 的 AUROC≤0.65 限 final-state 判官(tau2/AppWorld),迁 GAIA
+> 子任务判官=我方 a-fortiori 推断须标注。
 
 ## 0. TL;DR(三问结论)
 
