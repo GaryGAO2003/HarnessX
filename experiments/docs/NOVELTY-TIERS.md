@@ -54,6 +54,40 @@ N1 被 2606.13003("配平即消失")当场击杀。
 - **主张边界**:限定"**配平预算下的精度** on GAIA";分解的常见赢面是成本效率
   (E3 −85% 成本 Δacc≈0 / Uno 10× 便宜输 1.4pp),效率轴有 2605.15425 占静态分解
   弱基线位——留 backlog 臂,不进主张。
-- **新增占位监视**:Meta-Agent 2605.25233(**HIGH,须验正文有无池复用**)、GUI
-  三件套(跨域先例)、MasRouter 2502.11133(谱系);普查 L1/L2 数字
-  (MiroFlow/ALITA-G)承重前须复核;smolagents/h2oGPTe/WebSailor 无可解析 ID。
+- **占位监视更新(Jul-31 凌晨,正文级深读)**:Meta-Agent 2605.25233 **红旗解除
+  = CLEAR**(双渲染逐字 §3.1:*"no templates are reused across benchmarks"*,
+  零跨任务持久化,无 GAIA 数)——但其占死"构造期再生成+执行期门控"母题 ⇒
+  **N1 novelty 轴只能落在持久池/跨任务演化,永不落在"我们有门"**;GUI 三件套、
+  MasRouter 照旧;smolagents/h2oGPTe/WebSailor 无可解析 ID。
+
+## 深读修订(Jul-31 凌晨,DR-B/DR-C 落地;DR-A 待归)
+
+- **事实链四家全 CONFIRMED 零反转,ID 齐**:JoyAgent 2510.00510(单 71.5 > 分解
+  70.3,Claude-4-sonnet,val pass@1)/ AgentOrchestra 2506.12508v6 / MiroFlow
+  2602.22808(GPT-5,val-text 103)/ ALITA-G 2510.23601(83.03 pass@1 单体)。
+- **三修正**:①AgentOrchestra 头条=**89.04 Test**(83.4=版本漂移旧数,Uno 对比行
+  同步失效);归因改口"planner-only 36.54,增益全在执行器子代理,Deep Researcher
+  单跳最大 +20.6";②MiroFlow 单胜**仅限 GAIA**(BrowseComp/HLE 多体反胜,论文
+  自解:GAIA 序贯结构错误传播),禁作"分解普遍有害"引;③四家**无一配平预算**,
+  且分解臂花 ≥ 算力仍输 ⇒ 事实链收口:"**≥算力下加分解仍不敌强单体 on GAIA**",
+  **matched-budget 检验=四家共同的方法学空洞,恰由我方 SA-matched/B1(rr) 首次
+  填补**(N1 再添一层);④DR-B 引句为摘要器中介(数字三角化可靠,verbatim 写作
+  期须 PDF 直读升级)。
+- **Scaling-Science 2512.08296 白名单生效**:"architecture-task alignment, not
+  number of agents"可引(注明 correlational R²=0.373);+80.8/−70.0 须带床+架构名
+  (Finance-Agent Centralized / PlanCraft Independent);**"decomposable vs
+  sequential"分类学禁引(论文无形式定义)**。
+- **Leni 归因模板抄法**:累计添加式(非 LOO);干净混淆矩阵只在确定性真值床
+  (SpreadsheetBench 0.20/0.75/0),GAIA 层自降 "indicative" ⇒ **我方同理:E0
+  oracle 门控格可称 clean,其余标 indicative**;其专家 post-trained 0.5-4B、训练
+  成本未披露——training-free 对比成立,但成本不可像对像。
+- **DR-A(算力三件套)三判**:①2606.13003 **WEAKENED**——其自身不配平(10× =
+  as-deployed 观测,CoT-SC k=5,web margin 1.19–2.38pp 无显著性),降为动机引;
+  配平一手改由 **2604.02460**(matched thinking-token + 95% bootstrap CI,升主锚)
+  与 **2606.15017**(web 床,最贴我方)承担;②OneFlow homogeneous 定义 CONFIRMED
+  且**威胁加强**:同底座仅 prompt/tools/position 异 = homogeneous,**我方 K=8 池
+  逐字落入"可被单体吃掉"范围** ⇒ SA-matched 生死线;③**REVERSED(已执行删除)**:
+  "truly heterogeneous 反攻话术"作废——OneFlow 锁死 heterogeneous=换底座,我方
+  无权援引;B2 胜出只能走纯实证叙事。附利好先验:2604.02460 §5.3 分解在上下文
+  退化 regime(α=0.7)才有正增益,GAIA 长上下文恰是该 regime,可作 B2 动机引。
+  SA-matched 规格升级:配总 token 非调用数,双变体(长 horizon 单体 + SC k=5)。

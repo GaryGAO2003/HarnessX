@@ -51,14 +51,23 @@
 
 ## 5. B 臂梯改案(裁定 C/D;非 E0 本体,一并呈裁,细则入 B-FREEZE)
 
-- **裁 C:B1 冻结 = round_robin(等 B2 调用预算),headline 改 B2(ledger) − B1(rr)**。
-  理由:原 B2−B1(single) 含算力混淆 = examiner 一击必杀(2606.13003:MAS 配平预算输
-  CoT-SC 且贵 10×;2601.12307 OneFlow:同底座同质工作流可被单体吃掉)。B1(single)
-  降辅助臂(答"分解+管线收益",与 B0 比)。
-- **裁 D:新增 SA-matched 臂**(单变体多轮/self-consistency,总调用预算=B2)。
-  防"配平即消失"杀;须 coder 新工单(B-FREEZE 前建成)。反守为攻:harness-config
-  异质性 pitch 成 OneFlow 明言的 "truly heterogeneous" 开放缝,但须 B2 > SA-matched
-  实证撑腰,否则 = architectural bloat。
+- **裁 C(深读修订版):B1 冻结 = round_robin(执行器调用与 B2 配平),headline 改
+  B2(ledger) − B1(rr)**。一手依据重新分工(DR-A):"配平后单体≥多体"由
+  **2604.02460**(matched thinking-token,95% bootstrap CI,SAS≥MAS)与
+  **2606.15017**(web 床 WebArena/WorkArena,token-matched 长 horizon 对照下增益
+  消失)承担;**2606.13003 降为动机引**(as-deployed 10× 成本 + web 床 MAS<CoT-SC
+  存在性;其自身不配平,margin 仅 1.19–2.38pp 无显著性)。B1(single) 降辅助臂。
+  统计口径:95% bootstrap CI(2604.02460 式)与 M-25 噪声带并用。
+- **裁 D(深读修订版):新增 SA-matched 臂,配平资源 = 总 token(+成本+墙钟),
+  调用数并报**——两篇一手 matched 研究均配 token 而非调用数;且须含**两个变体**:
+  (i) **长 horizon 单体**(Vanilla-IB 式,步数扩到与 B2 同 token;web 多步床上比
+  投票更强的对照);(ii) self-consistency k=5。**B2 须同时 > 两者**。
+  ⚠️ 原"truly heterogeneous 反攻话术"已删(DR-A REVERSED:OneFlow §2 逐字定义
+  heterogeneous=|ℬ(W)|>1 换底座;我方同底座 config 池按其定义 homogeneous 且 KV
+  可共享,**逐字落入"可被单体吃掉"范围**——SA-matched 因此从防御升为生死线);
+  若 B2 ≤ SA-matched,预注册如实报"无净架构优势"。利好先验可引:2604.02460 §5.3
+  "分解在上下文退化 regime(α=0.7)才有正增益"——GAIA 长上下文恰是该 regime。
+  须 coder 新工单(B-FREEZE 前建成)。
 - C.4 九条判读规则(McNemar 配对/噪声带/成本双报/组件归因决策树/结论作假设)
   整表吸收进 B-FREEZE(下一份冻结文件,E0 过门后写)。
 

@@ -10,6 +10,12 @@
 
 ---
 
+> **⚠️ ERRATA(Jul-31 凌晨,正文级深读 deepread/DR-A 后;两处修正)**:①本文将
+> 2606.13003 用作"配平即消失"依据——**WEAKENED**:该篇不配平(10×=as-deployed),
+> 降为动机引;配平一手 = 2604.02460 + 2606.15017;②C.1 的"truly heterogeneous
+> 反守为攻"建议——**REVERSED 已废**:OneFlow §2 定义 heterogeneous=换底座,我方
+> 同底座 config 池按其定义 homogeneous。修订后的裁 C/D 以 E0-FREEZE-DRAFT.md 为准。
+
 ## 0. TL;DR(三问结论)
 
 - **Q1**:6 周窗口新货未撼动我方缝,但补齐三块承重外证 + 一个必须新增的对照臂来源。最相关新货 =

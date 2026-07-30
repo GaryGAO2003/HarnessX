@@ -722,6 +722,20 @@
   全占,但成分在 GUI 域常规 ⇒ N1 卖点收紧为"配平实证对决"非架构;③红旗:
   Meta-Agent 2605.25233(HIGH,须验正文池复用)、GUI 三件套必引;④论文安全块
   三份初稿(CH2/CH3/附录A,56.6KB)落 MAS_Directions thesis-drafts/,抽验过。
+- **正文级深读三路验收(Jul-31 凌晨,用户令"深度解读正文和附录")→ deepread/
+  DR-A/B/C 三档案**:①**Meta-Agent 红旗解除 CLEAR**(双渲染逐字"no templates are
+  reused across benchmarks",零跨任务持久化,无 GAIA)——N1 axis 钉死"持久池/
+  跨任务演化",永不落"有门";②GAIA 消融四家 CONFIRMED 零反转,ID 全解析
+  (JoyAgent 2510.00510/AgentOrchestra 2506.12508v6/MiroFlow 2602.22808/ALITA-G
+  2510.23601),三修正入 CATALOG errata(89.04 版本漂移/MiroFlow 仅限 GAIA/四家
+  皆未配平=方法学空洞恰由我方填);③**DR-A 一处 REVERSED 已执行**:"truly
+  heterogeneous 反攻"废(OneFlow 定义=换底座,我方池 homogeneous 落"可被单体
+  吃掉"范围);2606.13003 降动机引,配平一手=2604.02460+2606.15017;**裁 C/D
+  深读修订版**入 E0-FREEZE-DRAFT(SA-matched 改配总 token+双变体:长 horizon
+  单体+SC k=5,B2 须同时胜两者);利好先验:分解在上下文退化 regime 才正增益
+  (2604.02460 §5.3)=GAIA 长上下文动机引。四文档同步挂 errata:CATALOG/TIERS/
+  NOVELTY-EXPDESIGN,E0-FREEZE 裁 C/D 重写。**四裁 A-D 仍待用户,C/D 以深读
+  修订版为准。**
 - **coder 工具链验收 PASS(主循环亲验后修一处)**:experiments/analysis/ 四模块
   (_poolscan/curve_extract/acceptance_report/plot_curve)+ .gitignore 追加 out/;
   亲跑复验:s1k8 六轮曲线**精确复现**(63.3/80.0/86.7/70.0/76.7/80.0,peak R2/final

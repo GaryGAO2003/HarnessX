@@ -6,7 +6,16 @@
 > **Depth tags**: L0 = secondhand search snippet (NOT load-bearing) · L1 = abstract opened · L2 = method section skimmed · L3 = method read carefully · S5 = verbatim quote in hand.
 > **Provenance tags**: [D]=carried from prior HarnessX docs (LITSCAN-A/B, NOVELTY-EXPDESIGN, DIVISION-DESIGN) · [O]=abstract opened this session · [W]=this-session breadth sweep (single pass, sweep-level).
 
----
+> **⚠️ ERRATA(Jul-31 凌晨,正文级深读 deepread/DR-A/B/C 后;引用本表前必读)**:
+> ①AgentOrchestra 头条 = **89.04 Test(v6)**,本表 83.4 为版本漂移旧数;归因改口
+> "planner-only 36.54,增益全在执行器子代理"(Tool-Gen 是后期最大单项,非全部);
+> ②MiroFlow 74.8>71.9 **仅限 GAIA**(BrowseComp-200/HLE-200 多体反胜),禁作普遍
+> 结论;③GAIA 消融四家**无一配平预算**——事实链措辞收口"≥算力下加分解仍不敌强
+> 单体 on GAIA";④Meta-Agent 红旗解除(CLEAR:零跨任务持久化,双渲染逐字);
+> ⑤2606.13003 **不配平**(10×=as-deployed 观测),降为动机引;配平一手改由
+> 2604.02460(matched thinking-token+bootstrap CI)与 2606.15017(web 床)承担;
+> ⑥"truly heterogeneous" 话术 REVERSED:OneFlow 定义 heterogeneous=换底座,我方
+> 同底座 config 池落其 homogeneous"可被单体吃掉"范围 ⇒ SA-matched 升生死线。
 
 ## 0. Coverage statement (honest scope)
 
