@@ -604,3 +604,15 @@
   报 "AUTO-RESUME attempt 1/2" 不真启;
 - s1k8 三件套任务全 Ready:主跑 / 续跑 / 看门狗;点火程序更新为双 Start(主跑 +
   看门狗),已回填 S1-FREEZE §5。
+
+### s1k8 — S1 正式实验 K=8 臂点火(Jul-30 05:07,用户令"serper充了,按3并发跑")
+- 前置四件套全绿:Serper 付费额度到账(用户确认)+ 导师侧反馈正面 + 冻结包
+  S1-FREEZE(读数/判读规则预注册)+ 用户开跑令;HEAD=63f23fa,853 测试基线;
+- 配置 = 冻结包 §1 逐字:pilot30 × 16 轮 × K=8 × pass@2 × 并发 3 × lab 端点
+  (DEEPSEEK_API_BASE env)× serper/bounce/shipped_only 三旗 × regression-baseline
+  默认 global × step-countdown 关;
+- 点火验证:双 Start(主跑 + 看门狗)后日志 45s +15.3KB;**看门狗审计首行落盘**
+  (maxRestarts=2);V0/config.yaml 实锤 `harnessx.tools.contrib.serper_search`
+  自定义工具路径(付费 Serper 真挂上,非 chain);
+- 预计 10–14h 完跑;续跑/看门狗/lock 端点纪元护栏全部实弹认证在先(resumedrill1);
+  s1k1 待 s1k8 验收后次夜发。
