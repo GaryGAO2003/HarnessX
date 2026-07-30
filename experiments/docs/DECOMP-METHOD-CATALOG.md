@@ -16,6 +16,12 @@
 > 2604.02460(matched thinking-token+bootstrap CI)与 2606.15017(web 床)承担;
 > ⑥"truly heterogeneous" 话术 REVERSED:OneFlow 定义 heterogeneous=换底座,我方
 > 同底座 config 池落其 homogeneous"可被单体吃掉"范围 ⇒ SA-matched 升生死线。
+> ⑦GUI 行四修正(DR-F,PDF 页码级):Lybic "worker pool"=**三固定角色**(Operator/
+> Technician/Analyst,p.7)非演化池,占位 **CLEAR**,OSWorld 57.07%@50 无分解消融;
+> Agent S2 的 +18.9/+32.7=全系统 vs 基线(Table 1 p.6)**非分解单项消融**(真组件
+> 消融:MoG +3.08/+4.61pp、PHP +4.62/+6.15pp,Fig 5 p.8);UFO2=依赖序子任务图、
+> per-app 会话级代理、无分解消融;RSTD 2605.15425 三配置**精度全 100% 打平**
+> (p.3,retry-token 轴)——我方"配平精度 on GAIA"边界句双正交成立。
 
 ## 0. Coverage statement (honest scope)
 
