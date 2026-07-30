@@ -736,6 +736,18 @@
   (2604.02460 §5.3)=GAIA 长上下文动机引。四文档同步挂 errata:CATALOG/TIERS/
   NOVELTY-EXPDESIGN,E0-FREEZE 裁 C/D 重写。**四裁 A-D 仍待用户,C/D 以深读
   修订版为准。**
+- **主循环本地 PDF 亲验(用户质询"你认真读了吗"后)**:下载 OneFlow 2601.12307
+  (22p)与 Meta-Agent 2605.25233(32p)PDF,pypdf 全文抽取零摘要器,四条判决
+  引句**逐字亲核全成立**:①homogeneous 定义原句(|B(W)|=1, "differ only in their
+  system prompts, tools, and positions");②"truly heterogeneous" 在文(首扫 MISS
+  =连字伪影 "developingtrulyheterogeneous",容错重扫 2 hits),且第二处
+  "cannot simulate truly heterogeneous...across different models" 把"het=换底座"
+  钉死,删除话术正确;加捡狠句 "with a single agent matches or slightly exceeds";
+  ③"no templates are reused across benchmarks" 原句在(单跑分数语境);④GAIA
+  全文 0 hits。**DR-A/C 判决 PDF 级站住;DR-B 数字仍三角化级**——第二波三路已派
+  (DR-D 对手方 AOrchestra/Uno+JoyAgent/MiroFlow verbatim 升级 / DR-E N2 证据四篇
+  +GPA 闭环 / DR-F GUI 三件套+Lybic 池占位复核+2605.15425 边界),**全波强制
+  PDF 本地直读法**(curl+pypdf,禁摘要器承重)。
 - **coder 工具链验收 PASS(主循环亲验后修一处)**:experiments/analysis/ 四模块
   (_poolscan/curve_extract/acceptance_report/plot_curve)+ .gitignore 追加 out/;
   亲跑复验:s1k8 六轮曲线**精确复现**(63.3/80.0/86.7/70.0/76.7/80.0,peak R2/final
