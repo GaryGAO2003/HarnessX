@@ -695,6 +695,12 @@
   kill+resume),完跑后实现;②**纪元记录:R0 于 vllm-0.24.0 测,R1+ 于 0.23.0**
   ——同权重同 TP,推测影响≈0,但入论文 threats-to-validity 脚注(供给基建中途换版);
   ③向导师转达:长跑期间重部署会孤儿化在途连接,恳请排期避让或提前打招呼。
+- **✅ 处置闭环(18:52-18:56,用户授权"你来")**:18:52:29 双 PID 手杀干净;
+  18:53:08 看门狗 DEAD 判定 → **AUTO-RESUME attempt 1/2**(实弹首用,认证兑现);
+  18:53:10 resume 进程起立,语义精确:*continuing from R1 (1 settled round)*
+  ——R0 无损,R1 重开;18:55 日志 17.6KB 在写(生产期稀疏节奏,与原跑 R1 比对过:
+  原跑亦有 ≤4min 静默段,正常)。长程哨兵改 Monitor 常驻(完跑/枯竭>50/停滞30min
+  三签名)。**自动续跑余额 1/2**;ETA 顺延 ~50min。
 
 ### Meanwhile 三线(Jul-30 晚,用户令"可以"+"另外起 subagent 研究 decomp/设计/novelty")
 - **researcher 深扫完成** → `NOVELTY-EXPDESIGN-RESEARCH.md`(deep-research+guardrails
