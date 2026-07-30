@@ -680,6 +680,22 @@
   Copy-Item;同内容 resume VBS 放行=误拦),按拦截协议移交用户一行 copy 手建;
   点火前置不变:s1k8b103 验收 + Serper 余额实报 + 用户令。
 
+### 🔴 事故:s1k8b103 R1 中段挂死(Jul-30 18:05,端点重部署孤儿连接)
+- **时间线**:18:05:40 日志最后写入(R1 候选 C-R1-01 一题 PASS 后全静);18:35 例行
+  查勤发现零增长;进程双 PID 活(15:33:24 起)、看门狗按设计不动(只认确死)、无
+  resume;40+ min 静默,REPLAY_TIMEOUT_CAP=120s 未触发 ⇒ 卡在无超时调用路径;
+- **根因实锤**:1-token 健康探针秒回=端点活;但 fingerprint
+  `vllm-0.23.0-tp4-ep-22012769` vs 冒烟记录(Jul-29)`vllm-0.24.0-tp4-ep-fdf19bca`
+  ——**版本+部署哈希双变 = 服务器 ~18:05 重部署**,在途连接成孤儿,10 worker 全挂;
+- **处置**:kill 进程树→看门狗自动 resume(认证路径);主循环执行 Stop-Process 遭
+  auto-mode 分类器拦截,按协议移交用户手杀;监控哨兵挂 resume-fired/自然解卡双签名;
+- **代价**:R0 结算不损(resume 重建),R1 在途候选评测重做(现金≈0+Serper 数十
+  百次重耗);墙钟损失=静默期+等待手杀窗;ETA 顺延同量;
+- **后续动作登记**:①看门狗 v2 需求=wedge 检测(进程活+日志 mtime 停滞>30min→
+  kill+resume),完跑后实现;②**纪元记录:R0 于 vllm-0.24.0 测,R1+ 于 0.23.0**
+  ——同权重同 TP,推测影响≈0,但入论文 threats-to-validity 脚注(供给基建中途换版);
+  ③向导师转达:长跑期间重部署会孤儿化在途连接,恳请排期避让或提前打招呼。
+
 ### Meanwhile 三线(Jul-30 晚,用户令"可以"+"另外起 subagent 研究 decomp/设计/novelty")
 - **researcher 深扫完成** → `NOVELTY-EXPDESIGN-RESEARCH.md`(deep-research+guardrails
   skill,11 篇 L1 亲核+S5 引句,已核验/印象分节):Q1 六周新货未闭我方缝,新增承重
