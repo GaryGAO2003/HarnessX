@@ -715,6 +715,13 @@
   /C(headline 改口)/D(SA-matched 新臂)呈用户**;前置=S1 验收+oracle plans 30 份。
 - 论文骨架落 MAS_Directions `research/phase4/phase 4 research/THESIS-SKELETON.md`
   (八章×资产映射×9/5 倒排);coder 验收工具链在产(experiments/analysis/,未回)。
+- **decomp 方法学普查验收(researcher,45 系统七分区)→ `DECOMP-METHOD-CATALOG.md`**
+  + 分层文档 `NOVELTY-TIERS.md`(N1-N4/M1-M5)及其普查修正节:①**前沿不分解**
+  (ALITA-G 83.03 / BrowseComp SOTA 皆单智能体)+"分解非精度赢面"≥5 团队合流
+  ⇒ N3 机理升强、SA-matched 升必修;②类型化子任务罕见(~7/45),四合取仍无人
+  全占,但成分在 GUI 域常规 ⇒ N1 卖点收紧为"配平实证对决"非架构;③红旗:
+  Meta-Agent 2605.25233(HIGH,须验正文池复用)、GUI 三件套必引;④论文安全块
+  三份初稿(CH2/CH3/附录A,56.6KB)落 MAS_Directions thesis-drafts/,抽验过。
 - **coder 工具链验收 PASS(主循环亲验后修一处)**:experiments/analysis/ 四模块
   (_poolscan/curve_extract/acceptance_report/plot_curve)+ .gitignore 追加 out/;
   亲跑复验:s1k8 六轮曲线**精确复现**(63.3/80.0/86.7/70.0/76.7/80.0,peak R2/final

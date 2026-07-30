@@ -35,3 +35,25 @@ N1 被 2606.13003("配平即消失")当场击杀。
   阴性=诚实负结果 + 机理讨论,组件归因决策树保证两头都有话说);
 - **投稿(若 N 线阳性)**:N1 主陈述(问句式)+ N2 第二贡献 + N3 机理章;
   M 层压缩进 setup/appendix。
+
+## 普查修正(Jul-30 深夜,DECOMP-METHOD-CATALOG.md 45 系统落地后)
+
+- **N1 措辞再收紧**:成分比 GAIA 视角显示的更常见——"类型化分解→异质执行器路由"
+  在 GUI 域是常规操作(Agent S2 2504.00906 / UFO2 2504.14603 / Agentic Lybic,
+  有消融有数字,必引作跨域先例);Meta-Agent 2605.25233 已做 inference-time 生成
+  式版本(⚑fresh worker 无持久池,GAIA 无数)⇒ **N1 可辩护形态只剩配平预算下的
+  实证对决(演化门控池 vs fresh-spawn vs trained-specialist),架构本身不称
+  novel**;候选 3("first-to")进一步降权。
+- **N3 升强**:"分解非精度赢面"从 JoyAgent 单证升为 **≥5 独立团队合流**(JoyAgent
+  / MiroFlow 74.8>71.9 / AgentOrchestra / 2606.13003 / Tran&Kiela 2604.02460 /
+  Scaling-Science 2512.08296,后者:可分解任务 +80.8% 但序贯规划 −70% = 任务结构
+  对齐才是真杠杆)——E0 的 ②−① 格=复现公认现象,④−③ 格=新问题,机理叙事更稳。
+- **SA-matched(裁 D)从防御升必修**:GAIA 开源 SOTA(ALITA-G 83.03 p@1)与
+  BrowseComp SOTA(Tongyi/WebSailor 系)皆**单智能体不分解**——单体就是前沿形态,
+  配平单体基线=与前沿对标,不是选修。
+- **主张边界**:限定"**配平预算下的精度** on GAIA";分解的常见赢面是成本效率
+  (E3 −85% 成本 Δacc≈0 / Uno 10× 便宜输 1.4pp),效率轴有 2605.15425 占静态分解
+  弱基线位——留 backlog 臂,不进主张。
+- **新增占位监视**:Meta-Agent 2605.25233(**HIGH,须验正文有无池复用**)、GUI
+  三件套(跨域先例)、MasRouter 2502.11133(谱系);普查 L1/L2 数字
+  (MiroFlow/ALITA-G)承重前须复核;smolagents/h2oGPTe/WebSailor 无可解析 ID。
