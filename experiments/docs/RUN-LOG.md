@@ -748,6 +748,22 @@
   (DR-D 对手方 AOrchestra/Uno+JoyAgent/MiroFlow verbatim 升级 / DR-E N2 证据四篇
   +GPA 闭环 / DR-F GUI 三件套+Lybic 池占位复核+2605.15425 边界),**全波强制
   PDF 本地直读法**(curl+pypdf,禁摘要器承重)。
+- **第二波三路全收(Jul-31 凌晨,DR-D/E/F 齐,~12 篇 PDF 级)**:①占位三 CLEAR
+  终判——AOrchestra(持久化全扫零命中,p.12 fresh-container 重锚)/Lybic(三固定
+  角色非池)/Uno(闭集冻结)⇒ **N1 四合取全场 CLEAR 收官**;分界铁律:只押演化
+  持久池,不押免训练(AOrchestra 头条 80.0 本就 training-free)、不押门控
+  (Meta-Agent 占);②**errata-of-errata**:DR-B"83.4=版本漂移/Uno 行失效"被
+  DR-D 翻案——83.4=Uno 受控 pass@1 复现(pass@2 88.7≈89.04,口径差),Uno 行
+  有效,CATALOG/TIERS 已二次修正;③新利好:Uno 复现 AOrchestra 仅 69.4(自报
+  80.0)=跨论文数字依赖 harness/池的直接证据;JoyAgent Multiple(3)=刻意去
+  Browser 的最优多体仍输单体=N3 例证;MiroFlow=avg@3 on **GAIA-Val-Text-103
+  同床**;④N2 修正三连(DR-E):GPA=竞品非缺口、TreeMem 对比改 regime 口径
+  (其推理期自称零额外分支)、LOO=n+1 与账本零额外 rollout 分列,弃"最便宜"
+  最高级;slot-swap=27621 的 model-replacement 协议同形(校准方法有直系先例);
+  ⑤边界铁证(DR-F):RSTD 三配置精度全 100% 打平(retry-token 轴/coding 域),
+  "配平精度 on GAIA"边界句双正交;Agent S2 引用改真消融数字(MoG +3.08/+4.61,
+  Fig5 p.8)。全档案 deepread/DR-A..F 六份;写作期遗留:AgentOrchestra/ALITA-G
+  本体仍三角化级(Uno 受控数可代用),JoyAgent/MiroFlow 已 verbatim。
 - **coder 工具链验收 PASS(主循环亲验后修一处)**:experiments/analysis/ 四模块
   (_poolscan/curve_extract/acceptance_report/plot_curve)+ .gitignore 追加 out/;
   亲跑复验:s1k8 六轮曲线**精确复现**(63.3/80.0/86.7/70.0/76.7/80.0,peak R2/final

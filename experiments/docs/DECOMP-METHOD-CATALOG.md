@@ -7,8 +7,10 @@
 > **Provenance tags**: [D]=carried from prior HarnessX docs (LITSCAN-A/B, NOVELTY-EXPDESIGN, DIVISION-DESIGN) · [O]=abstract opened this session · [W]=this-session breadth sweep (single pass, sweep-level).
 
 > **⚠️ ERRATA(Jul-31 凌晨,正文级深读 deepread/DR-A/B/C 后;引用本表前必读)**:
-> ①AgentOrchestra 头条 = **89.04 Test(v6)**,本表 83.4 为版本漂移旧数;归因改口
-> "planner-only 36.54,增益全在执行器子代理"(Tool-Gen 是后期最大单项,非全部);
+> ①AgentOrchestra 自报头条 = **89.04 Test(v6)**;83.4 = **Uno 统一 harness 受控
+> pass@1 复现**(其 pass@2=88.7≈89.04,差异为 pass@1/pass@2 口径非版本漂移——
+> DR-D PDF 级二次修正,**Uno 对比行有效**);归因照旧"planner-only 36.54,增益全
+> 在执行器子代理"(Tool-Gen 是后期最大单项,非全部);
 > ②MiroFlow 74.8>71.9 **仅限 GAIA**(BrowseComp-200/HLE-200 多体反胜),禁作普遍
 > 结论;③GAIA 消融四家**无一配平预算**——事实链措辞收口"≥算力下加分解仍不敌强
 > 单体 on GAIA";④Meta-Agent 红旗解除(CLEAR:零跨任务持久化,双渲染逐字);

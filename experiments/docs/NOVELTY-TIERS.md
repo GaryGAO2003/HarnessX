@@ -65,10 +65,11 @@ N1 被 2606.13003("配平即消失")当场击杀。
 - **事实链四家全 CONFIRMED 零反转,ID 齐**:JoyAgent 2510.00510(单 71.5 > 分解
   70.3,Claude-4-sonnet,val pass@1)/ AgentOrchestra 2506.12508v6 / MiroFlow
   2602.22808(GPT-5,val-text 103)/ ALITA-G 2510.23601(83.03 pass@1 单体)。
-- **三修正**:①AgentOrchestra 头条=**89.04 Test**(83.4=版本漂移旧数,Uno 对比行
-  同步失效);归因改口"planner-only 36.54,增益全在执行器子代理,Deep Researcher
-  单跳最大 +20.6";②MiroFlow 单胜**仅限 GAIA**(BrowseComp/HLE 多体反胜,论文
-  自解:GAIA 序贯结构错误传播),禁作"分解普遍有害"引;③四家**无一配平预算**,
+- **三修正**:①AgentOrchestra 自报头条=**89.04 Test**;83.4=**Uno 受控 pass@1
+  复现,对比行有效**(其 pass@2 88.7≈89.04,口径差非版本漂移——DR-D 二次修正了
+  DR-B 的"版本漂移"判);归因照旧"planner-only 36.54,增益全在执行器子代理,
+  Deep Researcher 单跳最大 +20.6";②MiroFlow 单胜**仅限 GAIA**(BrowseComp/HLE
+  多体反胜,论文自解:GAIA 序贯结构错误传播),禁作"分解普遍有害"引;③四家**无一配平预算**,
   且分解臂花 ≥ 算力仍输 ⇒ 事实链收口:"**≥算力下加分解仍不敌强单体 on GAIA**",
   **matched-budget 检验=四家共同的方法学空洞,恰由我方 SA-matched/B1(rr) 首次
   填补**(N1 再添一层);④DR-B 引句为摘要器中介(数字三角化可靠,verbatim 写作
@@ -91,3 +92,16 @@ N1 被 2606.13003("配平即消失")当场击杀。
   无权援引;B2 胜出只能走纯实证叙事。附利好先验:2604.02460 §5.3 分解在上下文
   退化 regime(α=0.7)才有正增益,GAIA 长上下文恰是该 regime,可作 B2 动机引。
   SA-matched 规格升级:配总 token 非调用数,双变体(长 horizon 单体 + SC k=5)。
+- **DR-D(对手方 PDF 直读)四发现**:①AOrchestra 占位 **CONFIRMED CLEAR(强)**
+  ——正文级持久化全扫零命中(工作记忆=步内、"cache"仅复现性用途),fresh-container
+  句重锚 p.12 §B.1.2(同任务内跨 delegation 也不留存),无子任务类型系统;
+  ⚠️但其**头条 80.0 是 training-free**(SFT 只救弱 orchestrator 轨 56.97→68.48,
+  与头条无关)⇒ **N1 与它的分界只能押"演化持久池",不能押"我们免训练"**;
+  ②新利好:Uno 统一池下复现 AOrchestra 仅 **69.4 pass@1**(自报 80.0,−11pp)
+  ——跨论文 GAIA 数字强烈依赖 harness/池 = matched-compute 论题的直接证据
+  (caveat:Uno 复现可能欠调);③JoyAgent 谜底:Multiple(3) 是**刻意去掉 Browser
+  agent** 的最优多体(加 Browser 显著恶化,Multiple(4) 崩至 52.7),纯分解臂
+  ≥ 算力仍输,Fusion(单+多+Critic 投票)75.2 才赢 = N3 条件价值读法的现成例证;
+  ④MiroFlow 口径修正:**avg@3 on GAIA-Val-Text-103(与我方同床)**非 pass@1;
+  写作卫生:JoyAgent(val pass@1 Claude-4-sonnet)与 MiroFlow(avg@3/103)禁并列
+  同栏;Uno 类型系统=闭集 9 模型 × 13 原语、推理期冻结——同样不占演化池格。
