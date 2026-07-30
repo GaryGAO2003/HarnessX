@@ -576,3 +576,20 @@
   旧 lock 向后兼容);
 - 验收:853/0 亲跑;**11 删行逐行核**=签名/调用点/注释改行,零行为删除;harnessx/
   与 decomp 路径零触碰;详 SPEC §7.19。**S1 前代码建设至此清零。**
+
+### resumedrill1 — resume 实弹演习(Jul-30 凌晨 02:48–04:52,用户令"跑";**PASS 5/5**)
+- 设计:calib6 × 4 轮 × K=2 × lab 端点 × **chain 后端(零 Serper 消耗)**;R2 中段
+  主循环故意整树杀灭(cmd + python×2,无 EXIT 标记 = a1big3 式外杀签名)→ 计划任务
+  拉 `--resume` 续跑;
+- **五项验收全过**:①轮边界重建(日志实证 `continuing from R2 (2 settled rounds)`)
+  ②候选管线用 R1 轨迹精确接续 R2,R0/R1 零重花 ③lock 护栏放行 + **端点纪元字段
+  首次实写实比**(env.deepseek_api_base = lab URL)④续跑 69 分钟补完 R2–R3,
+  LAUNCHER_EXIT code=0 ⑤lock sha 不变(report 头 = resume_provenance.prior_lock_sha256
+  逐字同)+ resumed_at_round=2 落盘 + R0–R3 逐轮 pool_state 链完整;
+- 已知限实证(§7.16 声明行为):续跑后 RunReport 曲线仅含 R2–R3——**S1 若发生续跑,
+  全曲线由逐轮 pool_state 拼接(分析侧动作,数据无损)**;
+- 附带收获:**853 代码首次真跑通过**(M1/M-23 默认关路径 + lock 新字段常开路径);
+  成本 ¥0(lab 端点 + chain);chain 后端轮速 ≈ serper 的一半(演习专用,正式跑不用);
+- **结论:断电保险实弹认证完成;s1k8 点火唯一闸 = Serper 充值。** auto-resume
+  看门狗(哨兵检死→自动拉续跑任务,仅 --resume 永不 --clean、限 2 次、留审计行)
+  已向用户提案,待"加"字。
