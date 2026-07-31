@@ -965,3 +965,49 @@ SPEC **没有** §7.20。即**文档先落主分支、代码留在 worktree**,�
 这是「未验证判词跨面传播」的又一实例,且这次源头是我方 SPEC。处置:§7.20 顶部加 ⚠️
 警示框,**合并 effort 分支后删除**(effort 分支未动本节,合并不冲突)。
 **教训:在隔离 worktree 建功能时,SPEC 条目应与代码同分支落地。**
+
+### 🏁 s1k8b103 完跑 + 验收 PASS(Jul-31 21:22:14,退出码 0)
+
+- 墙钟 **26h29m03s**(LAUNCHER_START Jul-30 18:53:10 → EXIT Jul-31 21:22:14,resume 跑);
+  **全 16 轮结算,pending=0**。
+- **终值 R15 = 74.8%(77/103)**;peak 仍 **R1 80.6%**;**drift = −5.8pp**;较 R0 基线 **+10.7pp**。
+- **交叉核对 ✓**:acceptance_report 的 peak / final / drift 与 run 自身 `pool_report.json`
+  逐位一致(80.58252427184466 / 74.75728155339806 / −5.825242718446…)。
+- **R15 = reject 轮**:2 个候选全被门拒(SEESAW_REGRESSION ×2,10 个回退实例),idle 升到 2;
+  故全程最长无 ship 连续仍为 **3(R10)**,patience 结论不变。
+- **fork 谱系(新增父子关系)**:V1←V0、V2←V0、V3←V2、V4←V3、V5←V3、V6←V4、V7←V6。
+  **不是扁平的七次 fork,而是一棵深度 5 的谱系树**:
+
+  ```
+  V0 ─┬─ V1
+      └─ V2 ── V3 ─┬─ V4 ── V6 ── V7
+                   └─ V5
+  ```
+
+  终池 8 变体,零退休;末轮承载者 V7 是 V0 的**五代后裔**。
+- **M-23 终值**:改进 66 个任务实例 / **回退 88 个**;携带回退的候选 10 个;archive 类别
+  {FORK:7, (none):4, ROUNDTRIP_L2:1, SEESAW_REGRESSION:3}。(此前「78 个回退」系 R15 前
+  快照,**作废**。)
+- **噪声地板终值**(metric A,n=8):均值 −0.8pp,**样本 SD 4.57pp** / 总体 4.27pp,
+  |Δ| 均值 3.52pp / 最大 7.77pp;±2SD(样本)= **[−10.0, +8.3]pp**。R15 贡献第 8 个样本
+  (+1.0pp)。**此前 n=7 / SD 4.87pp 的一切引用作废**;B-FREEZE §4.1 已同步。
+- **patience 终值**(metric D):p3 → 停 **R10 / 60.2%**;p5 / p8 / p16 → 跑满 **R15 / 74.8%**。
+  ⇒ 论文耐心值会让本跑**早停五轮、少 14.6pp**;耐心值恰压在临界点(多一格即跑完)。
+- 🔴 **预算耗尽率 19.4%**:`pool_report.json` `budget_exhaustions_run_total` = **994**,
+  末轮 40。约五分之一的 rollout 撞到 per-candidate 预算帽 ⇒ **须入 Ch7 威胁章**
+  (截断可能同时压低所有臂的天花板,是全局效度问题不是单臂问题)。
+- **运行健康**:resume 日志 66 traceback / 29 ERROR,**逐条分类确认全为收尾噪声**——
+  42× `ValueError: I/O operation on closed pipe`(隐藏窗口启动、stdout 管道关闭)、
+  6× CancelledError、6× TimeoutError、1× RuntimeError;ERROR 行 = 20× Unclosed client
+  session / 6× LoggingWorker / 3× Unclosed connector。日志含 **4,015 条任务 PASS/FAIL
+  结果行**,工作量未丢。**判定:跑是干净的。**
+
+### 🔴 acceptance_report 缺陷:默认控制台日志选错(Jul-31 发现,待修)
+
+默认只找 `<tag>.console.log`,但本跑真正完跑的是 **resume** 日志
+`<tag>.resume.console.log`(原始 launch 于 Jul-30 wedge 后被杀)。后果:首次生成的报告写着
+「LAUNCHER_EXIT 未找到 / **Status: IN-FLIGHT** / 墙钟 n/a / traceback 0」——
+**一个已完跑、退出码 0 的实验被报成"在飞"**,且运行健康数据全空。传
+`--console-log <resume 日志>` 后全部正确(complete / 26h29m03s / 66 traceback)。
+**须修默认选择逻辑**(同 tag 下取最新一份,或把 `.resume.` 变体纳入候选),并让
+`Status:` 同时参考 pending 轮数而非仅凭日志。否则论文审计附录会引到错误的运行状态。
