@@ -926,3 +926,42 @@ v2 修订第 3 条(用户裁 3→10,回归 Table 8)取代;加 ⛔SUPERSEDED 横�
 CLI 也只有 `--decomp-pool-from` / `--decomp-profile-from`——**交接通道根本不存在**,
 不补则 B2 = 冷启动+在线学习混合物,且 32 个 (变体×类型) 格子 / ~400 次决策下前段几乎
 必然全走冷格回退。默认不传该旗时须字节级等价。
+
+### `--decomp-ledger-from` 验收 PASS(Jul-31 晚,主循环逐条亲验)
+
+- 实现 = `feat/decomp-ledger-from` @ **a2700b1**(worktree `HarnessX-ledger`,基底
+  43476d4),5 文件 +406/−1;**主树零触碰、未合并、未推送**。
+- **亲验四项**:①`git status --short --branch` 干净,`show --stat` 范围与自报一致 ✓;
+  ②`experiments/variant_pool/tests` **871 passed / 0 failed**(用主树 `.venv312` 跑)✓;
+  ③「decomp-eval 路径先于 lock 返回」这条 claim 亲查代码:L7037-7039
+  `if args.decomp_eval: _run_decomp_eval(...); return`,而 `_build_experiment_lock`
+  在 L7041 ✓ ⇒ provenance 写 `decomp_manifest.json`(该路径真正的 lock 等价物,已载
+  `pool_source`/`profile_source`)是**正确处置而非绕过**;④对照跑 `HarnessX-effort`
+  = **874 passed**,证实 853 / 871 / 874 三数各属其分支 ✓。
+- **设计要点(SPEC §7.21)**:artifact = `<run_dir>/decomp_ledger.json`(schema
+  `decomp_ledger/v1`;matrix + source_run_tag + 产出它的 routing + 三个计数 +
+  variant_ids),**每个 `--decomp-eval` 跑结束无条件写**——必须如此,否则 B1 不产出
+  B2 要读的东西;载入 = `TypeCreditLedger.from_matrix`(只读 passes/attempts、rate
+  重算,与 `matrix()` 精确往返)。**硬报错(非警告)四类**:旗与 `--decomp-routing
+  ledger` 不同时出现 / artifact 缺失 / 不可读或缺 `matrix` / matrix 畸形(负数、
+  `passes > attempts`、重复格、bool 计数等,8 例参数化)。**变体名对不上不报错但强制
+  显形**:丢弃计数 + 日志 + provenance 三处同时记,禁止静默丢。
+- **provenance**(`decomp_manifest.json` → `decomp_ledger_source`,**仅传旗时出现**,
+  不传时 manifest 无新键):path / source_run_tag / source_routing / **matrix_sha256** /
+  cells_loaded / cells_kept / cells_dropped_unknown_variant / dropped_variants /
+  pool_variants_without_prior / prior_attempts ⇒ 读者可据 `cells_kept` + `prior_attempts`
+  判定该臂非空账本起步、并据 `path` 知由谁播种。
+- **未加 M-xx 偏差条**(agent 主动说明,主循环同意):decomp B0–B3 整层是**超出被复现
+  论文的 M1 扩展**(论文无子任务类型账本),B2 由 B1 播种属内部实验设计选择,不是对论文
+  协议的偏离。
+
+### 🔴 主分支缺陷:SPEC 文档与代码分处两个分支(Jul-31 发现,已加警示)
+
+`exp/variant-pool` 的 SPEC **§7.20 完整描述了 `--reasoning-effort`,但该分支代码里
+`reasoning-effort` 零命中**(实现在未合并的 efc2a89,5 处命中);反过来 effort 分支的
+SPEC **没有** §7.20。即**文档先落主分支、代码留在 worktree**,主分支因此宣称了自己
+不具备的能力。已实测后果:§7.20 标题的「853→874」是 effort 分支的测试数,主分支实测
+**853**;该错数经主循环的任务书传给 ledger agent 作基线,**被其独立顶回并正确报告**。
+这是「未验证判词跨面传播」的又一实例,且这次源头是我方 SPEC。处置:§7.20 顶部加 ⚠️
+警示框,**合并 effort 分支后删除**(effort 分支未动本节,合并不冲突)。
+**教训:在隔离 worktree 建功能时,SPEC 条目应与代码同分支落地。**

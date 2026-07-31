@@ -674,6 +674,13 @@ provenance_warnings,resume 护栏拦"换基线续跑"。
 
 ## 7.20 `--reasoning-effort` / `--meta-reasoning-effort`(Jul-31,裁 E "拉满"实施;853→874)
 
+> ⚠️ **本节所述代码尚未在本分支上(Jul-31 亲验)**:`exp/variant-pool` 的
+> `run_variant_pool.py` 里 `reasoning-effort` **零命中**,实现只存在于未合并的
+> `feat/reasoning-effort`(efc2a89,5 处命中);而 §7.20 这段文档却先落在了主分支上,
+> **文档与代码分处两个分支**。后果已实测发生:标题里的「853→874」是 **effort 分支**的
+> 测试数,本分支实测 **853**——该数字曾被当作基线传给下游 agent 并被其正确顶回。
+> **合并 `feat/reasoning-effort` 后删除本警示框**(effort 分支未动本节,合并不会冲突)。
+
 **建于隔离 worktree**(`HarnessX-effort`,分支 `feat/reasoning-effort`,基底 ea95b7d)
 ——主树彼时有 s1k8b103 在跑且看门狗可自动 resume,改主树=同跑内版本漂移;完跑后合并。
 

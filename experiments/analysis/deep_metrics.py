@@ -97,8 +97,10 @@ CAPTION_C = (
 )
 CAPTION_D = (
     "Replay of the ship/no-ship stream: 'stop after p consecutive no-ship rounds'. "
-    "Supplies the empirical evidence for the M-24 patience adjudication (a short "
-    "patience extinguishes early in a high-noise environment)."
+    "Supplies the empirical evidence for the S1 patience protocol decision: the freeze "
+    "package runs at patience 16 so the paper-verbatim patience-3 stop point can be "
+    "reconstructed post hoc from one run. NB patience carries no M-number in the "
+    "deviation registry -- M-24 is the round-budget off-by-one, not this."
 )
 CAPTION_E = (
     "Territory = the tasks routed to a variant in a round; in-territory pass@2 is that "
