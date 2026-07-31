@@ -847,3 +847,82 @@
   **排在 B 臂之后**(B 臂不依赖它、便宜且解锁 Ch6;A0 需 25-30k 待充值)。
 - 🔴 **新发现的交稿阻塞项:refs.bib 全部 34(现 35)条的 author/year 均为 `TODO`**
   ——PDF 里每条引用都会渲染成 TODO。须专项补全真实元数据(见待办)。
+
+### s1k8b103 动力学补记 + 四项文档卫生(Jul-31 晚,用户令「把能修的全修了」)
+
+**① s1k8b103 曲线与 fork 谱系补记(补台账洞)**——此前台账停在「R1 pending」,R1–R14
+无任何条目,三路独立 review 各自撞到同一洞;全部动力学叙述此前仅靠 curve_extract
+支撑。权威口径 = `python experiments/analysis/curve_extract.py --run-dir
+recipe/gaia_evolver/runs/s1k8b103`(Jul-31 20:40 取数,settled=15 即 R0–R14,R15 在飞)。
+
+| 轮 | pass@2 | 池 | ship | fork | idle | 门账 考虑/评/拒/选 |
+|----|--------|----|------|------|------|----------------|
+| R0 | 64.1 (66/103) | 1 | — | — | 0 | 基线轮,不进引擎 |
+| R1 | **80.6** (83/103) | 2 | ✓ | V1 | 0 | 3/1/0/1 |
+| R2 | 64.1 (66/103) | 3 | ✓ | V2 | 0 | 1/1/0/1 |
+| R3 | 63.1 (65/103) | 3 | — | — | 1 | 无候选 |
+| R4 | 67.0 (69/103) | 4 | ✓ | V3 | 0 | 3/2/1/1 |
+| R5 | 63.1 (65/103) | 4 | — | — | 1 | 无候选 |
+| R6 | 68.0 (70/103) | 5 | ✓ | V4 | 0 | 3/1/0/1 |
+| R7 | 71.8 (74/103) | 6 | ✓ | V5 | 0 | 3/1/0/1 |
+| R8 | 64.1 (66/103) | 6 | — | — | 1 | 无候选 |
+| R9 | 65.0 (67/103) | 6 | — | — | 2 | 无候选 |
+| R10 | 60.2 (62/103) | 6 | — | — | **3** | 3/1/**1**/0 ← 唯一「有候选但被门全拒」 |
+| R11 | 67.0 (69/103) | 7 | ✓ | V6 | 0 | 3/1/0/1 |
+| R12 | 73.8 (76/103) | 7 | — | — | 1 | 无候选 |
+| R13 | 71.8 (74/103) | 8 | ✓ | V7 | 0 | 3/1/0/1 |
+| R14 | **73.8** (76/103) | 8 | — | — | 1 | 无候选 |
+
+- **谱系**:7 次 fork(R1→V1、R2→V2、R4→V3、R6→V4、R7→V5、R11→V6、R13→V7),
+  终池 8 变体,**零退休**(未触池上限)。对照 30 题 pilot 的**零 fork**——「床异质性
+  = fork 燃料」的判断获得实证支持,可作 103 床换床决定的事后辩护。
+- **peak = R1 80.6% / final = R14 73.8% / drift = −6.8pp**;final 较 R0 基线 **+9.7pp**。
+- **idle 峰值 = 3(R10)**,全程无更长无 ship 连续 ⇒ 论文 patience=3 会在 **R10 停、
+  收 60.2%**;p5/p8/p16 **一次都不触发**。M-24 的「p16 跑内后验重建 p3 停点」一跑两得
+  成立;且论文的耐心值恰好压在临界点上(多给一格耐心整场跑完)。
+- **僵尸变体(Ch7 素材)**:每次 fork 后新变体几乎接管全部路由、前任迅速归零——
+  V1/V2 自 R5 起零路由,V3 自 R11,V4/V5 自 R12,V6 自 R14。**唯一例外 V0**:自 R4 起
+  稳定持有 39 题,胜率 87.2–94.9%,形态=「fork 出的专才被下一次 fork 顶掉,而祖先
+  保住一块自留地」。
+
+**② S1-FREEZE 正文并发段划除**——47 行起的「并发=3 全程不升」是 v1 口径,已被文件头
+v2 修订第 3 条(用户裁 3→10,回归 Table 8)取代;加 ⛔SUPERSEDED 横幅并保留其中**仍
+然有效**的纪律(报备口径即运行口径 / 提速前须先向导师重新报备)。⚠️ 现实态:R15 正被
+实验室端点 429 限流(R14 用 57 分钟 206 会话,R15 109 分钟仅 53 会话),**若要提速须先
+按该纪律向导师重新报备**。
+
+**③ FLOW-DIVERGENCE-VERDICT 算术松动**——「约 83%」与隐含「~87%」是同一事实的两种
+口径。已写死三个数并要求引用必须带口径:**申报且口径正确 19/23 = 82.6%** / **台账中
+存在条目 20/23 = 87.0%**(含那 1 条 MISDECLARED)/ **完全未申报 3/23 = 13.0%**;
+§一.5 的「~19 条」改为精确 19(23 − 3 NEW − 1 MISDECLARED)。
+
+**④ refs.bib 元数据补全(交稿阻塞项已解)**——35/35 全部经 arXiv export API 解析
+(选 API 而非网页摘要,避免作者名被摘要器改写),**0 未解析 / 0 疑似错引**;year 一律
+取 v1 `published` 时间戳;报告 = `paper/REFS-RESOLUTION-REPORT.md`。⚠️ 两条待处置:
+(a) 6 条工作名不在正式标题内(TRACE / OneFlow / HERA / Topaz / E3 / Leni),正文散文
+用名须与题录对齐;(b) ~~AEGIS 疑为我方内部代称~~ **【已证伪,勿传播】**。
+
+- 🔴 **子 agent 判词证伪(Jul-31,主循环亲验)**:refs agent 报「AEGIS 在 arXiv 记录中
+  零出现,疑为项目内部代称」。**该判词错误。** 主循环用 pymupdf 直读本地全文
+  `D:\PycharmProj\MAS_Directions\harnessx_2606.14249.pdf`(43 页 / 144,948 字符):
+  **`AEGIS` 命中 38 次**,含摘要句「adapts them through AEGIS, a trace-driven
+  multi-agent evolution engine」、正文「we introduce AEGIS, an observability-driven and
+  auditable harness adaptation engine」、目录 §4.3「AEGIS Architecture」、以及
+  「AEGIS combines full trace observability with a four-stage pipeline (Digester,
+  Planner, Evolver, Critic)」。**正确口径 = HarnessX 是 foundry/基底,AEGIS 是其上的
+  演化引擎**;我方 `--aegis-*` 旗标与论文 ch1/ch2/AppA 的 10 处 AEGIS 用法**全部正确,
+  无需改稿**。成因:该 agent 只核了 API 返回的 title 字段(标题确实不含 AEGIS),未落到
+  全文——与 ⑧「manifest 二次反转」同型,**证伪通道同样必须直查全文,摘要/元数据层的
+  证伪不算数**。
+- 📌 **顺带发现(未入稿,备 Ch3/Ch6 用)**:论文含一张**逐轮 Pass@2 曲线图**,横轴
+  R0–R12 标注「Aegis Evolution Round」,纵轴「Score on GAIA-103 (%)」刻度 73–85,
+  并配「Metric masking」讨论。**与我方 s1k8b103 同床同口径(103 题 / pass@2 / 逐轮)**,
+  是比 Table 4 更直接的曲线级比较对象;取用前须逐字核该图注与其 K 档。
+
+**⑤ 新增隔离 worktree**:`D:\PycharmProj\HarnessX-ledger`(分支 `feat/decomp-ledger-from`,
+基线 43476d4)。理由同 `HarnessX-effort`:s1k8b103 在飞且 watchdog 续跑时从磁盘重读
+代码,主树零触碰。在建功能 = **`--decomp-ledger-from`**:裁 F 要求「B2 用 B1 的冻结
+账本」,但现有代码 `TypeCreditLedger.__init__` 无参、只有 `matrix()` 出口而无入口,
+CLI 也只有 `--decomp-pool-from` / `--decomp-profile-from`——**交接通道根本不存在**,
+不补则 B2 = 冷启动+在线学习混合物,且 32 个 (变体×类型) 格子 / ~400 次决策下前段几乎
+必然全走冷格回退。默认不传该旗时须字节级等价。
