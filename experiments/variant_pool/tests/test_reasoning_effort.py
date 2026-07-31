@@ -272,3 +272,34 @@ def test_modelspec_effort_defaults_and_round_trip() -> None:
     assert back.models.reasoning_effort == "high"
     assert back.models.meta_reasoning_effort == "low"
     assert back.sha256() == lock.sha256()
+
+
+# ===========================================================================
+# 6. the CLI contract (real argparse): names, defaults, choice validation
+# ===========================================================================
+
+
+def test_cli_flags_default_to_none_and_parse_values(monkeypatch) -> None:
+    monkeypatch.delenv("HARNESSX_PROVIDER_ID", raising=False)
+    parser = rvp.build_arg_parser()
+
+    default = parser.parse_args([])
+    assert default.reasoning_effort is None
+    assert default.meta_reasoning_effort is None
+
+    task_only = parser.parse_args(["--reasoning-effort", "high"])
+    assert task_only.reasoning_effort == "high"
+    assert task_only.meta_reasoning_effort is None
+    assert rvp._meta_reasoning_effort(task_only) == "high"  # fallback
+
+    both = parser.parse_args(["--reasoning-effort", "high", "--meta-reasoning-effort", "low"])
+    assert (both.reasoning_effort, both.meta_reasoning_effort) == ("high", "low")
+
+
+def test_cli_rejects_invalid_effort(monkeypatch) -> None:
+    monkeypatch.delenv("HARNESSX_PROVIDER_ID", raising=False)
+    parser = rvp.build_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--reasoning-effort", "bogus"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--meta-reasoning-effort", "extreme"])
