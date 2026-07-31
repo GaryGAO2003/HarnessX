@@ -1,4 +1,18 @@
-# E0 冻结包草案 v0(2026-07-30;待用户四裁 + s1k8b103 验收后生效)
+# E0 冻结包草案 v0 —— ⛔ **用户裁定:E0 裁掉(Jul-31)**
+
+> **裁定(Jul-31,用户令"那裁掉")**:E0 退出臂梯与关键路径。理由链:①**非复现
+> 义务**——主循环全文搜 HarnessX 43 页 PDF:`oracle` 0 命中 / `upper bound` 0 /
+> `human-written` 0 / `gold-standard` 0,原文从未做过 oracle 上限实验(且原文
+> 无"任务分解"概念,7 处 decompos 均指 harness 配置分解与其 meta 四阶段流水线);
+> ②门的省钱理由失效(B 臂 eval-only 便宜,Serper 余额覆盖);③真实成本=30 份
+> oracle plans 手写工期卡在关键路径 + 误杀风险。
+> **连带**:裁 B(阈值)随之失效;**N3(“分工救活分解”交互项)暂无仪器,自 ICLR
+> 线主张降为备选**——若 B 臂打平且需区分"分解器烂 vs 分工无用",可按需复活
+> (可砍至 15 题半价);替代免费诊断:best-of-pool 上界 / oracle 路由回放 /
+> fallback 率 + plan 抽读。本文件其余内容保留作复活时的现成设计,**当前不生效**。
+> 现行裁定项只剩 C(headline 改口)/ D(SA-matched 臂)/ E(effort 档)。
+
+# (以下为原草案 v0 存档,2026-07-30)
 
 > E0 = 神谕分解注入门:B 臂线的 go/no-go + 分解质量上限锚。
 > 本草案吸收 NOVELTY-EXPDESIGN-RESEARCH.md PART C(Jul-30 researcher 深扫)。

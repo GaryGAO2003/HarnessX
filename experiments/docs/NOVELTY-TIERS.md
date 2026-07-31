@@ -9,7 +9,7 @@
 |---|---|---|---|
 | N1 | **四合取主命题**(开放实证问句式):training-free seesaw 演化 harness-config 池 × 子任务粒度路由,配平算力下 match/beat fresh-spawn(AOrchestra)与 post-trained 专家(Uno/Leni)on GAIA | B2 > SA-matched 且 B2−B1(rr) > 噪声带 | Jul-30 核验:四合取无人全占,近邻各占相邻格 |
 | N2 | **零额外 rollout 观察式 (variant×type) 信用 + LOO 校准**(n+1 重评;slot-swap = 2605.27621 的 model-replacement 协议同形,弃"最便宜"最高级) | 半独立:B2 输赢皆可写(负结果下降为方法注记) | DR-E PDF 级:27621 双引句实(LOO 省 3.3–7.6× token,判官 hierarchical 负 R²、BrowseComp-Plus 近零相关);09863 限 final-state 判官(GAIA 子任务迁移=a-fortiori 须标);TreeMem 对比=regime 口径(训练依赖 vs 免训练推理账本) |
-| N3 | **"分工救活分解"机理发现**:E0 2×2 交互项——②−①≈0(复现已知阴性)而 ④−③>0 ⇒ 分解的价值以异质执行器池为前提 | E0 出交互形态 | 无人发表过该交互;JoyAgent 只有单格阴性 |
+| N3 ⛔ | **"分工救活分解"机理发现**:E0 2×2 交互项 | **暂停(Jul-31 用户裁掉 E0)**——无仪器则无此主张;B 臂打平时可按需复活 E0(15 题半价)重启 | 无人发表过该交互;JoyAgent 只有单格阴性 |
 | N4 | (条件涌现)**fork 特化动力学**:演化循环未被指示却长出 (variant×type) 特化画像 | s1k8b103 出 fork 且画像分化 | 风险:fork 随机(s1k8 零 fork 前科) |
 
 **生死线**:N1/N3 全部依赖裁 C/D 的配平对照——没有 SA-matched 与 B1(rr),
