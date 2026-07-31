@@ -24,6 +24,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # keep experiments/analysis/ free of __pycache__
 
 import _poolscan as ps
+import deep_metrics as dm
 
 # M-25 noise band: a round-over-round delta with |Δ| <= this (percentage points)
 # is treated as measurement noise rather than a real move.
@@ -141,9 +142,18 @@ def _per_variant_md(rd: ps.RoundData) -> str:
     return "; ".join(parts)
 
 
-def build_report(run_dir: Path, console_path: Path | None) -> str:
+def build_report(
+    run_dir: Path,
+    console_path: Path | None,
+    level_map: dict | None = None,
+    console_paths: list[Path] | None = None,
+) -> str:
     tag = ps.run_tag(run_dir)
     rounds = ps.scan_run(run_dir)
+    if level_map is None:
+        level_map = dm.load_level_map()
+    if console_paths is None:
+        console_paths = dm.default_console_paths(run_dir, console_path)
     settled = [r for r in rounds if r.ok]
     pending = [r for r in rounds if not r.ok]
     report = ps.load_pool_report(run_dir)
@@ -353,6 +363,11 @@ def build_report(run_dir: Path, console_path: Path | None) -> str:
             )
     ap("")
 
+    # --- T1 deep metrics (A-H) ------------------------------------------- #
+    ap("")
+    for line in dm.build_deep_sections(rounds, run_dir, console_paths, level_map):
+        ap(line)
+
     if in_flight:
         ap("---")
         ap("")
@@ -371,6 +386,11 @@ def main(argv: list[str] | None = None) -> int:
         "--console-log",
         help="Path to the run's console log. Defaults to <run-dir-parent>/<tag>.console.log if present.",
     )
+    parser.add_argument("--data", help=f"GAIA difficulty JSON (default: {dm.DEFAULT_GAIA_DATA}).")
+    parser.add_argument(
+        "--latex", action="store_true",
+        help="Also write LaTeX tables (curve / noise band / territory) to out/<tag>/tables/.",
+    )
     args = parser.parse_args(argv)
 
     run_dir = Path(args.run_dir)
@@ -388,13 +408,20 @@ def main(argv: list[str] | None = None) -> int:
         if console_path:
             print(f"note: using default console log {console_path}", file=sys.stderr)
 
-    md = build_report(run_dir, console_path)
+    level_map = dm.load_level_map(Path(args.data) if args.data else None)
+    console_paths = dm.default_console_paths(run_dir, console_path)
+    md = build_report(run_dir, console_path, level_map=level_map, console_paths=console_paths)
 
     out_dir = ps.out_dir_for(tag)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "report.md"
     out_path.write_text(md, encoding="utf-8")
     print(f"wrote report -> {out_path}")
+
+    if args.latex:
+        written = dm.write_latex_tables(tag, ps.scan_run(run_dir), out_dir)
+        for p in written:
+            print(f"wrote LaTeX -> {p}")
     return 0
 
 
