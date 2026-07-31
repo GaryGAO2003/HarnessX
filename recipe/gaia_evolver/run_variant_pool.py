@@ -5804,6 +5804,26 @@ def _regression_baseline_provenance(mode: str) -> "str | None":
     )
 
 
+def _task_reasoning_effort(args: Any) -> str | None:
+    """Effective reasoning effort for the task (inner) agent, or ``None`` to omit.
+
+    ``getattr`` with a default keeps callers/tests that never set the flag (an
+    ``args`` object without the attribute) byte-identical: no flag => ``None`` =>
+    no ``reasoning_effort`` key is sent.
+    """
+    return getattr(args, "reasoning_effort", None)
+
+
+def _meta_reasoning_effort(args: Any) -> str | None:
+    """Effective reasoning effort for the meta agent (Digester/Planner/Evolver/Critic).
+
+    Falls back to the task value when ``--meta-reasoning-effort`` is unset; when
+    both are unset the result is ``None`` (omit). A literal ``"none"`` is truthy,
+    so ``--meta-reasoning-effort none`` overrides the fallback with ``"none"``.
+    """
+    return getattr(args, "meta_reasoning_effort", None) or getattr(args, "reasoning_effort", None)
+
+
 def _build_experiment_lock(
     *,
     args: Any,
@@ -5935,6 +5955,10 @@ def _build_experiment_lock(
             meta_agent_model=getattr(args, "meta_model", UNRESOLVED),
             api_base=getattr(args, "api_base", None) or UNRESOLVED,
             provider=getattr(args, "provider_id", None) or UNRESOLVED,
+            # Effective (post-fallback) reasoning efforts; None when unset so a
+            # pre-flag lock and an unset run compare equal (resume stays open).
+            reasoning_effort=_task_reasoning_effort(args),
+            meta_reasoning_effort=_meta_reasoning_effort(args),
         ),
         dataset=dataset,
         hyperparams=Hyperparams(
@@ -6085,6 +6109,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--api-base", default=None, help="OpenAI-compatible endpoint for --model.")
     parser.add_argument("--api-key", default=None, help="API key paired with --api-base.")
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high"),
+        default=None,
+        help=(
+            "Reasoning effort forwarded to the LiteLLM/vLLM endpoint for the task "
+            "(inner) agent. Default (unset) sends no reasoning_effort key, keeping "
+            "the request byte-identical to a pre-flag run."
+        ),
+    )
+    parser.add_argument(
+        "--meta-reasoning-effort",
+        choices=("none", "low", "medium", "high"),
+        default=None,
+        help=(
+            "Reasoning effort for the meta agent (Digester/Planner/Evolver/Critic). "
+            "Unset falls back to --reasoning-effort; if both are unset, no "
+            "reasoning_effort key is sent for either."
+        ),
+    )
     parser.add_argument("--clean", action="store_true", help="Wipe runs/<tag>/ before starting.")
     parser.add_argument("--no-judge", action="store_true", help="Disable LLMJudgeProcessor.")
     parser.add_argument("--evolve-cost", type=float, default=EVOLVE_COST_CAP_USD)
@@ -6512,9 +6556,18 @@ def setup(args: Any, run_dir: Path) -> dict[str, Any]:
 
     from harnessx.core.harness import _serialize_processor
 
-    provider = _make_provider(args.model, args.provider_id, api_base=args.api_base, api_key=args.api_key)
+    provider = _make_provider(
+        args.model,
+        args.provider_id,
+        api_base=args.api_base,
+        api_key=args.api_key,
+        reasoning_effort=_task_reasoning_effort(args),
+    )
     model_config = ModelConfig(main=provider)
 
+    # The judge (answer grader) is deliberately left at its default effort: it is
+    # the measurement instrument, not a Digester/Planner/Evolver/Critic, so it is
+    # held constant across effort arms to avoid confounding the comparison.
     judge_provider = _make_provider(args.meta_model, args.provider_id)
     pipeline_eval = GAIAPipelineEvaluator(judge_provider=judge_provider)
 
@@ -6524,6 +6577,7 @@ def setup(args: Any, run_dir: Path) -> dict[str, Any]:
         extended_thinking=True,
         thinking_budget_tokens=32_000,
         max_tokens=40_000,
+        reasoning_effort=_meta_reasoning_effort(args),
     )
     meta_model = ModelConfig(main=meta_provider)
 
@@ -6683,7 +6737,11 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
         profile_source = str(prof_from)
 
     # --- meta completion seam (decompose / synthesis / verify) -------------
-    meta_provider = _make_provider(args.meta_model, args.provider_id)
+    meta_provider = _make_provider(
+        args.meta_model,
+        args.provider_id,
+        reasoning_effort=_meta_reasoning_effort(args),
+    )
 
     async def _complete(prompt: str) -> str:
         response = await meta_provider.complete([Message(role="user", content=prompt)], [])

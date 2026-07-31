@@ -102,6 +102,7 @@ def _make_provider(
     max_tokens: int = 8192,
     api_base: str | None = None,
     api_key: str | None = None,
+    reasoning_effort: str | None = None,
 ):
     """Create a model provider from CLI args.
 
@@ -114,6 +115,12 @@ def _make_provider(
     ``api_base`` routes the LiteLLM branch to a custom OpenAI-compatible
     endpoint (local vLLM / SGLang / etc.). The ``X-Model-Provider-Id`` header is dropped in that case — it's
     vendor-specific and will be rejected or ignored by other backends.
+
+    ``reasoning_effort`` (``none``/``low``/``medium``/``high``) is forwarded to the
+    LiteLLM/vLLM endpoint **only when set**, so an unset caller's request body is
+    byte-identical to the pre-flag path (no ``reasoning_effort`` key). It is a
+    LiteLLM/vLLM knob, not an Anthropic one — the ``anthropic/`` branch uses
+    ``extended_thinking`` instead and ignores it.
     """
     from harnessx.providers.anthropic_provider import AnthropicProvider
     from harnessx.providers.litellm_provider import LiteLLMProvider
@@ -128,14 +135,19 @@ def _make_provider(
             thinking_budget_tokens=thinking_budget_tokens,
             max_tokens=max_tokens,
         )
+    # Forward reasoning_effort only when set: an unset run keeps a byte-identical
+    # request body (no ``reasoning_effort`` key). A literal "none" is a real
+    # endpoint value (disable thinking) and is truthy, so it is still sent.
+    effort_kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
     if api_base:
         return LiteLLMProvider(
             model,
             api_base=api_base,
             api_key=api_key or "EMPTY",
+            **effort_kwargs,
         )
     extra_headers = {"X-Model-Provider-Id": provider_id}
-    return LiteLLMProvider(model, extra_headers=extra_headers)
+    return LiteLLMProvider(model, extra_headers=extra_headers, **effort_kwargs)
 
 
 async def _run_task(
