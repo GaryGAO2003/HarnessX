@@ -730,6 +730,17 @@
     ⇒ B 臂发车前须先落 coder 工单(旗 + 锁 provenance + 默认不传字节等同 + 853 测试)。
   - **最终阵容(三列,无条件臂)**:**A1(high 档补测,~1.5k serper)+ B0 + B2**。
     B1 与配平臂均取消;若日后需要,各为一场 eval-only(~1.5k)可随时复活。
+- **✅ effort 接线验收 PASS(Jul-31,用户令"写";coder@隔离 worktree)**:
+  `--reasoning-effort` / `--meta-reasoning-effort` 落地,详 SPEC §7.20 + 偏差 M-26。
+  **隔离手法**(本次新增 SOP):主树有活跑且看门狗可 resume ⇒ 用
+  `git worktree add -b feat/reasoning-effort ../HarnessX-effort` 开隔离树施工,
+  主树零触碰(亲验 `git status` 空、HEAD 仍 ea95b7d)、**完跑后再合并**;
+  子代理开工前自检 `import harnessx` 解析到 worktree(editable 装指向主树,cwd 优先胜出)。
+  **主循环亲验**:diff 4 文件 +389/−3(harnessx/**、gate、engine 零触碰)、
+  变体池套件 **874/0** 亲跑、byte-equal 与 legacy-lock 放行两条承重机制读码复核;
+  核心 tests/ 的 5 failed 为 Windows HOME 环境性且本改动不触 harnessx/** ⇒ 逻辑上不可归因。
+  **判分器刻意不跟随 effort**(主循环确认 coder 提案:判分=测量仪器,跨臂恒定防混淆)。
+  ⚠️ 待办:s1k8b103 完跑后 merge feat/reasoning-effort → exp/variant-pool,再发 B 臂。
 - **R11 结算(14:5x)**:**67.0%(69/103),ship + FORK→V6,池 7 变体,idle 归零**
   ——R10 谷底 60.2 反弹 +6.8pp,论文 p3 协议停点(R10)之后立刻出 ship,**"高噪声
   环境下 patience=3 过早熄火"获首个直接证据**(p16 设计兑现);路由再洗牌:

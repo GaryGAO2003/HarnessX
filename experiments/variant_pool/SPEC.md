@@ -671,3 +671,32 @@ provenance_warnings,resume 护栏拦"换基线续跑"。
 **验收注记**:diff 176+/11−;11 删行主循环逐行核 = 签名穿参/调用点补参/注释类改行,
 零行为删除;853/0 亲跑。M-23 不对称显形以 gate 级测试证明(路由天然把任务送回解题
 变体,引擎级双变体自然场景不存在——此为审计语义的实现级补充发现)。
+
+## 7.20 `--reasoning-effort` / `--meta-reasoning-effort`(Jul-31,裁 E "拉满"实施;853→874)
+
+**建于隔离 worktree**(`HarnessX-effort`,分支 `feat/reasoning-effort`,基底 ea95b7d)
+——主树彼时有 s1k8b103 在跑且看门狗可自动 resume,改主树=同跑内版本漂移;完跑后合并。
+
+- **语义**:`--reasoning-effort {none,low,medium,high}` 作用于**任务代理**;
+  `--meta-reasoning-effort` 作用于 **meta 代理**(Digester/Planner/Evolver/Critic),
+  未给则回落到前者;两者皆未给 ⇒ 两旗都不传。
+- **字节等同**:未设置时 `_make_provider` 的 `effort_kwargs = {}`,
+  `LiteLLMProvider.kwargs` 无该键,请求体与接线前逐字相同(测试钉死双分支)。
+  ⚠️ 字面值 `none` 是**端点真值**(关思考)且为真,**仍会发送**——与 Python `None`
+  (省略)语义不同,勿混。
+- **lock provenance**:`models.reasoning_effort` / `models.meta_reasoning_effort`
+  记录**生效值**(含回落后的 meta 值);未设置写 `null`。落在 models 段=族阻断段,
+  中途改 effort 续跑将被护栏正确拦下(纪元入身份)。
+- **legacy lock 兼容(承重)**:旧 lock 无此二键 ⇒ `_build` 以 dataclass 默认 `None`
+  填补 ⇒ 与"新跑未设置"比较无 diff ⇒ **老运行(s1k8b103)照常续跑不受阻**;
+  专测 `test_legacy_lock_without_effort_keys_resumes` 断言 `lock_blocking_diffs == []`,
+  配套反向测试(legacy + 现设 high ⇒ 正确阻断)。
+- **judge 刻意不跟随**(主循环确认):判分器/`GAIAPipelineEvaluator` 虽同用 meta_model,
+  但它是**测量仪器**,跨臂保持恒定以免混淆 effort 与判分严格度;若日后要它跟随,
+  改 `setup()` 的 judge_provider 构造一行即可。
+- **未持久化进 `V0/config.yaml`**(同 api_base/api_key 走 kwargs 通道):每次进程启动
+  (含 resume)由 args 重建,lock 只作溯源。
+- **验收**:diff 4 文件 +389/−3(harnessx/** 核心、gate、engine 零触碰);
+  变体池套件 **874/0**(853 基线 + 21 新测)主循环亲跑复验;核心 `tests/` 的 5 个失败
+  为 Windows HOME/USERPROFILE 环境性且**先于本改动存在**(且本改动不触 harnessx/**,
+  逻辑上不可能致其失败)。
