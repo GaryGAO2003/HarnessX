@@ -128,6 +128,17 @@ class ModelSpec:
     meta_agent_model: str = UNRESOLVED
     api_base: str = UNRESOLVED
     provider: str = UNRESOLVED
+    #: Reasoning-effort knob (none/low/medium/high) sent to the LiteLLM/vLLM
+    #: endpoint — separately for the task agent and the meta agent, since they
+    #: are separately swappable. ``meta_reasoning_effort`` records the *effective*
+    #: value after the ``--meta-reasoning-effort`` → ``--reasoning-effort`` fallback.
+    #: ``None`` means the flag was unset and no ``reasoning_effort`` key is sent, so
+    #: an unset run's request body is byte-identical to a pre-flag run. A legacy
+    #: lock written before these fields existed carries neither key; :func:`_build`
+    #: fills the missing keys with this ``None`` default, so a resume with the flag
+    #: still unset stays comparable (``None`` == ``None``) and is not blocked.
+    reasoning_effort: str | None = None
+    meta_reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
