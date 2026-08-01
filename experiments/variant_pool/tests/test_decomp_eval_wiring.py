@@ -23,6 +23,7 @@ if str(_ROOT) not in sys.path:
 
 from recipe.gaia_evolver import run_variant_pool as rvp  # noqa: E402
 from experiments.variant_pool.pool import Variant, VariantPool  # noqa: E402
+from experiments.variant_pool.subtask_pipeline import DEFAULT_MAX_SUBTASKS  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +36,9 @@ def test_decomp_flag_defaults_full_table():
     assert args.decomp_routing == "single"
     assert args.decomp_pool_from is None
     assert args.decomp_profile_from is None
-    assert args.decomp_max_subtasks == 5
+    # Pinned to the pipeline constant, not a literal: the CLI default and the
+    # schema validator must not be able to drift apart again.
+    assert args.decomp_max_subtasks == DEFAULT_MAX_SUBTASKS
     assert args.decomp_subtask_max_steps is None
     assert args.decomp_ledger_min_obs == 3
     assert args.decomp_verify_gate == "off"

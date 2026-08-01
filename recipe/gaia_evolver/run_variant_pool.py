@@ -6096,6 +6096,10 @@ def _git_sha(warnings: list[str]) -> str:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     """CLI mirroring ``run.py`` plus ``--pool-k`` (SPEC §8.1: K=1 Global, K=8 Ensemble)."""
+    # Local import: the pipeline module is the single source of truth for the
+    # subtask cap, and importing it at module scope would be a cycle.
+    from experiments.variant_pool.subtask_pipeline import DEFAULT_MAX_SUBTASKS
+
     parser = argparse.ArgumentParser(description="GAIA Variant-Pool Evolver (parallel recipe to run.py)")
     parser.add_argument("--max-tasks", type=int, default=MAX_TASKS)
     parser.add_argument("--max-cost", type=float, default=MAX_COST_USD)
@@ -6348,8 +6352,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Which prompt text drives the LLM meta-agent roles (P1-1; OPTIMIZATION-"
             "PLAN F4). paper (default, paper-first house rule) = the paper's own "
             "published Appendix B.1 prompts: the Planner in FULL, the Evolver "
-            "(~60% published, our bridges across its 3 truncations) merged into the "
-            "candidate contract, and the Critic (~70% published, bridges across its "
+            "(~60%% published, our bridges across its 3 truncations) merged into the "
+            "candidate contract, and the Critic (~70%% published, bridges across its "
             "2 truncations); each is runtime-adapted ONLY where our JSON/manifest "
             "output contract requires (an appended OUTPUT FORMAT tail), the paper "
             "body kept verbatim. ours = today's byte-identical OURS reconstructions "
@@ -6509,8 +6513,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--decomp-max-subtasks",
         type=int,
-        default=5,
-        help="Upper bound on subtasks per task (schema validation). Default 5.",
+        default=DEFAULT_MAX_SUBTASKS,
+        help=(
+            "Upper bound on subtasks per task (schema validation). A runaway guard, "
+            "not a design cap -- the planner is told to emit as many subtasks as the "
+            "task genuinely needs, and a capability may recur. Default "
+            f"{DEFAULT_MAX_SUBTASKS}."
+        ),
     )
     parser.add_argument(
         "--decomp-subtask-max-steps",
