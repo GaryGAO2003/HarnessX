@@ -29,11 +29,12 @@
 | # | 机制点 | 我方实现 | 论文怎么说 | 位置 | 判定 | 处置 |
 |---|---|---|---|---|---|---|
 | 9 | 门的检查序列 | manifest → canonicalize → smoke → seesaw,首错即停 | 「manifest completeness, configuration normalization, build or smoke tests, and the seesaw constraint. **The first failing check halts**」 | **p.10** | ✅【双】 | — |
-| 10 | canonicalize / smoke | **默认 no-op**(委托上游 evolve 内部校验) | 论文要求「smoke test confirming the processor instantiates and runs」 | **p.10, p.32** | 🔴【双】 | **门内无对应实现**,须申报或补 |
+| 10 | canonicalize / smoke | C1 门内 no-op;**实际由 `meta_agent.evolve` 内部的 `EvolveValidator` 执行**(`run_variant_pool.py:1364` 逐字:「The paper's gates (canonicalize → replay smoke → novelty → evidence) run *inside* `meta_agent.evolve`, not in the C1 gate」) | 论文:Evolver **提供** smoke test(「the Evolver **must also provide** a smoke test confirming that the processor instantiates and runs on synthetic input without raising exceptions」p.10);门**「when applicable」**执行 | **p.10, p.32** | ⚠️【亲 Aug-01】 | **改判 🔴→⚠️**。`replay.py:73` = "Synthetic-task replay gate",`:43` = "`ok=False` means the gate should reject",`agent.py:814` = 跑一个合成 smoke 任务、`exit_reason=error` 即拒;`run_variant_pool.py:1152` 逐字「候选**只有在 evolve 内部 replay smoke 通过后**才能到达此门,而通过的 replay 驱动真实 run loop 端到端 → 每个注册 processor 都被执行」。**实质符合且执行证据强于论文**(真 run loop vs 合成输入)。残留差异只有两条,**申报即可、不需补、不需重跑**:①粒度(论文要 Evolver 为每个新 processor 亲写专属 smoke;我方是统一合成任务 replay)②位置(门内 vs 上游硬门,而论文的「when applicable」已给余地)。⚠️ 附带小 bug:`agent.py:817` 的 Evolver prompt 仍宣传 `replay_mode=config_only`,但 `replay.py:7-13` 明写该模式**已移除** |
 | 11 | **候选在哪些题上被评** | `T_k` = 路由给该变体的题 | 「a candidate targeting variant k is **tested only against tasks routed to k**」 | **p.11 §4.5** | ✅【亲】 | **这是 p.11 唯一明确规定的事,我们做对了** |
 | 12 | **「以前做对过」查谁的账本** | `global`(全历史跨变体 `ever_solved`) | 正文只有一句:「must not regress any previously solved task **recorded in Tt**」(Tt=全局 trace store) | **p.8 §4.1** | ⚠️【双】 | 我方读法可辩护;但见 #13 |
-| 13 | **↑ 第三种读法** | **未实现** | 附录目录写 `regressions.md # tasks **worsened vs R<n-1>**`;Planner prompt 同 | **p.30, p.43** | 🔴⚠️【双】 | **论文自相矛盾**;我方两个开关(global/per_variant)**都不实现"跟上一轮比"** |
+| 13 | **↑ 所谓"第三种读法"** | 两个开关都不实现"跟上一轮比" —— **这是对的** | `regressions.md # tasks **worsened vs R<n-1>**`(附录 E.1 p.43 / Planner prompt p.30) | **p.30, p.43** | ⚠️【亲 Aug-01】 | **改判 🔴→⚠️,判词推翻**。逐字复核全文所有 seesaw/regress 出现处:**`regressions.md` 从来不是 gate 的账本,是给 Planner 的诊断产物**。三证:①E.1 中它与 `landscape.md`/`digests/`/`trajectories/` 并列于诊断层;②B.1 Planner 读它,理由是「hit-rate **only counts predicted-task improvements** … **regressions.md is the only place it surfaces**」(p.30);③B.1 Critic 查的是「**Evolver 有没有处理**」它列的回归(p.33),是对 Evolver 行为的策略检查、非 accept/reject。**§4.3 p.10 枚举的门四检查里没有它**。故「论文自相矛盾」不成立,我方不实现是正确的。**真空在别处**:论文**并行跑两套回归会计**(门用全局 `T_t` §4.1 p.8 / 诊断用 vs 上一轮 B.1+E.1)且**从不调和** —— 一个 edit 可以既过门又该上 `regressions.md`,论文无规定。**我方缺的是诊断那一套**:`regressed_unpredicted` 在 `run.py:1207`/`run_meta.py:711` 有,**`run_variant_pool.py` 零命中**(变体池臂无附带损害通道),须补(纯移植,可离线回填,不改决策流) |
 | 14 | 「改进」判定 | `before_passes==0 and after>=1`,查**该变体自己**的格 | 「the edit improves some tasks without regressing any」;pass@2 二值翻转 | **p.11, p.23** | ✅【双】 | — |
+| 14b | **↑「improves」的时间口径**(与 #12 对称的另一半空白) | **全史**:`before` 取 `SuccessLedger.cell()`,而 `record()` 是 `cell.passes += n_pass`(跨轮累加)⇒「该变体**历来从未**通过」 | **论文从未定义 "improves"**。§4.5 只说「the edit **improves some tasks**」;两处旁证反指向**逐轮**:附录 C「five of the seven tasks … **flipped to pass**」(p.37)、B.1 manifest「`tasks_will_unlock: [<**ALL_FAIL** -> …>]`」未说 ALL_FAIL 是本轮还是历来(p.32) | **p.11 / p.37 / p.32** | ⚠️【亲 Aug-01】 | **本表新增,与 #12 是同一处欠定的两半**。我方两侧都取全史 ⇒ improved 池**单调收缩**、regressed 池(`ever_solved` "stays … **forever**",`ledger.py:117`)**单调膨胀** ⇒ **一次幸运通过在两个账本上都不可逆**。实测(`analysis/improve_baseline_scan.py`,run `s1k8b103`):**V0 可改进池 R1=16 → R2=3 → R8=1 → R12=0**,自 R12 起其 39 题全部曾通过 ⇒ `improved=∅` ⇒ **settlement 被强制 REJECT,与候选无关**;fork 是唯一重置池的机制(子代新 cell),形成棘轮。反事实 `last_round` 口径下 **44 格中 18 格(41%)判定不同**,REJECT 17→3、FORK 19→28。**我方读法合法但最保守**,须声明。已写入 CH3 §3.8 |
 | 15 | 门里有没有"改进检查" | 有(`if not improved: REJECT`) | 枚举的四步门**没有**改进检查,但 §4.5 又要求判定改进 | **p.10 vs p.11** | ⚠️【双】 | 论文自身不一致,我方取 §4.5 |
 | 16 | APPLY / FORK / REJECT | 零回退→APPLY;有改有坏→FORK;无改进→REJECT | 「(1) improves some without regressing any → **applied to its target variant**;(2) improves a subset while regressing others → **forks a new variant**」 | **p.11** | ✅【双】 | — |
 | 17 | `min_fork` 阈值 | `(1,1)` | **论文无此概念** | — | ⚠️【亲】 | 我方引入,须声明 |
@@ -81,11 +82,12 @@
 ## 审查建议顺序
 
 1. **#20 簇的定义** —— 唯一一条既是论文空白、又直接决定我方曲线形态的
-2. **#13 回退基线第三读** —— 论文自相矛盾,且我方两个开关都不覆盖
-3. **#10 门内 smoke 未实现** —— 论文明写要求,我方委托上游,须申报
-4. **#38 GRPO scope 声明** —— 最便宜、必须做
-5. **#24 / #6 / #17 / #23 / #26 / #27 / #28** —— 一批"我方自填"参数,统一在论文里列一节声明
-6. 其余 ✅ 项可快速过
+2. **#14b「improves」的时间口径** —— **Aug-01 新增**。与 #12 是同一处欠定的两半,且已实测出后果(V0 自 R12 起被强制 REJECT)。既是论文空白,又直接决定 fork 率与 ship 率
+3. ~~#13 回退基线第三读~~ —— **已结**(Aug-01 逐字复核:`regressions.md` 非门账本,我方不实现正确)。**衍生待办**:补 `run_variant_pool.py` 的 `regressed_unpredicted`
+4. ~~#10 门内 smoke 未实现~~ —— **已结**(Aug-01 亲验:上游 `EvolveValidator` 的 replay smoke 是硬门且强于论文要求)。改为申报粒度+位置差异,**不需补、不需重跑**
+5. **#38 GRPO scope 声明** —— 最便宜、必须做
+6. **#24 / #6 / #17 / #23 / #26 / #27 / #28 / #14b** —— 一批"我方自填"参数与判据,统一在论文里列一节声明
+7. 其余 ✅ 项可快速过
 
 ---
 
