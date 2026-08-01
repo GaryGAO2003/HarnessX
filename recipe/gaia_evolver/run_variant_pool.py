@@ -212,6 +212,15 @@ PAPER_PLANNED_SEEDS = (0, 1, 2)
 PAPER_CANDIDATES_PER_ROUND = 4
 CANDIDATE_MODES = ("paper", "legacy_single")
 
+#: Values the lab LiteLLM endpoint accepts for ``reasoning_effort``, probed
+#: directly against it on 2026-08-01 for both deepseek-v4-flash and
+#: deepseek-v4-pro. "very_high"/"ultra" and anything else return HTTP 400
+#: ``literal_error``. Note that the *measured* effect is binary, not graded:
+#: unset and "none" produce zero reasoning_content, every other value turns
+#: thinking on (~4x completion tokens), and reasoning length shows no monotone
+#: ordering across the enabled levels (n=1 per cell).
+REASONING_EFFORT_CHOICES = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
 # W28 — manifest contract mode (--manifest-mode). ``repo`` accepts the open
 # repo meta-agent's own journal vocabulary and adapts it; ``paper`` injects the
 # Table 9 schema + a filled example and requires strict paper-shaped output.
@@ -6115,17 +6124,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", default=None, help="API key paired with --api-base.")
     parser.add_argument(
         "--reasoning-effort",
-        choices=("none", "low", "medium", "high"),
+        choices=REASONING_EFFORT_CHOICES,
         default=None,
         help=(
             "Reasoning effort forwarded to the LiteLLM/vLLM endpoint for the task "
             "(inner) agent. Default (unset) sends no reasoning_effort key, keeping "
-            "the request byte-identical to a pre-flag run."
+            "the request byte-identical to a pre-flag run. Measured behaviour is "
+            "binary rather than graded: 'none' disables thinking, every other value "
+            "enables it, with no monotone effect on reasoning length above that."
         ),
     )
     parser.add_argument(
         "--meta-reasoning-effort",
-        choices=("none", "low", "medium", "high"),
+        choices=REASONING_EFFORT_CHOICES,
         default=None,
         help=(
             "Reasoning effort for the meta agent (Digester/Planner/Evolver/Critic). "

@@ -116,7 +116,7 @@ def _make_provider(
     endpoint (local vLLM / SGLang / etc.). The ``X-Model-Provider-Id`` header is dropped in that case — it's
     vendor-specific and will be rejected or ignored by other backends.
 
-    ``reasoning_effort`` (``none``/``low``/``medium``/``high``) is forwarded to the
+    ``reasoning_effort`` (``none``/``minimal``/``low``/``medium``/``high``/``xhigh``/``max``) is forwarded to the
     LiteLLM/vLLM endpoint **only when set**, so an unset caller's request body is
     byte-identical to the pre-flag path (no ``reasoning_effort`` key). It is a
     LiteLLM/vLLM knob, not an Anthropic one — the ``anthropic/`` branch uses

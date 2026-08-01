@@ -128,7 +128,7 @@ class ModelSpec:
     meta_agent_model: str = UNRESOLVED
     api_base: str = UNRESOLVED
     provider: str = UNRESOLVED
-    #: Reasoning-effort knob (none/low/medium/high) sent to the LiteLLM/vLLM
+    #: Reasoning-effort knob (none/minimal/low/medium/high/xhigh/max) sent to the LiteLLM/vLLM
     #: endpoint — separately for the task agent and the meta agent, since they
     #: are separately swappable. ``meta_reasoning_effort`` records the *effective*
     #: value after the ``--meta-reasoning-effort`` → ``--reasoning-effort`` fallback.

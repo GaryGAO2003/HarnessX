@@ -3,7 +3,7 @@
 """Offline tests for the ``--reasoning-effort`` / ``--meta-reasoning-effort`` flags.
 
 The lab LiteLLM/vLLM endpoint accepts a ``reasoning_effort`` request field
-(none/low/medium/high). Two CLI flags expose it:
+(none/minimal/low/medium/high/xhigh/max). Two CLI flags expose it:
 
 * ``--reasoning-effort``       → the task (inner) agent model.
 * ``--meta-reasoning-effort``  → the meta agent (Digester/Planner/Evolver/Critic),
