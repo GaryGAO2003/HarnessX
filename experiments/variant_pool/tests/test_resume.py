@@ -233,6 +233,24 @@ def test_resume_refuses_finished_run(tmp_path: Path) -> None:
     assert "pool_report.md" in str(excinfo.value)
 
 
+def test_allow_finished_loads_a_completed_run(tmp_path: Path) -> None:
+    """--decomp-pool-from reads a finished run's frozen pool, it never resumes it.
+
+    Without this escape hatch the B1/B2 arms cannot load s1k8b103 at all: every
+    completed evolution run has written pool_report.md by definition.
+    """
+    rounds = [_round_state(0, {"V0": ["t1"]}, {"V0": {"t1": [1, 2]}})]
+    run_dir = _write_run(tmp_path, rounds)
+    (run_dir / "pool_report.md").write_text("# done\n", encoding="utf-8")
+
+    state = load_resume_state(run_dir, allow_finished=True)
+    assert len(state.variants) == 1
+
+    # and the default is unchanged for everyone else
+    with pytest.raises(ResumeError):
+        load_resume_state(run_dir, allow_finished=False)
+
+
 def test_resume_refuses_run_with_no_settled_round(tmp_path: Path) -> None:
     run_dir = tmp_path / "empty"
     run_dir.mkdir()

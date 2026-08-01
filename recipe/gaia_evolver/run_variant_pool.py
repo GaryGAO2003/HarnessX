@@ -6663,8 +6663,13 @@ def _load_decomp_pool(args: Any, deps: dict[str, Any], run_dir: Path):
     task_ids = [t.task_id for t in deps["tasks"] if t.task_id]
     pool_from = getattr(args, "decomp_pool_from", None)
     if pool_from:
+        # allow_finished: --decomp-pool-from consumes a *completed* evolution
+        # run's frozen pool read-only; it never continues that run, so the
+        # resume path's finished-run guard does not apply here.
         state = load_resume_state(
-            Path(pool_from), candidate_mode=str(getattr(args, "candidate_mode", "paper"))
+            Path(pool_from),
+            candidate_mode=str(getattr(args, "candidate_mode", "paper")),
+            allow_finished=True,
         )
         pool = rebuild_pool(state, K=max(int(state.next_id), len(state.variants), 1))
         ledger = replay_ledger(state, SuccessLedger())

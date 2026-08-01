@@ -201,20 +201,32 @@ def plan_resume(args: Any, runs_dir: str | Path) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
-def load_resume_state(run_dir: str | Path, *, candidate_mode: str | None = None) -> ResumeState:
+def load_resume_state(
+    run_dir: str | Path,
+    *,
+    candidate_mode: str | None = None,
+    allow_finished: bool = False,
+) -> ResumeState:
     """Rebuild a :class:`ResumeState` from a settled-round trail on disk.
 
     ``candidate_mode`` selects which per-round measurement feeds the ledger; it
     defaults to the value recorded in ``experiment.lock.json`` (paper mode when
     the lock is absent), matching the driver's own default.
+
+    ``allow_finished`` lifts the finished-run guard for **read-only** consumers
+    that want a completed run's frozen pool rather than a run to continue (the
+    ``--decomp-pool-from`` arms). It changes nothing else, and the default keeps
+    the guard exactly as it was for the resume path.
     """
     run_dir = Path(run_dir)
     if not run_dir.is_dir():
         raise ResumeError(f"resume: {run_dir} is not a directory")
 
-    # A finished run has already written its final report; resuming it is a
-    # no-op at best and a double-count at worst.
-    if (run_dir / "pool_report.md").exists():
+    # A finished run has already written its final report; *resuming* it is a
+    # no-op at best and a double-count at worst. Read-only consumers that only
+    # want the settled pool pass allow_finished=True -- for them a finished run
+    # is the normal input, not an error.
+    if not allow_finished and (run_dir / "pool_report.md").exists():
         raise ResumeError(
             f"resume: {run_dir} already holds pool_report.md — the run finished (or early-stopped) "
             "and has nothing to resume. Start a fresh run (new --run-tag) instead."
