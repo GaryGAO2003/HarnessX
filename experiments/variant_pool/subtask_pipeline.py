@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 #: forbidden to stop over-decomposition cascades — DESIGN §2.1).
 SUBTASK_TYPES: frozenset[str] = frozenset({"search", "browse", "compute", "verify"})
 ROUTING_MODES: tuple[str, ...] = ("single", "round_robin", "ledger")
-DEFAULT_MAX_SUBTASKS = 5
+DEFAULT_MAX_SUBTASKS = 20
 DEFAULT_LEDGER_MIN_OBS = 3
 
 #: Sentinels for the whole-task fallback "subtask" so it never collides with a
@@ -65,7 +65,7 @@ DECOMPOSE_PROMPT_TEMPLATE = (
     "  - compute: calculate or reason over already-gathered information\n"
     "  - verify:  check or synthesise an intermediate result\n\n"
     "Rules:\n"
-    "  - Emit 3 to {max_subtasks} subtasks. Do NOT further decompose a subtask.\n"
+    "  - Emit as many subtasks as the task genuinely needs, up to {max_subtasks}. A capability may recur (e.g. search then compute then search again); express the ordering with 'dep'. Do NOT further decompose a subtask.\n"
     "  - Every 'instruction' must be self-contained.\n"
     "  - 'dep' lists the ids of subtasks whose output this one needs "
     "(a DAG; no cycles, no self-reference).\n\n"
