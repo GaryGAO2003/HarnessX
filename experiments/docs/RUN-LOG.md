@@ -1334,3 +1334,28 @@ C-R2-03 连 commit bounce 也未产出 config)。**足以解释 ship 密度低,�
 
 **顺带的标签缺陷**:`C-R4-04` 为 `improved=[] regressed=[]`(纯空操作)却被标 `SEESAW_REGRESSION`
 ⇒ 该标签把「无改善」与「有回退」混计。报告 seesaw 统计时须分列,否则会高估回退率。
+
+### ✅ R8 检验「已收敛」预测:成立,且出现第三条机制(Aug-02 09:2x)
+
+09:0x 定稿诊断后,主循环公开下了可证伪预测:**若「床已收敛」成立,R8 应不 ship**。
+
+**R8 结果**:`decisions={}`、`actual_candidates=0`、`variant_count=2` —— 预测成立。
+但机制是**此前未见的第三条**:`a_t = **0.7**`(**高于 alpha=0.5,未被 actionability 拦下**),
+`short_circuit = **planner_empty_landscape**` ⇒ **分数足够,但 Planner 形不成可行动 landscape**。
+
+**三条独立的无 ship 路径(8 个演化轮,6 轮无 ship)**:
+
+| 机制 | 轮 | 含义 |
+|---|---|---|
+| ship | R1(fork)、R2(apply) | — |
+| `actionability < α` | R3(0.0)、R5(0.4)、R6(0.3) | 失败不可整改 |
+| **`planner_empty_landscape`** | **R8(a_t=0.7)** | **分数够,仍无事可做** |
+| 门拒(候选全 `improved=[]`) | R4、R7 | 候选造出来了但无用 |
+
+⇒ **三条互不相同的机制一致指向「床上已无 harness 可整改内容」**,R8 尤其有力:
+它不是被阈值拦下的,是通过了阈值仍无事可做。**「已收敛」的证据强度由此上升一档。**
+
+**论文对应**:M-18 记载 selective invocation 含两个短路条件——「`a_t < α` **或没有可行动 landscape**」
+⇒ `planner_empty_landscape` 是既有设计,非缺陷。
+
+**对第一问的影响**:不变,且更强 —— 降 alpha 更加无用(R8 的 a_t 本就够高)。
