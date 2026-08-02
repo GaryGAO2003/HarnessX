@@ -169,6 +169,11 @@
 
 ## M-30 actionability 阈值 alpha 与池规模的交互(Aug-02 新增)
 
+> **与 M-18 的分工(勿视作重复条目)**:M-18 已确立 alpha 属 [OURS]、须锁定并做阈值敏感性
+> —— 那是**机制层**的既有认定。M-30 记的是 Aug-02 夜跑新发现的**经验事实**:
+> alpha 与**池规模经由 routing 发生交互**,这一点 M-18 未预见,且它把 M-18 的
+> 「阈值敏感性」从可选 ablation 升级为**复现 K=8 的前置条件**。引用时两条并列。
+
 | 项 | 内容 |
 |---|---|
 | 论文原设 | Algorithm 1 有 alpha,但**未规定唯一操作值**;实现自述 `actionability_threshold_provenance = "OURS: configurable reconstruction parameter; the paper does not specify one unique operational alpha"` |
