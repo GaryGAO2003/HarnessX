@@ -45,6 +45,26 @@ logger = logging.getLogger(__name__)
 #: forbidden to stop over-decomposition cascades — DESIGN §2.1).
 SUBTASK_TYPES: frozenset[str] = frozenset({"search", "browse", "compute", "verify"})
 ROUTING_MODES: tuple[str, ...] = ("single", "round_robin", "ledger")
+
+#: ``--decomp-credit``. What a ``(variant x type)`` observation is scored on.
+#:
+#: ``task`` (default) books the WHOLE task's pass/fail against every distinct
+#: pair on the chain -- a passing task credits the searcher, the calculator and
+#: the verifier equally (4.30 cells per chain on average). The resulting ledger
+#: measures participation in successful tasks, not competence at a kind of work,
+#: which is a problem because ``ledger`` routing -- the B2 arm, and the thesis's
+#: headline B2-B1 contrast -- reads exactly this table to decide who does what.
+#:
+#: ``subtask_convergence`` books one observation per executed subtask, passing
+#: iff that subtask finished inside its own step budget. It scores COMPLETION,
+#: not CORRECTNESS: a subtask that stops early with a wrong answer counts as a
+#: success. That is a deliberate trade -- free and per-subtask, against coarse --
+#: and it has to be declared wherever the arm is reported. GAIA labels only the
+#: final answer, so the precise alternatives (a per-subtask judge, or a
+#: counterfactual re-run under a different variant) cost several times more.
+CREDIT_TASK = "task"
+CREDIT_SUBTASK_CONVERGENCE = "subtask_convergence"
+CREDIT_MODES: tuple[str, ...] = (CREDIT_TASK, CREDIT_SUBTASK_CONVERGENCE)
 DEFAULT_MAX_SUBTASKS = 20
 DEFAULT_LEDGER_MIN_OBS = 3
 
@@ -635,9 +655,13 @@ class PipelineExecutor:
         router: SubtaskRouter,
         synthesizer: Synthesizer,
         credit_ledger: TypeCreditLedger | None = None,
+        credit_mode: str = CREDIT_TASK,
         verify_gate: VerifyGate | None = None,
         subtask_max_steps: int,
     ) -> None:
+        if credit_mode not in CREDIT_MODES:
+            raise ValueError(f"credit_mode must be one of {CREDIT_MODES}, got {credit_mode!r}")
+        self.credit_mode = credit_mode
         self.runner = runner
         self.scorer = scorer
         self.decomposer = decomposer
@@ -769,7 +793,26 @@ class PipelineExecutor:
         )
         passed = await self.scorer(final_output, ground_truth)
         if self.credit_ledger is not None:
-            self.credit_ledger.record(pairs=used, passed=passed)
+            if self.credit_mode == CREDIT_TASK:
+                # Every (variant, type) on the chain takes the whole task's
+                # outcome, so a pass credits the searcher, the calculator and
+                # the verifier alike. The ledger then measures "took part in
+                # tasks that passed", not "is good at this kind of work".
+                self.credit_ledger.record(pairs=used, passed=passed)
+            else:
+                # One observation per executed subtask, scored on whether that
+                # subtask finished inside its own step budget. Free, objective,
+                # binary, and -- unlike the task outcome -- not shared with the
+                # rest of the chain. A pair occurring twice books twice, because
+                # under this rule the two runs are two measurements.
+                # LIMIT, and it must be declared: this scores completion, not
+                # correctness. A subtask that stops early with a wrong answer
+                # counts as a success here.
+                for rec in records:
+                    self.credit_ledger.record(
+                        pairs=[(rec.variant_id, rec.type)],
+                        passed=rec.steps < self.subtask_max_steps,
+                    )
 
         return AttemptResult(
             task_id=task_id,

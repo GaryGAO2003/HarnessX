@@ -6996,6 +6996,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--decomp-credit",
+        choices=("task", "subtask_convergence"),
+        default="task",
+        help=(
+            "What a (variant x subtask_type) credit observation is scored on "
+            "(M-36). 'task' (default, byte-identical) books the WHOLE task's "
+            "pass/fail against every distinct pair on the chain, so a passing "
+            "task credits searcher, calculator and verifier alike (~4.3 cells "
+            "per chain) -- the ledger then measures participation in successful "
+            "tasks rather than competence, which matters because ledger routing "
+            "(the B2 arm) reads that table. 'subtask_convergence' books one "
+            "observation per executed subtask, passing iff it finished inside "
+            "its own step budget. It scores completion, NOT correctness: a "
+            "subtask that stops early with a wrong answer counts as a success."
+        ),
+    )
+    parser.add_argument(
         "--decomp-concurrency",
         type=int,
         default=1,
@@ -7226,6 +7243,8 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
     max_subtasks = int(getattr(args, "decomp_max_subtasks", 5))
     min_obs = int(getattr(args, "decomp_ledger_min_obs", 3))
 
+    credit_mode = str(getattr(args, "decomp_credit", "task"))
+
     decomp_concurrency = int(getattr(args, "decomp_concurrency", 1))
     if decomp_concurrency < 1:
         raise SystemExit(f"--decomp-concurrency must be >= 1, got {decomp_concurrency}")
@@ -7349,6 +7368,7 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
                     router=subtask_router,
                     synthesizer=synthesizer,
                     credit_ledger=credit_ledger,
+                    credit_mode=credit_mode,
                     verify_gate=verify_gate,
                     subtask_max_steps=subtask_max_steps,
                 )
@@ -7429,6 +7449,7 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
         # fact, and the guard changes what counts as a pass.
         "decomp_synth_guard": str(getattr(args, "decomp_synth_guard", "off")),
         "decomp_concurrency": decomp_concurrency,
+        "decomp_credit": credit_mode,
         "pass_k": pass_k,
         "num_tasks": len(rows),
         "max_steps": int(args.max_steps),

@@ -911,3 +911,32 @@ s2k8b50 / b_smoke 的 active 池**未受影响**(仅候选)。
 **记录**。`decomp_manifest.json` 的 `decomp_concurrency`(该模式不建 lock)。
 
 **测试**。`tests/test_decomp_concurrency.py` 12 项。全量 **994 绿**。
+
+## 7.27 逐子任务信用 `--decomp-credit`(Aug-02,用户令「可以」;994→1005)
+
+**为何是前提而非优化**。B2(账本路由)是 headline 臂,`B2 − B1` 就是 RQ2 的答案。
+B2 读信用表决定分工;表分不出能力,headline 就没有机制。
+
+**缺陷**。`record(pairs=used, passed=task_passed)` 把**整道题**的成败记进链上每个
+去重格子(均 4.30 格/链)。表测的是「参与过多少道做对的题」,不是「擅长哪类活」。
+
+**接口**。
+
+```
+--decomp-credit {task, subtask_convergence}    默认 task(字节等同)
+```
+
+`subtask_convergence`:每个已执行子任务记一次观测,
+成败 = `steps < subtask_max_steps`。
+
+**判据理由**。免费、客观、独立、对齐 C-1(88.7% 失败是"没做完");撞顶率实测 22%。
+
+**🔴 局限须随结果声明**。测「做完」不测「做对」——提前结束但答错会被记成成功。
+精确替代(逐子任务裁判 / 反事实换变体重跑)贵数倍,列 future work。
+
+**去重差异**。`task` 档对 `used` 去重;`subtask_convergence` **不去重**——
+两次执行就是两次测量。
+
+**记录**。`decomp_manifest.json` 的 `decomp_credit`。
+
+**测试**。`tests/test_decomp_credit.py` 11 项,含两条把缺陷钉死的测试。全量 **1005 绿**。
