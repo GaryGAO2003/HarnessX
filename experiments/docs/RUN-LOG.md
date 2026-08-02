@@ -1278,3 +1278,34 @@ C-R2-03 连 commit bounce 也未产出 config)。**足以解释 ship 密度低,�
 与 s1k8b103 的耐心值结论(p3 → 停 R10 / 60.2%;p5/p8/p16 → 跑满 R15 / 74.8%,
 「耐心值恰压在临界点」)并置,本跑提供**第二个数据点**:更小的床上无 ship 连续更长
 ⇒ 同一 patience 在不同床上的行为不同。可入 Ch7。⚠️ **n=2 跑,不得写成规律。**
+
+### ✅ 空轮之谜解决:actionability 短路,非故障(Aug-02 08:5x,推翻 07:4x 的「未解」记录)
+
+证据源:`R<n>/V0/pipeline_audit.json`(此前只查了 pipeline 目录与控制台日志,漏了这个产物)。
+
+**机制**:Digester 对每轮失败打「可整改性」分 `actionability`,低于 `alpha=0.5` 即
+**短路不生成候选**(`short_circuit: "actionability_below_threshold"`,
+`no_op_reasons: ["selective invocation no-op: actionability a_t=X < alpha=0.5"]`)。
+
+| 轮 | a_t | digests | 失败 | Digester 理由(原文摘) |
+|---|---|---|---|---|
+| **R1** | **0.9** | **50** | **18** | "failures involve budget exhaustion linked to TokenBudgetProcessor … addressable engineering improvements" ⇒ 产出 4 候选 |
+| R3 | 0.0 | 19 | 1 | "the only failure is a model capability limitation in city vs. town classification, **which cannot be fixed via harness edits**" |
+| R5 | 0.4 | 19 | 2 | "one is a pure model capability limit (scope_ambiguity) … the other is environmental" |
+| R6 | 0.3 | 19 | 4 | "only one failure … involves a harness component (TokenBudgetProcessor) with usable evidence" |
+
+**根因链(已证部分)**:池分叉后 routing 把 50 题拆给两个变体(R2 = V0:19 / V1:31)
+⇒ V0 每轮只看到 **19 题 / 1–4 个失败** ⇒ 失败样本少且多为模型能力极限
+⇒ a_t 过不了 0.5 ⇒ 短路。对比 R1:V0 独占全部 50 题、18 个失败,a_t=0.9,正常产出。
+
+**🔴 两处自我更正**:
+1. 07:4x 记「零产出发生在候选生成之前,具体环节从产物判不出」—— **作废**,已判出(选择性调用短路)。
+2. 同处记「『缩床饿死 Digester』假设无证据支持,不可引用」—— **现有证据支持**,
+   且机制比原猜测更具体:不是 Digester 想不出,是**可整改性分数在小样本上过不了阈值**。
+   ⚠️ 仍属**推断**的部分:全床能否把 a_t 抬过阈值 —— a_t 是 LLM 对失败构成的判断,
+   不是失败计数的单调函数,故「103 题床能解开停滞」**合理但未证**。
+
+**🟠 参数溯源(重要)**:`actionability_threshold_provenance` 自述
+**"OURS: configurable reconstruction parameter; the paper does not specify one unique operational alpha"**
+⇒ **alpha=0.5 是我方选定值,非论文规定**。它直接决定演化频率,
+应作为可调旋钮进入偏差表与 Ch7(现有偏差表未单列该参数)。
