@@ -268,3 +268,21 @@
 | 代价须并报 | ε 靠随机路由买测量,**准确率代价正比于 ε**,而离线重放**看不到这一侧**。ε 应取"够买到测量的最小值",不是让有负载变体数最大化的值 |
 | 测试 | `tests/test_cluster_source.py`(20 项),含 `test_default_reproduces_the_previous_hardcoded_partition`、`test_default_partition_has_exactly_three_clusters_which_is_the_ceiling`(把发现钉死)、`test_partial_coverage_fails_closed_rather_than_cold_starting` |
 | 裁决层 | 用户令「可以写掉」(Aug-02);全量 **982 绿** |
+
+## M-35 评估路径并发化,并对 `ledger` 路由 fail-closed(`--decomp-concurrency`,Aug-02 新增)
+
+> 纯工程改动,**不改变任何测量语义**。列在此处是因为它引入了一个
+> **"某些配置组合被拒绝执行"** 的新约束,而该约束的理由是可复现性,须留档。
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | **不适用**(评估基建,非机制) |
+| 问题 | `_run_decomp_eval` 完全串行(`for task … for attempt … await`),而演化循环以 `--concurrency 10` 打满端点。**一条评估臂只用了约十分之一的吞吐**。实测端点上限约 5 rollout/分钟,故 A1 一条臂 3.9h 中绝大部分是空等 |
+| 我方做法 | `--decomp-concurrency` 默认 **1**(与旗标前路径一致:逐任务运行并逐任务落盘,JSONL 流式写出不变)。>1 时任务级并发,**同一任务的多次 attempt 仍串行**——它们是同一任务的重复测量,管线在其间写信用,重叠会改变第二次尝试所见 |
+| 🔴 对 `ledger` 路由 fail-closed | `SubtaskRouter.route` 在 `ledger` 档读 `TypeCreditLedger.rate()`,而该账本正被并发任务写入 ⇒ **路由取决于哪些 rollout 先完成**,该臂无法由自己的冻结输入复现。故 `--decomp-concurrency > 1` 与 `--decomp-routing ledger` 组合**直接 SystemExit** |
+| 两个安全档的依据 | `single` = `task_level_choice` 的恒等函数;`round_robin` = `crc32(task_id) + attempt + subtask_index`,**无共享状态、无 RNG**。二者均为纯函数,测试中逐一验证(拒绝规则正建立在这一点上) |
+| 顺序确定性 | 累加与落盘从协程中**移出**,统一在 `gather` 之后按 task_id 排序执行 ⇒ 同一批测量在任何并发度下产出**顺序相同**的 artefact。`asyncio.gather` 按参数序返回而非完成序,故排序天然成立 |
+| 记录面 | `decomp_manifest.json` 的 `decomp_concurrency` 字段(该模式不建 lock,同 M-33) |
+| 预期收益 | 端点上限约 5 rollout/分钟 ⇒ A1 从 **3.9h → 约 41 分钟**。注意**不是 10 倍**:天花板是端点而非本地并发 |
+| 测试 | `tests/test_decomp_concurrency.py`(12 项),含 `test_ledger_routing_does_change_when_other_tasks_write`(证明拒绝有必要)与 `test_ledger_at_concurrency_one_is_not_rejected_for_that_reason` |
+| 裁决层 | 用户令「写」(Aug-02);全量 **994 绿** |

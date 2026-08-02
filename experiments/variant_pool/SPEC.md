@@ -883,3 +883,31 @@ s2k8b50 / b_smoke 的 active 池**未受影响**(仅候选)。
 最小值",不是让有负载变体数最大化的值。
 
 **测试**。`tests/test_cluster_source.py` 20 项。全量 **982 绿**。
+
+## 7.26 评估路径并发 `--decomp-concurrency`(Aug-02,用户令「写」;982→994)
+
+**问题**。`_run_decomp_eval` 全串行,而演化循环打满端点。评估臂只用约十分之一吞吐。
+
+**接口**。
+
+```
+--decomp-concurrency <int>    默认 1(与旗标前路径一致)
+```
+
+- 1 —— 逐任务运行并逐任务落盘,JSONL 流式写出与旧路径一致
+- \>1 —— 任务级并发;**同一任务的 attempt 仍串行**(管线在其间写信用)
+- \>1 且 `--decomp-routing ledger` —— **SystemExit**
+
+**为何拒绝 ledger**。`SubtaskRouter.route` 在该档读 `TypeCreditLedger.rate()`,
+账本正被并发任务写 ⇒ 路由取决于完成顺序,臂不可由自身冻结输入复现。
+`single`(恒等)与 `round_robin`(`crc32(task_id)+attempt+index`,无状态无 RNG)是纯函数,安全。
+
+**顺序确定性**。累加与落盘移出协程,`gather` 后按 task_id 排序统一执行;
+`asyncio.gather` 按参数序返回,故任何并发度下 artefact 顺序相同。
+
+**收益**。端点上限约 5 rollout/分钟 ⇒ A1 3.9h → 约 41 分钟。**不是 10 倍**,
+天花板是端点不是本地并发。
+
+**记录**。`decomp_manifest.json` 的 `decomp_concurrency`(该模式不建 lock)。
+
+**测试**。`tests/test_decomp_concurrency.py` 12 项。全量 **994 绿**。

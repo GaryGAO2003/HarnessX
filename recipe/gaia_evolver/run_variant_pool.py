@@ -6996,6 +6996,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--decomp-concurrency",
+        type=int,
+        default=1,
+        help=(
+            "Tasks evaluated in parallel under --decomp-eval. Default 1 is the "
+            "pre-flag serial path, which uses roughly a tenth of the endpoint the "
+            "evolution loop saturates at --concurrency 10. Attempts of one task "
+            "stay serial regardless. REFUSED above 1 under --decomp-routing "
+            "ledger: that mode reads the shared credit ledger other tasks are "
+            "writing, so overlapping tasks would make routing depend on "
+            "completion order. 'single' and 'round_robin' carry no shared "
+            "routing state and are safe."
+        ),
+    )
+    parser.add_argument(
         "--decomp-synth-guard",
         choices=("off", "strict"),
         default="off",
@@ -7211,6 +7226,23 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
     max_subtasks = int(getattr(args, "decomp_max_subtasks", 5))
     min_obs = int(getattr(args, "decomp_ledger_min_obs", 3))
 
+    decomp_concurrency = int(getattr(args, "decomp_concurrency", 1))
+    if decomp_concurrency < 1:
+        raise SystemExit(f"--decomp-concurrency must be >= 1, got {decomp_concurrency}")
+    if decomp_concurrency > 1 and routing == "ledger":
+        # SubtaskRouter.route reads TypeCreditLedger.rate() while other tasks
+        # write it, so with overlapping tasks the route depends on which
+        # rollouts happened to finish first -- the arm would not be reproducible
+        # even from its own frozen inputs. 'single' and 'round_robin' are pure
+        # functions of (task_id, attempt, subtask_index) and stay safe.
+        raise SystemExit(
+            "--decomp-concurrency > 1 is refused with --decomp-routing ledger: "
+            "ledger routing reads the credit ledger that concurrent tasks are "
+            "writing, so routing would depend on completion order. Use "
+            "--decomp-concurrency 1 for the ledger arm, or route with "
+            "single/round_robin."
+        )
+
     pipeline_eval = deps["pipeline_eval"]
     model_config = deps["model_config"]
 
@@ -7298,8 +7330,17 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
     totals = {"cost": 0.0, "attempts": 0, "fallbacks": 0}
 
     async def _amain() -> None:
-        with jsonl_path.open("w", encoding="utf-8") as handle:
-            for task in sorted(deps["tasks"], key=lambda t: t.task_id):
+        semaphore = asyncio.Semaphore(decomp_concurrency)
+
+        async def _run_task(task) -> tuple[Any, list]:
+            """All ``pass_k`` attempts for one task; attempts stay serial.
+
+            Attempts of the same task are sequential even under concurrency:
+            they are repeated measurements of one task and the pipeline writes
+            credit between them, so overlapping them would change what the
+            second attempt sees.
+            """
+            async with semaphore:
                 choice = task_level_choice(task.task_id)
                 executor = PipelineExecutor(
                     runner=_make_runner(task),
@@ -7311,26 +7352,56 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
                     verify_gate=verify_gate,
                     subtask_max_steps=subtask_max_steps,
                 )
-                n_pass = 0
+                results = []
                 for attempt in range(pass_k):
-                    result = await executor.run_attempt(
-                        task_id=task.task_id,
-                        task_text=task.question,
-                        ground_truth=task.final_answer or "",
-                        attempt=attempt,
-                        task_level_choice=choice,
-                        profile=profile_text,
+                    results.append(
+                        await executor.run_attempt(
+                            task_id=task.task_id,
+                            task_text=task.question,
+                            ground_truth=task.final_answer or "",
+                            attempt=attempt,
+                            task_level_choice=choice,
+                            profile=profile_text,
+                        )
                     )
-                    totals["attempts"] += 1
-                    totals["cost"] += result.cost_usd
-                    if result.passed:
-                        n_pass += 1
-                    if result.fallback:
-                        totals["fallbacks"] += 1
-                    elif task.task_id not in plans_out and result.plan is not None:
-                        plans_out[task.task_id] = result.plan.to_records()
-                    handle.write(json.dumps(result.to_json(), ensure_ascii=False) + "\n")
-                rows.append({"task_id": task.task_id, "round_idx": 0, "n_att": pass_k, "n_pass": n_pass})
+                return task, results
+
+        def _record(task, results: list, handle) -> None:
+            """Fold one task's attempts into the shared accumulators.
+
+            Kept out of the coroutine so every mutation of ``totals`` / ``rows``
+            / ``plans_out`` and every JSONL line happens in sorted task order,
+            whatever order the rollouts finished in. Otherwise a rerun at a
+            different concurrency would produce a differently-ordered artefact
+            for identical measurements.
+            """
+            n_pass = 0
+            for result in results:
+                totals["attempts"] += 1
+                totals["cost"] += result.cost_usd
+                if result.passed:
+                    n_pass += 1
+                if result.fallback:
+                    totals["fallbacks"] += 1
+                elif task.task_id not in plans_out and result.plan is not None:
+                    plans_out[task.task_id] = result.plan.to_records()
+                handle.write(json.dumps(result.to_json(), ensure_ascii=False) + "\n")
+            rows.append(
+                {"task_id": task.task_id, "round_idx": 0, "n_att": pass_k, "n_pass": n_pass}
+            )
+
+        ordered = sorted(deps["tasks"], key=lambda t: t.task_id)
+        with jsonl_path.open("w", encoding="utf-8") as handle:
+            if decomp_concurrency <= 1:
+                # Byte-identical to the pre-flag path: run and record one task at
+                # a time so the JSONL streams exactly as it did before.
+                for task in ordered:
+                    _record(*(await _run_task(task)), handle)
+            else:
+                # gather() yields in argument order, not completion order, so the
+                # recording pass below is already sorted by task_id.
+                for task, results in await asyncio.gather(*(_run_task(t) for t in ordered)):
+                    _record(task, results, handle)
 
     asyncio.run(_amain())
 
@@ -7357,6 +7428,7 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
         # would make a guarded and an unguarded arm indistinguishable after the
         # fact, and the guard changes what counts as a pass.
         "decomp_synth_guard": str(getattr(args, "decomp_synth_guard", "off")),
+        "decomp_concurrency": decomp_concurrency,
         "pass_k": pass_k,
         "num_tasks": len(rows),
         "max_steps": int(args.max_steps),
