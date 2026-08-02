@@ -1189,3 +1189,28 @@ V1←V0(R1)、V2←V0(R2)、V3←V2(R4)、V4←V3(R6)、V5←V3(R7)、V6←V4(R1
 
 **双跑仪器读数**:`s2k8b50` = PARTIAL(池 2,配置 1,提示词 1,空 0);
 `s1k8b103` = **RED**(池 8,配置 3,提示词 2,**空 890**)。
+
+### 🔬 修复被真实触发并验证:Evolver 的 `file://` 习惯稳定复现(Aug-02 04:0x)
+
+**发现**:`s2k8b50` 里 Evolver **又写出 `file:///` URI**,且是**畸形形式**(`file:///` 后跟反斜杠):
+
+```
+template_path: file:///D:\PycharmProj\HarnessX\...\C-R1-03\output_dir\templates\gaia_agent_commit_nudge.j2
+```
+
+⇒ M-27 的触发条件**不是 s1k8b103 的偶发,而是该 meta 模型的稳定行为**。
+本跑 17 个候选 config 触及 template,其中 3 个文件含 `file:///`
+(C-R1-02 的 config 与 harness_config、C-R1-03 的 output_dir/config)。
+
+**🔴 不可从「零 artefact 错误」推断修复有效**:R1 账目是「实评 1、跳过 3」,
+而带 `file://` 的 C-R1-02/C-R1-03 正在被跳过之列 ⇒ **它们从未被加载过**,
+fail-closed 与解析器在本跑中尚未被这些配置真正触发。判据不成立,须直接测。
+
+**直测结果(用运行现场的原始字符串)**:`_as_local_path` 三种形式全部正确解析且 `is_file()=True`
+——(a)畸形反斜杠 `file:///D:\...`(b)规范 `file:///D:/...`(c)裸 Windows 路径。
+⇒ 解析器处理得住 Evolver 实际产出的形式;**先前担心的「fail-closed 半夜炸跑」风险,
+对该失败模式而言显著低于我 02:10 的估计**(但对「真·文件缺失」仍成立,继续监控)。
+
+**测试缺口已补**:原回归测试用 `Path.as_uri()`,产出的是**规范**形式,
+**从未覆盖 Evolver 实际产出的畸形形式** —— 测试一直在过,却没测到真实输入。
+新增 `test_as_local_path_unwraps_the_malformed_uri_the_evolver_actually_writes`(10 绿)。

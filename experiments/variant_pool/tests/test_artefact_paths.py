@@ -69,6 +69,27 @@ def test_as_local_path_unwraps_a_file_uri(tmp_path: Path):
     assert _as_local_path(str(target)) == target
 
 
+def test_as_local_path_unwraps_the_malformed_uri_the_evolver_actually_writes(tmp_path: Path):
+    """``file:///`` followed by *backslashes* -- not a well-formed file URI.
+
+    ``Path.as_uri()`` produces the well-formed variant, so the test above was
+    passing while never exercising the shape that occurs in practice. Observed
+    live in s2k8b50 R1 (2026-08-02), from the same Evolver that caused M-27:
+
+        file:///D:\\PycharmProj\\HarnessX\\...\\gaia_agent_commit_nudge.j2
+
+    This matters because the validation is fail-closed: a form we cannot
+    resolve no longer degrades quietly, it raises and takes the run down.
+    """
+    target = tmp_path / "gaia_agent_commit_nudge.j2"
+    target.write_text("evolved", encoding="utf-8")
+
+    malformed = "file:///" + str(target).replace("/", "\\")
+
+    assert _as_local_path(malformed) == target
+    assert _as_local_path(malformed).is_file()
+
+
 def _proc(template_path: str) -> dict:
     return {
         "_target_": "harnessx.processors.context.system_prompt.SystemPromptProcessor",
