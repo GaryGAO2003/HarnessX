@@ -12,8 +12,10 @@ pinned here rather than left to integration:
 
 2. The Evolver wrote ``file:///D:/...`` URIs into ``template_path``. Nothing
    validated them, the URI never opened, and the processor-crash handler
-   swallowed the OSError -- so three of eight variants ran 642 rollouts with an
-   *empty* system prompt while the run reported a healthy accuracy curve.
+   swallowed the OSError -- so 634 active-pool rollouts (V5/V6/V7) ran on an
+   *empty* system prompt while the run reported a healthy accuracy curve, plus
+   a further 256 inside the candidate gate (V3/V4/V6), which means the
+   ship/reject decisions were taken on the same corrupted signal.
 """
 
 from __future__ import annotations
@@ -89,7 +91,7 @@ def test_file_uri_is_rewritten_to_a_path_the_harness_can_open(tmp_path: Path):
 
 
 def test_unresolvable_artefact_fails_closed(tmp_path: Path):
-    """The exact shape that produced 642 empty-prompt rollouts."""
+    """The exact shape that produced 890 empty-prompt rollouts (634 + 256)."""
     missing = "file:///D:/PycharmProj/HarnessX/runs/x/templates/gaia_agent_evolved.j2"
 
     with pytest.raises(FileNotFoundError) as excinfo:

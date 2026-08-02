@@ -102,10 +102,13 @@ R0 **7/10**、R15 **7/10**、曾解出 **9/10**(天花板)。
 | **出现空 prompt hash** | 🔴🔴 修复不完整 | **停一切臂**。这比任何实验结果都重要 —— 说明还有第二条投递路径没被 `_resolve_artefact_paths` 覆盖 |
 | **artefact 告警命中 / 跑挂** | fail-closed 真的炸了 | 读告警行拿到具体路径,判断是「Evolver 幻觉路径」还是「真缺文件」,再决定是补候选级兜底还是修 Evolver 提示 |
 
-**取数命令**(早上直接跑):
+**取数命令**(早上直接跑,只读,不碰运行产物):
 ```
-.venv312\Scripts\python.exe experiments\variant_pool\... （见 scratchpad/mainloop/prompthash.py）
+.venv312\Scripts\python.exe experiments\variant_pool\pool_differentiation.py s2k8b50
 ```
+它逐轮列出 active 池每个变体**实际被服务的** system prompt 哈希、distinct 个数、
+空提示词命中数,并在跑完后附 `pool_report.json` 的关键标量。
+认哈希:`e3b0c442…` = SHA256 空串 = 空提示词;两个变体同哈希 = 它俩其实是同一个变体。
 
 ### 🟠 已知威胁,必须在早上核一遍
 `s2k8b50` 的 **R0 是在与 `b_smoke` 争抢端点的窗口里测的**(02:10–03:08,两跑并行)。
