@@ -40,6 +40,57 @@ PAT = re.compile(r"^R(\d+)-(V\d+)-(.+?)-([0-9a-f]{8}-[0-9a-f-]{27})")
 _NOISE = re.compile(r"\s*(session_id|base_dir|export_jsonl|silent):")
 
 
+def _current_pool(run: str, round_dirs: list[str], cells: dict) -> tuple[int, int]:
+    """Report the pool as it stands *now*, one row per live variant.
+
+    A round only re-measures the variants whose config changed that round: a
+    variant forked in R1 is measured in R2, one patched in R2 is measured in
+    R3, and the rest carry their scores forward. So the last round's
+    ``active_pool`` dir holds a single variant, and reading differentiation off
+    that round alone reports one prompt for a pool that actually has several.
+    The current state is each variant's *latest* measurement, wherever it fell.
+    """
+    import hashlib
+
+    latest_prompt: dict[str, tuple[int, str]] = {}
+    for (rnd, vid, scope), counter in cells.items():
+        if scope != "active" or not counter:
+            continue
+        if vid not in latest_prompt or rnd > latest_prompt[vid][0]:
+            latest_prompt[vid] = (rnd, counter.most_common(1)[0][0])
+
+    latest_config: dict[str, tuple[int, str]] = {}
+    for rnd_dir in round_dirs:
+        rnd = int(rnd_dir[1:])
+        for path in glob.glob(os.path.join(run, rnd_dir, "active_pool", "*", "config.yaml")):
+            vid = os.path.basename(os.path.dirname(path))
+            if vid in latest_config and rnd <= latest_config[vid][0]:
+                continue
+            with open(path, encoding="utf-8") as handle:
+                body = "\n".join(l for l in handle.read().splitlines() if not _NOISE.match(l))
+            latest_config[vid] = (rnd, hashlib.sha256(body.encode()).hexdigest()[:12])
+
+    vids = sorted(set(latest_prompt) | set(latest_config),
+                  key=lambda v: int(v[1:]) if v[1:].isdigit() else 99)
+    if not vids:
+        return 0, 0
+
+    print("\nCURRENT POOL  (each variant at its own latest measurement)")
+    print(f"{'variant':<8} {'seen':>5}  {'prompt':<14} {'config':<14}")
+    for vid in vids:
+        p_rnd, p_hash = latest_prompt.get(vid, (None, "-"))
+        c_rnd, c_hash = latest_config.get(vid, (None, "-"))
+        seen = f"R{max(x for x in (p_rnd, c_rnd) if x is not None)}"
+        mark = "  <-- EMPTY" if p_hash == EMPTY_SHA else ""
+        print(f"{vid:<8} {seen:>5}  {p_hash[:12]:<14} {c_hash[:12]:<14}{mark}")
+
+    n_prompts = len({h for _, h in latest_prompt.values()})
+    n_configs = len({h for _, h in latest_config.values()})
+    print(f"  distinct prompts: {n_prompts}   distinct configs: {n_configs}"
+          f"   across {len(vids)} variants")
+    return n_prompts, n_configs
+
+
 def _lineage(run: str, round_dirs: list[str]) -> int | None:
     """Report ship/fork decisions from each round's ``pool_state.json``.
 
@@ -186,8 +237,11 @@ def main() -> int:
         print(f"\nlast MEASURED round       : R{measured_rnd} -- {len(hashes)} variants, "
               f"{measured_prompts} distinct prompts")
 
+    cur_prompts, cur_configs = _current_pool(run, round_dirs, cells)
     pool_size = _lineage(run, round_dirs)
-    n_configs = _config_axis(run, round_dirs)
+    _config_axis(run, round_dirs)
+    # differentiation is judged on the pool as it stands, not on one round
+    measured_prompts, n_configs = cur_prompts, cur_configs
 
     # The verdict deliberately keys off the lineage, not the measured round.
     # active_pool dirs lag a round behind the fork decision, so judging by them
@@ -197,14 +251,16 @@ def main() -> int:
         verdict = "RED: empty prompt present -- a delivery path is still unpatched"
     elif pool_size and pool_size >= 4 and (measured_prompts >= 2 or (n_configs or 0) >= 2):
         verdict = "PASS: pool has depth and the variants really differ -- usable for the arms"
+    elif pool_size and pool_size >= 2 and measured_prompts >= 2:
+        verdict = ("PARTIAL: differentiated on both axes but shallow -- resume to deepen")
     elif pool_size and pool_size >= 2:
-        verdict = ("PARTIAL: pool has forked but is shallow -- resume to deepen "
-                   "(differentiation may be config-level; read both axes above)")
+        verdict = ("PARTIAL: pool has forked, but every variant still serves the same "
+                   "prompt -- differentiation is config-level only so far")
     else:
         verdict = "THIN: no fork yet -- expected only in the first rounds"
     print(f"pool size (lineage)       : {pool_size}")
     print(f"distinct configs          : {n_configs}")
-    print(f"distinct prompts          : {measured_prompts}  (measured at R{measured_rnd})")
+    print(f"distinct prompts          : {measured_prompts}")
     print(f"VERDICT                   : {verdict}")
 
     report = os.path.join(run, "pool_report.json")
