@@ -1066,3 +1066,33 @@ decomp 子任务 id 为 `<parent>::<subtask>`,`:` 在 Windows 路径非法 ⇒ �
 **每个历史 assistant 轮次收到的推理链是一个空格**,官方措辞 "may silently degrade
 multi-turn response quality"。GAIA 是多轮任务(中位 9 步/失败 20 步)⇒ 作用在每一步上。
 **同属「静默降级」类,冒烟须量其代价。**
+
+### 🚀 s2k8b50 点火:分化池重跑(Aug-02 02:10,用户睡前授权无人值守)
+
+**授权**:用户 Aug-02 ~02:05「准备每种情况的下一步,然后继续跑该跑的实验,期间我不会对你下任何
+指令,到早上我需要看到的是完整的分化池……然后我们就可以再跑一遍正式实验,以及把分化池完整跑」。
+
+**为什么要重跑**:M-27 证明 `s1k8b103` 的选择历史脏(V5/V6/V7 全程空提示词被评估;唯一真分化的
+V1 被选择过程杀掉)⇒ 池必须在诚实信号下重长。
+
+**配置**:50 题冻结子床 `pool_bed50.json`(L1 19 / L2 25 / L3 6,seed 20260801,id 摘要
+`4eafb24cf3170035`,`build_pool_bed.py` 冻结)× K=8 × 16 轮。**除 `--data-path`/`--run-tag`
+外与 `s1k8b103` 逐字相同**(偏差仅 M-29 一条)。
+
+**主循环替用户做的判断(逐条可推翻,详 OVERNIGHT-AUG02.md §1)**:
+1. 缩床不缩轮(分化深度由轮数买;全床 1.76 h/轮 单夜放不下);
+2. **`--reasoning-effort` 不开** —— 用户的「开 max」是给分解冒烟下的;池保持 thinking OFF
+   以与 `s1k8b103` 同档可替换,且规避今夜暴露的 blank-`reasoning_content` 多轮降质;
+3. 不在凌晨改 M-27 的 fail-closed 错误路径(`run_variant_pool.py:4750` 未被 try 包住,理论上
+   Evolver 写出真不存在的路径会杀跑);改为 Monitor 盯 `does not resolve to a readable file`。
+   依据:`s1k8b103` 观察到的失败 100% 是「URI 可解析但没被解析」,模板文件均真实存在;
+4. watchdog 自动 resume **未挂**(注册计划任务被安全分类器拦);由主循环整夜监控,死则诊断后手动
+   `--resume`(优于自动重启对确定性崩溃反复撞墙)。
+
+**并行争抢与其裁决**:02:10–03:08 与 `b_smoke` 并行,端点限流 60 req/min,点火即出 429。
+02:27 实测重试深度 **attempt 1/5 = 58、2/5 = 14、3/5 及以上 = 0**,终态失败 0,`[ERROR]` 0
+⇒ 429 被重试完全吸收,**R0 基线未被污染,不杀跑**。残余代价为墙钟约 2 分钟。
+早上仍须核 `pool_report.json` 的 `infra_failure_rate` 兜底。
+
+**落点树与晨间待办**:见 `experiments/docs/OVERNIGHT-AUG02.md`(成功的可测定义 = 末结算轮
+active 变体的 distinct `last_sys_prompt_hash` 个数;硬否决 = 出现 SHA256 空串 `e3b0c442…b855`)。
