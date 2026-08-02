@@ -115,6 +115,34 @@
 
 ---
 
+#### 🔴 §2.2 勘误(Aug-02;冻结命令本体不改,以本块为准)
+
+本节骨架写于点火前,此后四处被实跑证伪。**点火时以本块为准,原文保留供对照。**
+
+**E1 路径不可解析(会直接失败)**。`--decomp-pool-from runs/s1k8b103` 与
+`--decomp-ledger-from runs/b_b1` 从 repo 根解析不到。正确写法:
+`recipe/gaia_evolver/runs/s1k8b103`、`recipe/gaia_evolver/runs/b_b1`。
+
+**E2 `--decomp-max-subtasks 5` 作废**。`b_smoke` 完跑实测每计划子任务数均值 **4.30**、
+最大 **9**,**4/20 计划超过 5** ⇒ 上限 5 会截断 20% 的计划。
+现默认值已改为 `DEFAULT_MAX_SUBTASKS = 20`(`subtask_pipeline.py`,提交 `a0f281b`;
+CLI 此前硬编码 5 导致该旗失效,已于 `a1e5006` 接线)。**共同固定项改为 20**。
+
+**E3 `--reasoning-effort high` 不再是上限**。端点实测接受
+`none/minimal/low/medium/high/xhigh/max`(CLI 已放开,提交 `0c13cd5`)。
+`b_smoke` 按用户令跑的是 **max**。⚠️ 但 **thinking ON 会触发 blank-`reasoning_content`
+多轮降质**(冒烟累计 >11,000 条警告:harness 重建历史时不回填上一轮 `reasoning_content`,
+LiteLLM 补一个空格占位)。**臂用哪一档须用户裁**,且四臂必须同档。
+
+**E4 池源本身待裁(最重要)**。本文件写「池一律 = `s1k8b103` 终池」,
+但 M-27 已证该池的 active 范围只有 **3 种**系统提示词(其中 634 次 rollout 是空提示词),
+且候选门另有 256 次空 ⇒ **其选择历史不可信**。
+`s2k8b50`(Aug-02 夜起跑)正是为替换它而生。
+**发臂前须用户裁:用 s1k8b103 修复后加载的池(5 种提示词),还是用 s2k8b50 的新池。**
+在裁定前,§2.2 全部 `--decomp-pool-from` 指向何处**未定**。
+
+---
+
 ## 3. 预注册读数(开跑前写死,不加不减)
 
 ### 3.1 主读数
