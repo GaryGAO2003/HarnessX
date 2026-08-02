@@ -1168,3 +1168,24 @@ B-1 的因果解释仍然作废(结论不变),但新表述更准、更站得住,
 
 **顺带验证**:`s2k8b50` 的 V0 归一化 config 哈希 `652d8bcdc617` 与 `s1k8b103` 的 V0
 **逐位相同** ⇒ 坐实 M-29 的「除 `--data-path`/`--run-tag` 外逐字同配」。
+
+### 🌱 s2k8b50 R1 首次 fork + 仪器补第三轴(Aug-02 03:5x)
+
+**R1 ship 成功**:`shipped=true`、`forked=["V1"]`、`decisions={"V0":"fork"}`、
+`variant_count=2`、`reconcile_status={"V0":"fork_parent_unchanged","V1":"fork_child_active"}`。
+`candidate_accounting` = 请求 4 / 实产 4 / Critic 拒 1 / 排队进门 3 / **实评 1** / 门拒 0 /
+**跳过 3** / 选中 1 ⇒ **引擎只评最高排名候选,过了就跳过其余**,
+故 ship 率须按 **1/1** 读,不是 1/4。
+
+**🔴 仪器缺陷(我踩的坑)**:`pool_differentiation.py` 原先只读 `R<n>/active_pool/`,
+而那是 fork **之前**的测量 —— fork 决策记在同轮 `pool_state.json`,子变体要到**下一轮**才被测量。
+结果仪器对一个**已经 fork 的池**报 "THIN: no differentiation yet"。
+**已补轴 C(谱系)**,VERDICT 改以 `variant_count` 为准,并在代码注释里写明这个滞后。
+
+**轴 C 的阳性对照(最强的一次)**:仪器把 s1k8b103 的 fork 谱系逐条重建 ——
+V1←V0(R1)、V2←V0(R2)、V3←V2(R4)、V4←V3(R6)、V5←V3(R7)、V6←V4(R11)、V7←V6(R13)
+—— 与 Jul-31 独立记录的谱系**逐条一致**。同时给出现实基准:
+**16 轮 7 次 fork ≈ 0.47/轮**,空轮很多(R3/R5/R8/R9/R12/R14 无候选,R10/R15 门拒)。
+
+**双跑仪器读数**:`s2k8b50` = PARTIAL(池 2,配置 1,提示词 1,空 0);
+`s1k8b103` = **RED**(池 8,配置 3,提示词 2,**空 890**)。

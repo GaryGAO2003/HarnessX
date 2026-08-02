@@ -141,8 +141,19 @@ processor 改动 ship 之后 `last_sys_prompt_hash` **根本不会变** ——
 - **轴 A|配置分化**:末结算轮 active 池的 **distinct 归一化 config 哈希个数**
   (归一化 = 剔除 `session_id`/`base_dir`/`export_jsonl`/`silent` 这些逐跑噪声行)
 - **轴 B|提示词投递**:distinct `last_sys_prompt_hash` 个数
+- **轴 C|谱系**:各轮 `pool_state.json` 的 `variant_count` / `decisions` / `forked`
 - **硬否决**:出现 `e3b0c442…b855`(= SHA256 空串)即为**修复没修干净**
-- 辅助:fork 谱系深度、`variant_count_curve`
+
+⚠️ **轴 C 不可省,否则会低报一轮**:`R<n>/active_pool/` 是 fork **之前**的测量,
+fork 决策记在同轮 `pool_state.json` 里,子变体要到**下一轮**才被测量。
+只看 active_pool 目录会把「已经 fork 了」读成「还没分化」——
+我 03:5x 就踩了这个坑(仪器报 THIN,实际 R1 已 fork 出 V1)。仪器的 VERDICT 现以轴 C 为准。
+
+**现实基准(阳性对照给的)**:s1k8b103 是 **16 轮 7 次 fork ≈ 0.47/轮**,
+中间大量空轮(R3/R5/R8/R9/R12/R14 无候选,R10/R15 被门拒)。
+且引擎**只评最高排名的候选**,过了就跳过其余(R1:4 候选 → Critic 拒 1 → 排队 3 → 实评 1 → 选中 1),
+所以 ship 率要按 **1/1** 读,不是 1/4。
+⇒ 5 轮预计 **2–3 次 fork,池 3–4 个变体**。
 
 **🔴 这两轴一起读,才改正了我先前对撤稿的表述。** s1k8b103 末轮 R15 实测:
 active 池 3 个变体(V0/V6/V7),**配置轴 3 个全不同**,但**提示词轴 V6/V7 都是空**。

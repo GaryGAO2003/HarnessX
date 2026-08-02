@@ -40,7 +40,40 @@ PAT = re.compile(r"^R(\d+)-(V\d+)-(.+?)-([0-9a-f]{8}-[0-9a-f-]{27})")
 _NOISE = re.compile(r"\s*(session_id|base_dir|export_jsonl|silent):")
 
 
-def _config_axis(run: str, round_dirs: list[str]) -> None:
+def _lineage(run: str, round_dirs: list[str]) -> int | None:
+    """Report ship/fork decisions from each round's ``pool_state.json``.
+
+    This has to be read separately because the ``R<n>/active_pool`` dirs lag by
+    a round: a fork decided in R1 is recorded in R1's pool_state, but the child
+    variant is not *measured* until R2. Judging pool size from the active_pool
+    directories alone therefore under-reports it by one round -- which is the
+    difference between "no differentiation yet" and "already forked".
+    """
+    print("\nLINEAGE, from each round's pool_state.json")
+    print(f"{'round':>5}  {'variants':>8}  {'decision':<22} {'forked':<10} evaluated/ranked")
+    latest_count = None
+    for rnd in round_dirs:
+        path = os.path.join(run, rnd, "pool_state.json")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                state = json.load(handle)
+        except Exception:  # noqa: BLE001 - a round still settling is not fatal
+            continue
+        acct = state.get("candidate_accounting") or {}
+        decisions = state.get("decisions") or {}
+        latest_count = state.get("variant_count", latest_count)
+        print(f"{state.get('round'):>5}  {state.get('variant_count'):>8}  "
+              f"{json.dumps(decisions, ensure_ascii=False):<22} "
+              f"{str(state.get('forked') or []):<10} "
+              f"{acct.get('evaluated', '-')}/{acct.get('ranked_for_gate', '-')}"
+              f"  (gate_rejected={acct.get('gate_rejected', '-')},"
+              f" skipped={acct.get('skipped', '-')})")
+    return latest_count
+
+
+def _config_axis(run: str, round_dirs: list[str]) -> int | None:
     """Report differentiation at the *configuration* level.
 
     Prompt hash alone is not enough. AEGIS evolves processors and tools as well
@@ -59,7 +92,7 @@ def _config_axis(run: str, round_dirs: list[str]) -> None:
             break
     if latest is None:
         print("\nno active-pool config dumps yet")
-        return
+        return None
 
     groups: dict[str, list[str]] = collections.defaultdict(list)
     for path in sorted(glob.glob(os.path.join(run, latest, "active_pool", "*", "config.yaml"))):
@@ -73,6 +106,7 @@ def _config_axis(run: str, round_dirs: list[str]) -> None:
         dup = "   <-- SAME AGENT" if len(vids) > 1 else ""
         print(f"  {digest}  {', '.join(vids)}{dup}")
     print(f"  distinct configs: {len(groups)} across {sum(len(v) for v in groups.values())} variants")
+    return len(groups)
 
 
 def main() -> int:
@@ -145,22 +179,33 @@ def main() -> int:
     print(f"EMPTY-prompt rollouts     : {empty_hits}"
           f"   {'<-- FIX INCOMPLETE, STOP EVERYTHING' if empty_hits else '(none -- fix holding)'}")
 
+    measured_rnd, measured_prompts = (None, 0)
     if latest:
-        rnd, hashes = latest
-        distinct = len(set(hashes.values()))
-        print(f"\nlatest active round       : R{rnd} -- {len(hashes)} variants, "
-              f"{distinct} distinct prompts")
-        if empty_hits:
-            verdict = "RED: empty prompt present -- a delivery path is still unpatched"
-        elif distinct >= 4 and rnd >= 6:
-            verdict = "PASS: differentiated at depth -- usable for the arms"
-        elif distinct >= 2:
-            verdict = "PARTIAL: differentiation real but shallow -- resume to deepen"
-        else:
-            verdict = "THIN: no differentiation yet -- expected only in the first rounds"
-        print(f"verdict                   : {verdict}")
+        measured_rnd, hashes = latest[0], latest[1]
+        measured_prompts = len(set(hashes.values()))
+        print(f"\nlast MEASURED round       : R{measured_rnd} -- {len(hashes)} variants, "
+              f"{measured_prompts} distinct prompts")
 
-    _config_axis(run, round_dirs)
+    pool_size = _lineage(run, round_dirs)
+    n_configs = _config_axis(run, round_dirs)
+
+    # The verdict deliberately keys off the lineage, not the measured round.
+    # active_pool dirs lag a round behind the fork decision, so judging by them
+    # alone reports "no differentiation yet" on a pool that has already forked.
+    print("\n" + "-" * 70)
+    if empty_hits:
+        verdict = "RED: empty prompt present -- a delivery path is still unpatched"
+    elif pool_size and pool_size >= 4 and (measured_prompts >= 2 or (n_configs or 0) >= 2):
+        verdict = "PASS: pool has depth and the variants really differ -- usable for the arms"
+    elif pool_size and pool_size >= 2:
+        verdict = ("PARTIAL: pool has forked but is shallow -- resume to deepen "
+                   "(differentiation may be config-level; read both axes above)")
+    else:
+        verdict = "THIN: no fork yet -- expected only in the first rounds"
+    print(f"pool size (lineage)       : {pool_size}")
+    print(f"distinct configs          : {n_configs}")
+    print(f"distinct prompts          : {measured_prompts}  (measured at R{measured_rnd})")
+    print(f"VERDICT                   : {verdict}")
 
     report = os.path.join(run, "pool_report.json")
     if os.path.exists(report):
