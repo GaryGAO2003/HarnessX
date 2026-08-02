@@ -854,3 +854,32 @@ s2k8b50 / b_smoke 的 active 池**未受影响**(仅候选)。
 下降的部分本就不是管线挣来的。跨臂比较时 guard 档位必须一致。
 
 **测试**。`tests/test_synth_guard.py` 15 项。全量 **962 绿**。
+
+## 7.25 `cluster(task)` 可选 + ε 接线(Aug-02,用户令「可以写掉」;962→982)
+
+**发现**。§4.5 用 `cluster(task)` 但从不定义它。路由是**每簇 argmax**,故
+**有效池 = min(K, 簇数)**。`gaia_level` 只有 3 簇 ⇒ K=8 的池子最多 3 个变体有负载,
+与闸门无关。s1k8b103 实测:负载基尼 0.22 → 0.78,终局 `[52,39,12,0,0,0,0,0]`。
+
+**第二条通道**。未测量的 `(变体,簇)` 取先验 0.5,永远输给已测量的 ⇒ 早期落败即永久冻结。
+`Router.explore` 本就为此写(docstring 原话),但 `epsilon` 从未接到 CLI。
+
+**接口**。
+
+```
+--cluster-source {gaia_level, capability}   默认 gaia_level(字节等同)
+--cluster-map    <path>                     capability 必需,fail-closed
+--cluster-min-size <int>                    默认 8,小簇按 Jaccard 并入最相似大簇
+--epsilon        <float>                    默认 0.0
+```
+
+**标签**。子任务类型的**集合**,仅由题面算出、解题前冻结。**主导类型不可用**
+(GAIA 几乎全是 search 主导,只分得出 1 组)。实测 11 簇 → 合并后 5 簇(38/25/16/14/10)。
+
+**lock**。`cluster_source` 原硬编码两处,现均读旗标;provenance 另记
+**分组表 sha256 + 阈值 + 实得簇数** —— 表在仓外,无 sha 则簇数不可核验。
+
+**并报要求**。ε 的准确率代价正比于 ε,而离线重放看不到这一侧;ε 取"够买到测量的
+最小值",不是让有负载变体数最大化的值。
+
+**测试**。`tests/test_cluster_source.py` 20 项。全量 **982 绿**。

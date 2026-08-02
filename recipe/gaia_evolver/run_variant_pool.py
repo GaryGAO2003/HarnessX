@@ -66,6 +66,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import math
@@ -3784,6 +3785,117 @@ class _LLMCritic:
         )
 
 
+CLUSTER_SOURCES: tuple[str, ...] = ("gaia_level", "capability")
+DEFAULT_CLUSTER_SOURCE = "gaia_level"
+DEFAULT_CLUSTER_MIN_SIZE = 8
+
+
+def _merge_small_clusters(
+    assignment: dict[str, str], min_size: int
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Fold clusters below ``min_size`` into their most similar large cluster.
+
+    Routing is argmax *per cluster* and the seesaw tests a candidate only on the
+    tasks routed to its variant (SS4.5 p.11), so a cluster of two tasks gives the
+    gate almost no power -- the measured noise floor is already SD 4.57pp at
+    n=103. Similarity is Jaccard over the ``+``-separated capability sets, so a
+    small cluster joins the large one it most resembles rather than a catch-all
+    bucket: ``browse+search+verify`` lands in ``browse+compute+search+verify``,
+    not in a shapeless "misc".
+
+    Ties break on the larger target, then on the lexicographically smaller id, so
+    the merge is deterministic and reproducible from the frozen map alone.
+    """
+    sizes: dict[str, int] = {}
+    for cluster_id in assignment.values():
+        sizes[cluster_id] = sizes.get(cluster_id, 0) + 1
+    big = sorted(cid for cid, n in sizes.items() if n >= min_size)
+    small = sorted(cid for cid, n in sizes.items() if n < min_size)
+    if not big:
+        # Everything is small: merging would collapse the partition to nothing.
+        # Better to route on the raw partition and report it than to invent one.
+        return dict(assignment), {}
+
+    def jaccard(a: str, b: str) -> float:
+        sa, sb = set(a.split("+")), set(b.split("+"))
+        return len(sa & sb) / len(sa | sb) if (sa | sb) else 0.0
+
+    merged_into = {
+        cid: max(big, key=lambda t: (jaccard(cid, t), sizes[t], [-ord(c) for c in t]))
+        for cid in small
+    }
+    return (
+        {task: merged_into.get(cid, cid) for task, cid in assignment.items()},
+        merged_into,
+    )
+
+
+def _resolve_task_clusters(args: Any, level_map: Mapping[str, int]) -> tuple[dict[str, str], dict]:
+    """Build the task -> cluster assignment and the provenance to record with it.
+
+    SS4.5 routes each task to ``argmax_v S_hat(v, cluster(task))`` but never
+    defines ``cluster``; ``router.cluster_of`` says as much in its own
+    NotImplementedError. The choice is therefore ours and it is structural, not
+    cosmetic: routing is argmax per cluster, so **at most ``min(K, n_clusters)``
+    variants can ever carry tasks**. Under ``gaia_level`` there are three
+    clusters, which caps an eight-variant pool at three loaded variants
+    regardless of the gate.
+
+    ``gaia_level`` (default) reproduces the previous hardcoded behaviour
+    byte-for-byte. ``capability`` reads a frozen map keyed by the SET of D1-lite
+    subtask types a task needs, computed from the task text alone before any
+    attempt, so it cannot encode an outcome.
+    """
+    source = str(getattr(args, "cluster_source", DEFAULT_CLUSTER_SOURCE))
+    if source not in CLUSTER_SOURCES:
+        raise SystemExit(f"--cluster-source must be one of {CLUSTER_SOURCES}, got {source!r}")
+
+    if source == "gaia_level":
+        return (
+            {task_id: f"gaia_level_{level}" for task_id, level in level_map.items()},
+            {"cluster_source": "gaia_level", "cluster_map_path": None, "cluster_map_sha256": None},
+        )
+
+    raw_path = getattr(args, "cluster_map", None)
+    if not raw_path:
+        raise SystemExit("--cluster-source capability requires --cluster-map <path>")
+    path = Path(raw_path)
+    if not path.is_file():
+        raise SystemExit(f"--cluster-map not found: {path}")
+    blob = path.read_bytes()
+    payload = json.loads(blob.decode("utf-8"))
+    table = payload.get("clusters") if isinstance(payload, dict) else None
+    if not isinstance(table, dict) or not table:
+        raise SystemExit(f"--cluster-map {path}: no non-empty 'clusters' object")
+
+    # Fail closed on partial coverage. Silently letting an unmapped task fall
+    # through to cold-start would mean the run routes on a partition the frozen
+    # map does not describe, and nothing downstream could tell.
+    missing = sorted(set(level_map) - set(table))
+    if missing:
+        raise SystemExit(
+            f"--cluster-map {path} is missing {len(missing)} of {len(level_map)} bed tasks "
+            f"(e.g. {missing[:3]}); rebuild it against this bed"
+        )
+
+    assignment = {task_id: str(table[task_id]) for task_id in level_map}
+    min_size = int(getattr(args, "cluster_min_size", DEFAULT_CLUSTER_MIN_SIZE))
+    merged, merged_into = _merge_small_clusters(assignment, min_size) if min_size > 1 else (assignment, {})
+    sizes: dict[str, int] = {}
+    for cluster_id in merged.values():
+        sizes[cluster_id] = sizes.get(cluster_id, 0) + 1
+    return merged, {
+        "cluster_source": "capability",
+        "cluster_map_path": str(path),
+        "cluster_map_sha256": hashlib.sha256(blob).hexdigest(),
+        "cluster_min_size": min_size,
+        "cluster_count_raw": len(set(assignment.values())),
+        "cluster_count": len(sizes),
+        "cluster_sizes": dict(sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "cluster_merged_into": merged_into,
+    }
+
+
 # ---------------------------------------------------------------------------
 # The recipe
 # ---------------------------------------------------------------------------
@@ -4006,10 +4118,10 @@ class VariantPoolRecipe:
         all_ids = {t.task_id for t in self.tasks if t.task_id}
         self._all_task_ids = frozenset(all_ids)
         self.level_map: dict[str, int] = {t.task_id: int(t.level) for t in self.tasks if t.task_id}
-        task_clusters = {
-            task_id: f"gaia_level_{level}"
-            for task_id, level in self.level_map.items()
-        }
+        # SS4.5 never defines cluster(). The choice caps the pool: routing is
+        # argmax per cluster, so at most min(K, n_clusters) variants can ever
+        # carry tasks. Default reproduces the previous hardcoded gaia_level.
+        task_clusters, self.cluster_provenance = _resolve_task_clusters(args, self.level_map)
         retirement_metric = str(getattr(args, "retirement_metric", "task_macro"))
 
         self.pool = VariantPool(K=int(args.pool_k))
@@ -4026,6 +4138,11 @@ class VariantPoolRecipe:
             task_to_cluster=task_clusters,
             seed=int(getattr(args, "seed", 0)),
             window=getattr(args, "routing_window", None),
+            # Router has always accepted epsilon; nothing ever passed it, so
+            # explore() was dead code at 0.0. Its own docstring states the
+            # purpose: "stop a variant that lost early from being frozen out by
+            # argmax forever". Default 0.0 keeps every prior run reproducible.
+            epsilon=float(getattr(args, "epsilon", 0.0)),
         )
         self.evidence = EvidenceStore(self.run_dir)
         self.report = RunReport(run_name=str(getattr(args, "run_tag", "") or ""), k=int(args.pass_k))
@@ -5851,7 +5968,13 @@ class VariantPoolRecipe:
                     else None
                 ),
                 "cluster_mode": str(getattr(self.args, "cluster_mode", "routed")),
-                "cluster_source": "gaia_level",
+                # Was hardcoded "gaia_level" while the flag existed nowhere; now
+                # that cluster(task) is selectable, a literal here would let the
+                # record claim a partition the run did not use. The provenance
+                # dict also carries the map digest and the resulting sizes,
+                # without which "n_clusters" is unverifiable after the fact.
+                **self.cluster_provenance,
+                "epsilon": float(getattr(self.args, "epsilon", 0.0)),
                 "routing_mode": str(getattr(self.args, "routing_mode", "cluster")),
                 "routing_window": getattr(self.args, "routing_window", None),
                 "retirement_metric": str(
@@ -6025,6 +6148,47 @@ def _regression_accountability_provenance(mode: str) -> "str | None":
     )
 
 
+def _cluster_source_provenance(args: Any) -> "str | None":
+    """Byte-safe lock record for ``--cluster-source`` / ``--cluster-min-size``.
+
+    ``Hyperparams.cluster_source`` carries the mode, but the frozen dataclass has
+    nowhere for the map digest -- and without it "capability, 5 clusters" is an
+    unverifiable claim, since the partition lives in a file outside the repo.
+    Returns ``None`` for the default so a ``gaia_level`` lock stays byte-identical.
+    """
+    source = str(getattr(args, "cluster_source", DEFAULT_CLUSTER_SOURCE))
+    if source == DEFAULT_CLUSTER_SOURCE:
+        return None
+    raw_path = getattr(args, "cluster_map", None)
+    digest = "unresolved"
+    if raw_path and Path(raw_path).is_file():
+        digest = hashlib.sha256(Path(raw_path).read_bytes()).hexdigest()
+    return (
+        f"cluster_source={source} ENABLED: cluster(task) is the SET of D1-lite "
+        f"subtask types the task needs, from map {raw_path!r} sha256={digest}, "
+        f"merged below --cluster-min-size="
+        f"{int(getattr(args, 'cluster_min_size', DEFAULT_CLUSTER_MIN_SIZE))}. The paper "
+        "does not define cluster(); routing is argmax per cluster, so this changes "
+        "min(K, n_clusters) -- the ceiling on how many variants can carry tasks at "
+        "all. Not comparable byte-for-byte with a 'gaia_level' run"
+    )
+
+
+def _epsilon_provenance(epsilon: float) -> "str | None":
+    """Byte-safe lock record for ``--epsilon``; ``None`` at the 0.0 default."""
+    if epsilon <= 0.0:
+        return None
+    return (
+        f"epsilon={epsilon} ENABLED (SPEC SS6.6): each task has this probability of "
+        "being routed to a uniformly random variant instead of the cluster argmax. "
+        "This buys measurements on (variant, cluster) cells that argmax would never "
+        "sample -- an unmeasured cell sits at the Laplace prior and cannot win -- at "
+        "an accuracy cost proportional to epsilon. Routing is no longer a "
+        "deterministic function of the ledger, so per-round load is not comparable "
+        "with an epsilon=0 run"
+    )
+
+
 def _regression_baseline_provenance(mode: str) -> "str | None":
     """Byte-safe lock record for ``--regression-baseline`` (M-23).
 
@@ -6176,6 +6340,8 @@ def _build_experiment_lock(
         _regression_baseline_provenance(
             str(getattr(args, "regression_baseline", DEFAULT_REGRESSION_BASELINE))
         ),
+        _cluster_source_provenance(args),
+        _epsilon_provenance(float(getattr(args, "epsilon", 0.0))),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -6210,7 +6376,10 @@ def _build_experiment_lock(
                 else "legacy ablation evolves all active routed variants"
             ),
             cluster_mode=str(getattr(args, "cluster_mode", "routed")),
-            cluster_source="gaia_level",
+            # Hyperparams is a frozen dataclass with a cluster_source field, so
+            # this one records directly rather than via a provenance warning.
+            cluster_source=str(getattr(args, "cluster_source", DEFAULT_CLUSTER_SOURCE)),
+            epsilon=float(getattr(args, "epsilon", 0.0)),
             routing_mode=str(getattr(args, "routing_mode", "cluster")),
             window=getattr(args, "routing_window", None),
             routing_window=getattr(args, "routing_window", None),
@@ -6427,6 +6596,55 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Experiment-plan lineage seeds, comma-separated; not this run's --seed.",
     )
     parser.add_argument("--estimator", choices=("laplace", "raw"), default="laplace")
+    parser.add_argument(
+        "--cluster-source",
+        choices=CLUSTER_SOURCES,
+        default=DEFAULT_CLUSTER_SOURCE,
+        help=(
+            "What cluster(task) means -- the function SS4.5 uses but never defines. "
+            "Routing is argmax per cluster, so at most min(K, n_clusters) variants "
+            "can ever carry tasks: 'gaia_level' (default, byte-identical to the "
+            "pre-flag hardcoding) gives 3 clusters and therefore caps a K=8 pool at "
+            "3 loaded variants. 'capability' keys on the SET of D1-lite subtask "
+            "types a task needs, read from --cluster-map."
+        ),
+    )
+    parser.add_argument(
+        "--cluster-map",
+        default=None,
+        help=(
+            "Frozen task->capability-profile map (experiments/build_task_clusters.py). "
+            "Required by --cluster-source capability; fail-closed if any bed task is "
+            "absent. Labels come from the task text alone, before any attempt, so "
+            "routing on them encodes no outcome."
+        ),
+    )
+    parser.add_argument(
+        "--cluster-min-size",
+        type=int,
+        default=DEFAULT_CLUSTER_MIN_SIZE,
+        help=(
+            "Capability clusters smaller than this fold into their most similar "
+            f"large cluster (Jaccard over the type sets). Default {DEFAULT_CLUSTER_MIN_SIZE}: "
+            "the seesaw tests a candidate only on tasks routed to its variant, and a "
+            "two-task cluster gives that test no power. 1 disables merging. "
+            "Ignored under --cluster-source gaia_level."
+        ),
+    )
+    parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=0.0,
+        help=(
+            "Epsilon-greedy routing escape hatch (Router.explore, SPEC SS6.6). Default "
+            "0.0 reproduces every run to date. Above 0, each task has this "
+            "probability of going to a uniformly random variant instead of the "
+            "cluster argmax. Purpose is measurement, not fairness: an unmeasured "
+            "(variant, cluster) cell sits at the Laplace prior 0.5 and can never "
+            "beat a measured one, so a variant that loses early is frozen out for "
+            "good. Exploration costs accuracy in proportion to epsilon."
+        ),
+    )
     parser.add_argument("--cluster-mode", choices=("routed",), default="routed")
     parser.add_argument(
         "--routing-mode",

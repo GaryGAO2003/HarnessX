@@ -243,3 +243,28 @@
 | 读数影响 | 开启后,原本"蒙对"的尝试将转为失败,**分解侧的绝对分数会下降**。这是修正而非退步:下降部分本就不是管线挣来的 |
 | 测试 | 专项 `tests/test_synth_guard.py`(15 项),含 `test_default_is_byte_identical_to_the_stock_prompt`(最要紧的一条)、`test_guard_fails_closed_if_the_template_stops_carrying_its_anchor`、以及锁住"even when it turns out to be correct"措辞的一条 |
 | 裁决层 | 用户令「加入并且记录」(Aug-02);全量 **962 绿** |
+
+## M-34 簇数是池规模的硬上限,且 ε 从未接线(`--cluster-source` / `--epsilon`,Aug-02 新增)
+
+> **⚠️ 本条不是"发现论文未定义 cluster"——那是 M-02 早已登记的**,
+> M-02 亦已把「对 level / failure-mode / domain 分别运行」列为待补消融。
+> **本条的增量只有三点**:①`cluster` 的选择在**结构上**限死池规模
+> (每簇 argmax ⇒ 有效池 = min(K, 簇数)),这一后果 M-02 未指出;
+> ②在 s1k8b103 上把它**量出来了**;③第二条独立通道(测量锁定 / ε 从未接线)。
+> 引用时不得把 ① 之前的部分说成新发现。
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | §4.5 p.11 逐字:*"routing each task to the variant with the highest estimated success rate on that task's **cluster**"* —— 无聚类函数定义(**已由 M-02 登记**)。`router.cluster_of` 的 `NotImplementedError` 亦写明「the paper publishes no clustering algorithm」 |
+| 相对 M-02 的增量 | M-02 把 level 记为「可审计代理」并要求做消融,**但未指出代理的选择会限死池的可用规模**。3 簇 ⇒ K=8 中 5 个变体在算术上注定闲置,与闸门、演化策略均无关 |
+| 🔴 结构性后果 | 每簇 argmax ⇒ 最多 `min(K, 簇数)` 个变体能拿到任务。我方重建取 `gaia_level` ⇒ **3 簇** ⇒ **K=8 的池子里 5 个变体在算术上注定闲置** |
+| 实测(s1k8b103) | 逐轮按 GAIA level 交叉制表:R8 = `V0:{L1:39} V3:{L2:52} V5:{L3:12}`,R15 = `V0:{L1:39} V7:{L2:52} V6:{L3:12}`。**划分严格等于 level**。负载基尼 R4 **0.22** → R14 **0.78**;终局 `[52,39,12,0,0,0,0,0]` |
+| 第二条通道:测量锁定 | 未测量的 `(变体, 簇)` 单元取拉普拉斯先验 0.5,**永远输给已测量的**。变体要被测须先赢,要赢须先被测 ⇒ 早期落败即永久冻结。`Router.explore` 的 docstring 原话:*"stop a variant that lost early from being frozen out by argmax forever"* —— **该开关早已实现,`epsilon` 从未接到 CLI,两次正式跑均为 0.0** |
+| 离线重放(真实录得数据) | 在 s1k8b103 的逐轮 `active_pool_measurements` 上重放路由。**两个修法单独无效或有害,只有合用才成立**:难度3簇+无探索 基尼 0.72 / 3 个有负载;**能力11簇+无探索 0.82 / 2 个(更差)**;难度3簇+ε=0.1 0.66 / 6.9 个;能力11簇+ε=0.1 0.76 / 6.8 个;能力+ε=0.2+偏置 **0.44 / 7.8 个** |
+| 我方做法 | `--cluster-source {gaia_level, capability}` 默认 gaia_level(**与旗标前硬编码逐字节等同**);`--cluster-map` 冻结表;`--cluster-min-size` 默认 8(小簇按类型集合 Jaccard 并入最相似大簇,不设"杂项"桶);`--epsilon` 默认 0.0 接到既有 `Router.explore` |
+| 标签来源与防泄漏 | 标签 = 该任务 D1-lite 子任务类型的**集合**,由分解器**仅从题面**算出、解题前冻结成文件并记 sha256。**主导类型不可用**——GAIA 几乎每题都以 search 主导,10 题探针下主导类型只分出 **1 组** |
+| 实测分组 | 103/103 标注成功,原始 **11 簇**(30/16/16/13/10/7/5/3/1/1/1);min-size=8 合并 6 个小簇后 **5 簇**(38/25/16/14/10,最小 10 题) |
+| lock 诚实性(**本条的关键**) | `cluster_source` 原**硬编码**于两处(`comparison.json` 与 `Hyperparams`)。若只加旗标而不修,lock 会声称按难度分簇而运行时按能力分簇 —— **正是 M-27/M-31/M-32 的同一形状**。现两处均读旗标,并以 provenance 记录**分组表 sha256 + 合并阈值 + 实得簇数**(冻结表在仓外,无 sha 则"5 簇"不可核验) |
+| 代价须并报 | ε 靠随机路由买测量,**准确率代价正比于 ε**,而离线重放**看不到这一侧**。ε 应取"够买到测量的最小值",不是让有负载变体数最大化的值 |
+| 测试 | `tests/test_cluster_source.py`(20 项),含 `test_default_reproduces_the_previous_hardcoded_partition`、`test_default_partition_has_exactly_three_clusters_which_is_the_ceiling`(把发现钉死)、`test_partial_coverage_fails_closed_rather_than_cold_starting` |
+| 裁决层 | 用户令「可以写掉」(Aug-02);全量 **982 绿** |
