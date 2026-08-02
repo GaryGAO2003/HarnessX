@@ -90,6 +90,31 @@ SYNTHESIS_PROMPT_TEMPLATE = (
     "Using only the information above, give the final answer. End with a line "
     "of exactly the form:\nFINAL ANSWER: <answer>"
 )
+#: Substring of :data:`SYNTHESIS_PROMPT_TEMPLATE` the guard clause is inserted
+#: *before*, so the guard is read ahead of the final-answer contract rather than
+#: after it. Asserted at call time: if the template is reworded and this marker
+#: disappears, the guard fails closed instead of silently no-opping.
+_SYNTH_FINAL_INSTRUCTION = "Using only the information above,"
+
+SYNTH_GUARD_MODES: tuple[str, ...] = ("off", "strict")
+
+#: ``--decomp-synth-guard strict``. The stock template already says "Using only
+#: the information above", which is demonstrably too weak: on ``b_smoke`` task
+#: ``20194330`` the browse subtask returned nothing and the synthesiser filled
+#: the gap from parametric memory ("Based on the known content from the Game
+#: Grumps episode ..."). This inflates the DECOMPOSED arm specifically -- a
+#: recalled answer that happens to be right scores as a pipeline success -- so
+#: it biases the comparison towards this thesis's own hypothesis.
+SYNTHESIS_GUARD_CLAUSE = (
+    "A subtask result that does not contain what its instruction asked for is "
+    "MISSING information, not an invitation to supply it yourself. If any "
+    "subtask failed to return what it was asked for, say so explicitly and name "
+    "its id. Do not fill the gap from what you already know about the subject: "
+    "an answer you recall, rather than one these subtask results establish, is "
+    "a fabrication even when it turns out to be correct. If the missing piece "
+    "is needed for the final answer, say that it could not be obtained.\n\n"
+)
+
 VERIFY_PROMPT_TEMPLATE = (
     "Check whether the RESULT correctly and completely satisfies the "
     "INSTRUCTION.\n\nINSTRUCTION:\n{instruction}\n\nRESULT:\n{output}\n\n"
@@ -477,20 +502,46 @@ ScoreFn = Callable[[str, str], Awaitable[bool]]
 
 
 class Synthesizer:
-    """Variant-agnostic aggregation: one meta call over ordered subtask outputs."""
+    """Variant-agnostic aggregation: one meta call over ordered subtask outputs.
 
-    def __init__(self, complete: CompleteFn) -> None:
+    ``guard`` (``--decomp-synth-guard``, default ``off``) controls whether the
+    prompt forbids filling a missing subtask result from parametric memory. The
+    default emits the stock prompt byte-for-byte, so an ``off`` run is
+    indistinguishable from a pre-flag one.
+    """
+
+    def __init__(self, complete: CompleteFn, *, guard: str = "off") -> None:
+        if guard not in SYNTH_GUARD_MODES:
+            raise ValueError(f"guard must be one of {SYNTH_GUARD_MODES}, got {guard!r}")
         self._complete = complete
+        self.guard = guard
 
-    async def synthesize(
-        self, *, task_text: str, subtask_outputs: list[tuple[SubtaskSpec, str]]
-    ) -> str:
+    def build_prompt(self, task_text: str, subtask_outputs) -> str:
         parts = [
             f"### {spec.id} ({spec.type})\nInstruction: {spec.instruction}\nResult: {out}"
             for spec, out in subtask_outputs
         ]
         prompt = SYNTHESIS_PROMPT_TEMPLATE.format(task=task_text, subtasks="\n\n".join(parts))
-        return await self._complete(prompt)
+        if self.guard == "off":
+            return prompt
+        # Fail closed rather than silently no-op if the template is reworded:
+        # a guard that quietly stops applying would leave the lock claiming a
+        # protection the run never had.
+        if _SYNTH_FINAL_INSTRUCTION not in prompt:
+            raise RuntimeError(
+                "synth guard cannot be placed: SYNTHESIS_PROMPT_TEMPLATE no longer "
+                f"contains {_SYNTH_FINAL_INSTRUCTION!r}"
+            )
+        return prompt.replace(
+            _SYNTH_FINAL_INSTRUCTION,
+            SYNTHESIS_GUARD_CLAUSE + _SYNTH_FINAL_INSTRUCTION,
+            1,
+        )
+
+    async def synthesize(
+        self, *, task_text: str, subtask_outputs: list[tuple[SubtaskSpec, str]]
+    ) -> str:
+        return await self._complete(self.build_prompt(task_text, subtask_outputs))
 
 
 class VerifyGate:

@@ -821,3 +821,36 @@ s2k8b50 / b_smoke 的 active 池**未受影响**(仅候选)。
 —— 本批教训正是「修好一条不代表另一条也好」。
 
 **关联**:偏差登记 M-32(与 M-27 / M-31 三条并列);RUN-LOG「审计续做」节。
+
+## 7.24 合成守卫 `--decomp-synth-guard`(Aug-02,用户令「加入并且记录」;947→962)
+
+**问题**。分解管线的合成步骤在上游子任务未产出所需信息时,不声明缺失,而是从模型
+参数化记忆补齐并输出自信答案。实证:`b_smoke` 任务 `20194330`,browse 子任务空手而归,
+合成输出为 *"…Based on the known content from the Game Grumps episode…"*。
+
+**为何必须修**。该失效**只虚高分解侧**:凭记忆回想的答案若恰好正确,会被记为管线成功。
+因此它朝**本论文自己的假设方向**注水。频率下界 **1/20**(该次 `passed=False`);检测只抓
+自报措辞,默默编造不可见,故这是下界而非估计。
+
+**接口**。
+
+```
+--decomp-synth-guard {off, strict}      默认 off
+```
+
+- `off` —— 合成提示词与前旗标版本**逐字节等同**(`test_default_is_byte_identical_to_the_stock_prompt` 锁死)
+- `strict` —— 在**最终答案指令之前**插入 `SYNTHESIS_GUARD_CLAUSE`:缺失须点名子任务 id、
+  禁止以先验补齐、必要时声明「could not be obtained」。`FINAL ANSWER:` 契约保持不变,
+  闸门解析不受影响
+
+**fail-closed**。插入锚点 `_SYNTH_FINAL_INSTRUCTION = "Using only the information above,"`。
+模板改写致锚点消失时 `strict` **raise**,不静默失效 —— 静默失效会让 manifest 声称一份
+从未生效的保护,与 M-27/M-31/M-32 同形。
+
+**记录面**。`--decomp-eval` 在建 lock 之前 return,lock 不覆盖此模式;写入
+`decomp_manifest.json` 的 `decomp_synth_guard` 字段,这是该模式唯一的溯源面。
+
+**读数影响**。开启后原本"蒙对"的尝试转为失败,分解侧绝对分数**会下降**。这是修正:
+下降的部分本就不是管线挣来的。跨臂比较时 guard 档位必须一致。
+
+**测试**。`tests/test_synth_guard.py` 15 项。全量 **962 绿**。

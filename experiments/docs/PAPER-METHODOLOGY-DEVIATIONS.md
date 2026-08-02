@@ -223,3 +223,23 @@
 | 🔴 对冻结池的后果(**发臂前必须裁**) | s1k8b103 终池 8 变体在新判据下:**V0/V1/V6/V7 可加载**(V6/V7 各拿回 `CommitNudgeProcessor`+`StepCountdownProcessor`),**V2/V3/V4/V5 fail-closed** ⇒ **4/8 不可用**。这四个变体在原跑中一直以原版处理器栈运行 |
 | 测试 | 专项 `tests/test_processor_targets.py`(10 项),含 `test_kwargs_the_class_does_not_accept_fail_closed`(版本漂移)与 `test_nested_targets_are_reached`(递归)。**三条路径三个测试文件**,刻意不合并——本批教训正是「修好一条不代表另一条也好」 |
 | 裁决层 | 用户令「再次确认没有其他问题」→ 全等级+全尾部审计发现(Aug-02);全量 **947 绿** |
+
+## M-33 合成器从参数化记忆补全缺失子任务结果(`--decomp-synth-guard`,Aug-02 新增)
+
+> **偏差方向对本论文不利,必须主动披露**:该失效**只会虚高「分解」这一侧**——
+> 一个凭记忆回想出来的答案若恰好正确,会被记为管线成功。
+> 也就是说它**朝着我们自己的假设方向注水**,是最坏的一种偏差走向。
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | **未指定**。论文未描述子任务失败时合成步骤的行为 |
+| 现象 | 上游子任务未产出所需信息时,合成器不声明缺失,而是用模型自身先验补齐并给出自信答案 |
+| 实证 | `b_smoke` 任务 `20194330`:browse 子任务什么都没带回,合成输出为 *"…Based on the known content from the Game Grumps episode \"Sonic '06: Oh No - PART 1,\" the phrase shown on screen…"* |
+| 频率(**下界**) | 真走分解合成的 **20 次尝试中 1 次**带自报编造标记,且该次 `passed=False`(本次冒烟未因此虚高)。检测基于 `"Based on the known"` 一类**自报措辞**,**默默编造抓不到**,故 1/20 是下界,不是估计值 |
+| 为何原提示词不够 | 模板已写 `"Using only the information above"`,**实测挡不住** |
+| 我方做法 | `--decomp-synth-guard {off, strict}`,**默认 off**。`strict` 在合成提示词的**最终答案指令之前**插入约束:缺失须点名子任务 id、禁止以先验补齐、必要时声明无法获得。`off` 走原模板**逐字节等同** |
+| fail-closed | 插入锚点为 `_SYNTH_FINAL_INSTRUCTION`;模板一旦改写致锚点消失,`strict` **直接 raise 而非静默失效**——静默失效会让 manifest 声称一份从未生效的保护,正是 M-27/M-31/M-32 同一形状 |
+| 记录面 | `--decomp-eval` 在建 lock **之前** return,故 lock 不覆盖此模式;记录写入 **`decomp_manifest.json` 的 `decomp_synth_guard`** 字段——该模式唯一的溯源面 |
+| 读数影响 | 开启后,原本"蒙对"的尝试将转为失败,**分解侧的绝对分数会下降**。这是修正而非退步:下降部分本就不是管线挣来的 |
+| 测试 | 专项 `tests/test_synth_guard.py`(15 项),含 `test_default_is_byte_identical_to_the_stock_prompt`(最要紧的一条)、`test_guard_fails_closed_if_the_template_stops_carrying_its_anchor`、以及锁住"even when it turns out to be correct"措辞的一条 |
+| 裁决层 | 用户令「加入并且记录」(Aug-02);全量 **962 绿** |

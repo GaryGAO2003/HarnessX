@@ -6778,6 +6778,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--decomp-synth-guard",
+        choices=("off", "strict"),
+        default="off",
+        help=(
+            "Forbid the synthesiser from filling a missing subtask result out of "
+            "parametric memory (M-33). 'off' (default) emits the stock synthesis "
+            "prompt byte-for-byte. 'strict' appends a clause requiring the "
+            "synthesiser to name any subtask that returned nothing and to state "
+            "that the answer could not be obtained, instead of recalling one. "
+            "Observed on b_smoke 20194330: a failed browse subtask was papered "
+            "over with 'Based on the known content from the Game Grumps "
+            "episode...'. Such a recall inflates the DECOMPOSED arm only, so it "
+            "biases the headline contrast in this thesis's favour."
+        ),
+    )
+    parser.add_argument(
         "--decomp-verify-gate",
         choices=("off", "on"),
         default="off",
@@ -7010,7 +7026,9 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
     # --- shared components --------------------------------------------------
     credit_ledger = TypeCreditLedger()
     subtask_router = SubtaskRouter(routing, variant_ids=variant_ids, ledger=credit_ledger, min_obs=min_obs)
-    synthesizer = Synthesizer(_complete)
+    synthesizer = Synthesizer(
+        _complete, guard=str(getattr(args, "decomp_synth_guard", "off"))
+    )
     verify_gate = (
         VerifyGate(_complete) if str(getattr(args, "decomp_verify_gate", "off")) == "on" else None
     )
@@ -7116,6 +7134,11 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
         "decomp_subtask_max_steps": subtask_max_steps,
         "decomp_ledger_min_obs": min_obs,
         "decomp_verify_gate": str(getattr(args, "decomp_verify_gate", "off")),
+        # M-33. --decomp-eval returns before the experiment lock is built, so the
+        # manifest is this mode's only provenance surface: an unrecorded guard
+        # would make a guarded and an unguarded arm indistinguishable after the
+        # fact, and the guard changes what counts as a pass.
+        "decomp_synth_guard": str(getattr(args, "decomp_synth_guard", "off")),
         "pass_k": pass_k,
         "num_tasks": len(rows),
         "max_steps": int(args.max_steps),

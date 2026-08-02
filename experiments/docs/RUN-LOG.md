@@ -1603,3 +1603,37 @@ CH3 须用论文配置(`per_variant` + `gaia_level`)单独跑一次保可比,
 
 **执行顺序建议:先只做第 1 步(只开 A1 重跑)** —— 一个旗标即可证伪/证实整套推理,
 不值得在验证前投开发。
+
+---
+
+## Aug-02 晚 · 合成守卫 M-33(用户令「加入并且记录」)
+
+**背景**。审阅 CH4 草稿时发现:草稿 §4.5.2 明确写 *"not on any budget-matching
+constraint"*,而实测分解花 **2.2×** 步数;顺带核查合成步骤,发现更硬的问题 ——
+合成器会从参数化记忆补全缺失的子任务结果。
+
+**取证**。扫 `b_smoke/decomp_tasks.jsonl`(20 次真走分解合成的尝试):
+
+```
+带自报编造标记   1/20   任务 20194330,passed=False
+```
+
+初次用宽口径扫全量 JSON 得 14 处命中,**收紧后作废** —— 大部分是
+`"Based on my research"`(智能体确实做了研究,合法)。**只有 1 处是真编造。**
+且该检测只抓自报措辞,**默默编造不可见**,故 1/20 是**下界**。
+
+**改动**(全部在 worktree `HarnessX-dev`,分支 `feat/eval-concurrency`;
+主仓 e_pervar 正在跑,零接触):
+
+- `subtask_pipeline.py` —— `SYNTH_GUARD_MODES` / `SYNTHESIS_GUARD_CLAUSE` /
+  `_SYNTH_FINAL_INSTRUCTION` 锚点;`Synthesizer` 增 `guard` 参数与 `build_prompt`
+- `run_variant_pool.py` —— `--decomp-synth-guard {off,strict}` 默认 off;
+  接线至 `Synthesizer`;写入 `decomp_manifest.json`
+- `tests/test_synth_guard.py` —— 15 项新测试
+
+**验证**。全量 **962 绿**(947 → 962)。默认 `off` 逐字节等同;`strict` 解析正常;
+非法值被 argparse 拒绝。
+
+**注意**。开启 guard 后分解侧绝对分数**会下降**,跨臂比较时档位必须一致。
+
+**主实验未受影响**:e_pervar 期间 429 未升至第 4/5 轮重试。
