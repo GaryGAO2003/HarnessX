@@ -1438,3 +1438,41 @@ b_smoke 实测同一池加载出 **8 变体 / 5 种提示词 / 8 种配置 / 零
 (V0/V2/V3/V4=`762e944185`,V1=`33ed740625`,V5=`9c1c9063d9`,V6=`901b533da1`,V7=`7fe49be7bf`)
 ⇒ **CH4 所需的「冻结且已分化的池」现成可用,不必等新池**。
 池演化史是否干净属 CH3 议题,CH4 问的是「在冻结池上做分解+路由是否有用」。
+
+### 🔍 全等级日志审计(Aug-02,用户令「再次检查所有 error 和 warning」)
+
+**为什么重做**:Jul-31 的审计只筛 traceback 与 ERROR 两级,漏掉 898 次 **WARNING 级**
+processor 崩溃,还写下「判定:跑是干净的」。本次按**全等级 + 按消息种类**扫四个日志
+(工具:`scratchpad/mainloop/logaudit.py`,含无严重度标签的裸模式)。
+
+| 日志 | 大小/行数 | WARNING | ERROR | 消息种类 |
+|---|---|---|---|---|
+| s1k8b103.console | 6.6MB / 48,295 | 1,478 | 2 | 166 |
+| s1k8b103.resume | 56.4MB / 408,880 | 14,350 | 29 | 1,045 |
+| s2k8b50.console | 29.9MB / 200,113 | 8,816 | 10 | 423 |
+| b_smoke.console | — | — | — | — |
+
+**🔴 发现一(真 bug,已修)**:`tool_registry.custom: failed to load 'file:///…'`
+—— s1k8b103 **466** 次、s2k8b50 **40** 次、b_smoke **14** 次。
+详见 M-31 / SPEC §7.22。要点:**坏进了 s1k8b103 的 active 池**(`R2`/`R4` 的 V1),
+且 b_smoke 里 **V1 的 14 个会话一次不漏全失败** ⇒ 冻结池的 V1 一直缺 `python_eval`。
+**已修并端到端验证**(修后注册表 `+python_eval`),专项测试 13 条,全量 **937 绿**。
+
+**✅ 发现二(查证后确认**不是** bug,更正主循环夜间说法)**:
+`run_loop error`(InternalServerError / Timeout / RateLimitError)
+—— s1k8b103 113/4,458 = **2.5%**,s2k8b50 60/1,894 = **3.2%**,b_smoke 0。
+主循环整夜以 `retries exhausted|Max retries exceeded` 为匹配串报「终态失败 0」,
+**该匹配串错了**,真实形态是 `run_loop error`。
+但**代码行为正确**:`run.py:344` `_is_infra_failure` 以 `exit_reason=="error"` 判定,
+文档逐字写明「**A.3 p.29 is explicit that such attempts count as failures and are not
+resampled**」⇒ 按论文规定计为失败,且经 `infra_failure_rate` 可审计。
+实测核对 R0 的 100 次 attempt:`{done:60, budget_exceeded:37, error:3}` = 3%,分类正确。
+⇒ **无需修改**;M-11 已要求分列报告,补记实测比率即可。
+
+**其余均为噪声(逐类确认)**:429 重试(被吸收,深度分布见前节)、web_search 三级回退
+(Bing 抓取失败 → DuckDuckGo HTML/Lite 失败 → Wikipedia 403)、退出期 ResourceWarning
+(unclosed file/client session/connector)、`DECISION_REQUIRED`(已知 M-19/20/21)、
+`finish_reason=length` 注入续写、`Web search circuit breaker tripped`(设计内保护)。
+
+**方法学教训**:审计必须**逐条投递路径**做。§7.21 修好了提示词那条,
+本次才发现工具那条同样是坏的 —— 同一现象、不同路径,不会因为修了一条而自动好。

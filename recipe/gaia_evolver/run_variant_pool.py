@@ -1366,13 +1366,23 @@ def _as_local_path(value: str) -> Path:
     ``template_path``. Nothing validated them, the URI never opened, and the
     resulting ``OSError`` was swallowed by the processor-crash handler -- so the
     agent silently ran with an *empty* system prompt instead of its evolved one.
-    """
-    if value.startswith("file:"):
-        from urllib.parse import unquote, urlparse
-        from urllib.request import url2pathname
 
-        return Path(url2pathname(unquote(urlparse(value).path)))
-    return Path(value)
+    All four Windows spellings have been seen in real configs and all must
+    resolve to the same file -- ``file:///D:\\x``, ``file:///D:/x`` (both written
+    by the Evolver), plus the two-slash ``file://D:\\x`` / ``file://D:/x`` that
+    :func:`_resolve_tool_targets` emits and ``to_yaml_file`` then persists for a
+    later round to read back. ``urlparse`` cannot do this: on the two-slash form
+    it reads the drive letter as a netloc and drops it.
+    """
+    if not value.startswith("file:"):
+        return Path(value)
+    from urllib.parse import unquote
+
+    rest = unquote(value[len("file:") :])
+    body = rest.lstrip("/")
+    if re.match(r"^[A-Za-z]:", body):
+        return Path(body)  # windows absolute, whatever the slash count
+    return Path("/" + body) if body else Path(rest)
 
 
 def _resolve_artefact_paths(processors: Any, config_path: Path) -> list:
@@ -1411,6 +1421,66 @@ def _resolve_artefact_paths(processors: Any, config_path: Path) -> list:
     return resolved
 
 
+def _resolve_tool_targets(tool_registry: Any, config_path: Path) -> Any:
+    """Rewrite ``tool_registry.custom`` file targets into the only form that loads.
+
+    Same failure as :func:`_resolve_artefact_paths`, on the other delivery path.
+    The Evolver writes evolved tools as ``file://`` targets, and the loader in
+    ``harnessx.core.harness`` parses them with a bare
+    ``target[len("file://"):]``. On Windows that leaves the leading slash of an
+    RFC-style URI in front of the drive -- ``/D:\\x`` -- which resolves against
+    the current drive as ``D:\\D:\\x`` and raises ``[Errno 22]``. The loader logs
+    that at WARNING and continues, so the variant runs *without* the tool its
+    evolution added.
+
+    Measured before the fix: 466 such failures in s1k8b103 (including
+    ``R2``/``R4`` active-pool configs for V1, i.e. the pool itself, not just
+    candidates), 40 in s2k8b50 and 14 in b_smoke -- the latter being every one
+    of V1's 14 sessions.
+
+    ``harnessx/`` is vendored and not ours to patch, so the rewrite happens
+    here: emit ``file://<abs path>::<symbol>``, the two-slash spelling that
+    survives the bare prefix strip. Verified empirically against the vendored
+    parser; the three-slash spellings fail for both slash directions.
+
+    Fail-closed for the same reason as the prompt path: a tool the variant is
+    defined by that cannot be opened makes it a broken variant, not a quieter
+    one. Dotted module targets are returned untouched.
+    """
+    custom = getattr(tool_registry, "custom", None)
+    if not custom:
+        return tool_registry
+
+    patched: list = []
+    changed = False
+    for target in custom:
+        if not isinstance(target, str) or not target.startswith("file:"):
+            patched.append(target)
+            continue
+        uri_part, sep, symbol = target.rpartition("::")
+        if not sep or not symbol.strip() or not uri_part.strip():
+            raise ValueError(
+                f"{config_path}: tool target {target!r} is malformed "
+                "(expected 'file://<abs path>.py::symbol')."
+            )
+        path = _as_local_path(uri_part)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"{config_path}: tool target {target!r} does not resolve to a readable "
+                f"file (tried {path}). The evolved tool this variant is defined by is "
+                "missing, so the run would silently hand the model an incomplete tool set."
+            )
+        fixed = f"file://{path}::{symbol.strip()}"
+        changed |= fixed != target
+        patched.append(fixed)
+
+    if not changed:
+        return tool_registry
+    import dataclasses
+
+    return dataclasses.replace(tool_registry, custom=patched)
+
+
 def _prepare_round_config(config_path: Path, journal: Any):
     """Load a config YAML and attach this round's tracer (``run.py`` idiom).
 
@@ -1419,12 +1489,17 @@ def _prepare_round_config(config_path: Path, journal: Any):
     replace it without a real ``HarnessConfig`` (they never run a rollout).
 
     Every artefact path the config names is normalised and verified here -- see
-    :func:`_resolve_artefact_paths` for why that check is fail-closed.
+    :func:`_resolve_artefact_paths` (system prompts) and
+    :func:`_resolve_tool_targets` (custom tools) for why both are fail-closed.
     """
     from harnessx.core.harness import HarnessConfig
 
     cfg = HarnessConfig.from_yaml_file(config_path).canonicalize()
-    return cfg.copy(tracer=journal, processors=_resolve_artefact_paths(cfg.processors, config_path))
+    return cfg.copy(
+        tracer=journal,
+        processors=_resolve_artefact_paths(cfg.processors, config_path),
+        tool_registry=_resolve_tool_targets(cfg.tool_registry, config_path),
+    )
 
 
 def _make_variant_meta_agent(template: Any, journal_path: Path) -> Any:

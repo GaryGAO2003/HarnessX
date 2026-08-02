@@ -715,7 +715,12 @@ provenance_warnings,resume 护栏拦"换基线续跑"。
 **7.21-1 `_resolve_artefact_paths`(`run_variant_pool.py`)**
 
 - `_prepare_round_config` 是所有变体配置进入 rollout 的唯一咽喉,校验放这
-- `_as_local_path()`:`file://` URI → 本地路径(`urlparse` + `url2pathname`,处理 `/D:/` 形)
+- `_as_local_path()`:`file://` URI → 本地路径。**[Aug-02 改写,见 §7.22]** 原用
+  `urlparse` + `url2pathname`,只覆盖三斜杠形;现为「剥 scheme → 去前导斜杠 →
+  见盘符即 Windows 绝对路径」,**四种 Windows 拼写全覆盖**
+  (`file:///D:\x` / `file:///D:/x` / `file://D:\x` / `file://D:/x`)。
+  必须如此:§7.22 产出两斜杠形并经 `to_yaml_file` 落盘,下一轮读回自己的输出,
+  而 `urlparse` 在两斜杠形上会把盘符当 netloc 吃掉
 - 校验 `_ARTEFACT_PATH_KEYS = ("template_path",)` 指向的文件**可读,否则 raise `FileNotFoundError`**
 - **只在内存内改写 `cfg.processors`,磁盘上的运行产物一律不动**(改产物 = 伪造数据)
 - 设计理由:演化提示词**就是**变体。产物打不开时静默回落,会把「没有变体」
@@ -732,3 +737,40 @@ provenance_warnings,resume 护栏拦"换基线续跑"。
 processor-crash 三项归零。回归测试 `tests/test_artefact_paths.py`(9 条)。
 
 **关联**:偏差登记 M-27 / M-28;RUN-LOG「Aug-02」节;FINDINGS-AUG01 B 节撤回块。
+
+---
+
+## 7.22 演化**工具**的投递失败(Aug-02,用户令「把这些错误全改掉然后设计专项测试」;884→937)
+
+**背景**:§7.21 只修了提示词那条投递路径。全等级日志审计发现**工具那条也是坏的**,
+且 s1k8b103 里坏进了 **active 池**(`R2`/`R4` 的 V1),不止候选。
+
+**根因在 vendored 侧**:`harnessx.core.harness._parse_file_tool_target` 用
+`target[len("file://"):]` 朴素截断。Windows 下 RFC 式 `file:///D:\x` 截完余 `/D:\x`,
+被解析为「当前盘根下的 `D:` 目录」⇒ **`D:\D:\x`**,抛 `[Errno 22]`;
+加载器只记 WARNING 后继续 ⇒ 变体带着**不存在的工具**运行。
+
+**实测四种拼写打真解析器**:`file:///D:\x` FAIL / `file:///D:/x` FAIL /
+`file://D:/x` **OK** / `file://D:\x` **OK** ⇒ 仅两斜杠形可用。
+
+**`_resolve_tool_targets`(`run_variant_pool.py`)**
+
+- 挂在 `_prepare_round_config` 同一咽喉,与 §7.21-1 并列
+- `file:` 目标 → 改写为 **`file://<绝对路径>::<符号>`**;点分模块目标(serper)原样不动
+- 校验目标文件**可读,否则 raise `FileNotFoundError`**(同 fail-closed 原则)
+- **`harnessx/` 零改动**(vendored);无改动时**原对象透传**,幂等
+- **只在内存内改写,磁盘产物不动**
+
+**验证**:真实 V1 配置端到端 —— 修前注册表 `[Bash, Browser, Read, WebFetch, WebSearch]`,
+修后 **`+python_eval`**,无其他增减。实测受影响面:s1k8b103 **466** 次(含 active 池)、
+s2k8b50 **40** 次(仅候选,池未污染)、b_smoke **14** 次(= V1 全部 14 个会话)。
+
+**测试**:`tests/test_tool_targets.py`(13 条)。**刻意打真 vendored 解析器/加载器,
+不断言字符串形状** —— 只断形状的话,日后有人把两斜杠「修正」回 RFC 三斜杠,
+测试仍绿而 bug 悄悄回归。含 `test_the_rfc_spelling_is_the_one_that_breaks`:
+当 vendored 侧修好时该测试会主动失败,提示可以简化本节。
+
+**教训(须入 Ch7)**:M-27 与 M-31 是同一现象的两个实例 ⇒ 产物**消费**审计必须
+**逐条投递路径**做;修好提示词那条不代表工具那条也好了。
+
+**关联**:偏差登记 M-31(与 M-27 交叉引用);RUN-LOG「Aug-02 全等级日志审计」节。
