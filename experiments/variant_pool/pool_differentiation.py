@@ -70,7 +70,13 @@ def main() -> int:
             state.get("last_sys_prompt_hash", "?")
         ] += 1
 
-    print(f"session state files: {len(files)}  (unparsed dir names: {unparsed})")
+    # "unparsed" is expected, not a warning: it counts round-level pool_state
+    # and the Evolver's own meta_workspace sessions, neither of which is a task
+    # rollout with a variant identity. Candidate *gate* evaluations DO parse --
+    # they are R<n>-<vid>-<candidate_id>-<uuid> -- which matters, because on
+    # s1k8b103 the candidate gate is where 256 of the empty-prompt rollouts hid.
+    print(f"session state files: {len(files)}  "
+          f"(non-rollout state files skipped: {unparsed} -- pool/meta, expected)")
     if not cells:
         print("\nno session state recorded yet -- run is still in its first round")
         return 0
