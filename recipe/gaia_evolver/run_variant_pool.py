@@ -1385,28 +1385,72 @@ def _as_local_path(value: str) -> Path:
     return Path("/" + body) if body else Path(rest)
 
 
-def _resolve_artefact_paths(processors: Any, config_path: Path) -> list:
-    """Normalise, then **verify**, every evolved artefact a config points at.
+def _assert_processor_instantiates(spec: Mapping, raw_target: str, config_path: Path) -> None:
+    """Fail closed unless an evolved processor really does build.
 
-    Fail-closed by design. A config naming an artefact that cannot be opened is
-    a broken variant, not a variant that quietly falls back to a default: the
-    evolved prompt *is* the variant. Raising here converts an invisible
-    degradation into a loud one at load time.
+    A readable file is *not* the invariant we care about. The invariant is that
+    the processor ends up in the pipeline, and there are two ways for it not to:
+    the path fails to resolve, or the config passes kwargs the referenced class
+    version does not accept. s1k8b103 R10/V4 is the second kind -- it names
+    ``CommitNudgeProcessor`` from C-R6-01 while passing a ``nudge=`` argument
+    that build does not take, so instantiation raises ``TypeError``.
+
+    Either way ``_instantiate_proc`` catches it with a bare ``except: return
+    None`` and logs nothing at all, so the variant runs the stock stack while
+    its config claims otherwise. Checking with the *same call the runtime makes*
+    is the only check that covers both causes.
     """
-    resolved = []
-    for processor in processors or []:
-        if not isinstance(processor, Mapping):
-            resolved.append(processor)
-            continue
-        builder = processor.get("system_builder")
-        if not isinstance(builder, Mapping):
-            resolved.append(processor)
-            continue
-        patched = None
-        for key in _ARTEFACT_PATH_KEYS:
-            raw = builder.get(key)
-            if not raw:
-                continue
+    from harnessx.core.builder import _instantiate
+
+    try:
+        _instantiate(dict(spec))
+    except Exception as exc:  # noqa: BLE001 - re-raised with provenance below
+        raise RuntimeError(
+            f"{config_path}: evolved processor {raw_target!r} does not instantiate "
+            f"({type(exc).__name__}: {exc}). The runtime drops such processors silently "
+            "(_instantiate_proc swallows the exception and returns None), so the variant "
+            "would run the stock processor stack while its config claims otherwise."
+        ) from exc
+
+
+def _normalise_artefact_node(node: Any, config_path: Path) -> tuple[Any, bool]:
+    """Recursively fix the artefact references in one processor spec.
+
+    Two kinds, both of which the Evolver writes as ``file://`` URIs:
+
+    * ``template_path`` -- the prompt file a ``SystemPromptProcessor`` renders.
+      Rewritten to a plain local path, which is what the builder wants.
+    * ``_target_`` -- the *processor class itself*, loaded from an evolved .py.
+      Rewritten to ``file://<abs path>::<ClassName>``, because
+      ``harnessx.core.builder._parse_file_target`` strips the scheme with a bare
+      ``_target[len("file://"):]`` and an RFC-style third slash leaves ``/D:\\x``
+      in front of the drive, which Windows resolves as ``D:\\D:\\x``.
+
+    Recurses because ``builder._instantiate`` instantiates nested specs too, so
+    a ``_target_`` can sit below the top level of a processor entry.
+
+    Fail-closed on both. Returns ``(node, changed)`` and never mutates the input.
+    """
+    if isinstance(node, list):
+        out, changed = [], False
+        for item in node:
+            fixed, item_changed = _normalise_artefact_node(item, config_path)
+            out.append(fixed)
+            changed |= item_changed
+        return (out, True) if changed else (node, False)
+
+    if not isinstance(node, Mapping):
+        return node, False
+
+    patched: dict | None = None
+
+    def _set(key: str, value: Any) -> None:
+        nonlocal patched
+        patched = patched if patched is not None else dict(node)
+        patched[key] = value
+
+    for key, raw in node.items():
+        if key in _ARTEFACT_PATH_KEYS and raw:
             path = _as_local_path(str(raw))
             if not path.is_file():
                 raise FileNotFoundError(
@@ -1415,9 +1459,60 @@ def _resolve_artefact_paths(processors: Any, config_path: Path) -> list:
                     "missing, so the run would silently fall back to an empty system prompt."
                 )
             if str(path) != str(raw):
-                patched = patched or {**processor, "system_builder": {**builder}}
-                patched["system_builder"][key] = str(path)
-        resolved.append(patched or processor)
+                _set(key, str(path))
+            continue
+
+        if key == "_target_" and isinstance(raw, str) and raw.startswith("file:"):
+            uri_part, sep, symbol = raw.rpartition("::")
+            if not sep or not symbol.strip() or not uri_part.strip():
+                raise ValueError(
+                    f"{config_path}: processor target {raw!r} is malformed "
+                    "(expected 'file://<abs path>.py::ClassName')."
+                )
+            path = _as_local_path(uri_part)
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"{config_path}: processor target {raw!r} does not resolve to a "
+                    f"readable file (tried {path}). The evolved processor this variant "
+                    "is defined by is missing, and the runtime drops such processors "
+                    "silently -- see _instantiate_proc's bare 'except: return None'."
+                )
+            fixed = f"file://{path}::{symbol.strip()}"
+            if fixed != raw:
+                _set(key, fixed)
+            _assert_processor_instantiates(
+                {**(patched if patched is not None else dict(node)), key: fixed}, raw, config_path
+            )
+            continue
+
+        if isinstance(raw, (Mapping, list)):
+            child, child_changed = _normalise_artefact_node(raw, config_path)
+            if child_changed:
+                _set(key, child)
+
+    return (patched, True) if patched is not None else (node, False)
+
+
+def _resolve_artefact_paths(processors: Any, config_path: Path) -> list:
+    """Normalise, then **verify**, every evolved artefact a config points at.
+
+    Fail-closed by design. A config naming an artefact that cannot be opened is
+    a broken variant, not a variant that quietly falls back to a default: the
+    evolved prompt *is* the variant. Raising here converts an invisible
+    degradation into a loud one at load time.
+
+    The ``_target_`` case is the one that most needs this. A prompt that fails
+    to open at least logs a processor crash, and a tool that fails to load logs
+    a warning; an evolved *processor* whose file cannot be opened is swallowed
+    by ``_instantiate_proc``'s bare ``except: return None`` and leaves **no
+    trace at all**. Measured in s1k8b103: 19 active-pool configs declared an
+    evolved processor that was simply absent at runtime, with the instantiated
+    set byte-identical to the stock baseline.
+    """
+    resolved = []
+    for processor in processors or []:
+        fixed, _ = _normalise_artefact_node(processor, config_path)
+        resolved.append(fixed)
     return resolved
 
 

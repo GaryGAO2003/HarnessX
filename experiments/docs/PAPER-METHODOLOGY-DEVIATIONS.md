@@ -205,3 +205,21 @@
 | 测试 | 专项 `experiments/variant_pool/tests/test_tool_targets.py`(13 项)。**刻意打真 vendored 解析器/加载器而非断言字符串形状** —— 若只断言形状,日后有人把两斜杠"修正"回 RFC 三斜杠,测试仍绿而 bug 悄悄回归。含一项 `test_the_rfc_spelling_is_the_one_that_breaks`,当 vendored 侧修好时会主动失败以提示简化 |
 | 威胁章义务 | Ch7 须记:**M-27 与 M-31 是同一现象的两个实例** ⇒ 「自演化系统需要产物**消费**审计」不是个案而是系统性结论;且**审计必须逐条投递路径做**(修好提示词那条不代表工具那条也好了——这正是本次踩的坑) |
 | 裁决层 | 用户令「把这些错误全改掉然后设计专项测试」(Aug-02);全量测试 937 绿 |
+
+## M-32 演化 processor 的投递失败 + 判据由「文件存在」升级为「真能实例化」(Aug-02 新增)
+
+> **三条投递路径,同一现象(M-27 / M-31 / M-32),按可发现性排序**:
+> 提示词 898 条 WARNING → 工具 466 条 WARNING → **processor 零日志**。
+> 引用「产物消费审计」结论时**必须三条并列**,只提其一会低估问题的系统性。
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | **未指定** |
+| 🔴 根因(两个,不是一个) | ①**路径**:`builder._parse_file_target` 同样朴素截断 ⇒ Windows 下 `file:///D:\x` → `D:\D:\x`。②**版本漂移**:配置传了被引类版本不接受的 kwarg(s1k8b103 R10/V4 引 C-R6-01 版 `CommitNudgeProcessor` 却传 `nudge=` ⇒ `TypeError`)。**文件完好,仅实例化失败** |
+| 🔴 为何最难发现 | `harnessx.core.harness._instantiate_proc` 是 `try: … except Exception: return None`,**零日志**。变体遂以原版处理器栈运行,而配置声称有演化 processor。408,880 行日志中**匹配行数为 0** |
+| 实测范围 | s1k8b103:**19 个 active_pool 配置**受影响;干净对照 R0/V0 声明 8 实例化 8,而 R10/V4 声明 9 **只实例化 8**,且实例化集合与原版基线**逐个相同**。s2k8b50 / b_smoke:**active 池未受影响**(仅候选) |
+| 我方做法 | `_normalise_artefact_node` 递归处理 `_target_` 与 `template_path`(builder 自身也递归实例化嵌套 spec,只补顶层会留缝);`_target_` 改写为 `file://<绝对路径>::<类名>`;**并以 `_assert_processor_instantiates` 用运行期同一调用真正实例化一次,失败即 raise** |
+| 判据升级(重要) | 第一版判据是「文件可读」——**它抓不到版本漂移**(文件完好)。现判据 = **「这个 processor 到底能不能装出来」**,一并覆盖两个成因。这是本条相对 M-27/M-31 的方法学增量 |
+| 🔴 对冻结池的后果(**发臂前必须裁**) | s1k8b103 终池 8 变体在新判据下:**V0/V1/V6/V7 可加载**(V6/V7 各拿回 `CommitNudgeProcessor`+`StepCountdownProcessor`),**V2/V3/V4/V5 fail-closed** ⇒ **4/8 不可用**。这四个变体在原跑中一直以原版处理器栈运行 |
+| 测试 | 专项 `tests/test_processor_targets.py`(10 项),含 `test_kwargs_the_class_does_not_accept_fail_closed`(版本漂移)与 `test_nested_targets_are_reached`(递归)。**三条路径三个测试文件**,刻意不合并——本批教训正是「修好一条不代表另一条也好」 |
+| 裁决层 | 用户令「再次确认没有其他问题」→ 全等级+全尾部审计发现(Aug-02);全量 **947 绿** |
