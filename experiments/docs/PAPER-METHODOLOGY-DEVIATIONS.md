@@ -166,3 +166,16 @@
 | 代价(必须随数字引用) | 每轮噪声地板由实测 SD **4.57pp**(n=103,B-FREEZE §4.1)扩到约 **6.6pp**(×√(103/50))⇒ **`s2k8b50` 的准确率曲线不可与 `s1k8b103` 比较**。该跑只交付分化池,不交付准确率结论 |
 | 威胁章义务 | Ch7 须记:CH4 所依赖的池若最终取自缩床演化,则「池的分化」与「池的质量」须分开陈述——前者本跑可证,后者须回到全床 |
 | 裁决层 | 用户睡前授权无人值守(Aug-02 ~02:05「跑你该跑的实验……早上我需要看到完整的分化池」);缩床比例与 seed 由主循环选定并在此冻结 |
+
+## M-30 actionability 阈值 alpha 与池规模的交互(Aug-02 新增)
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | Algorithm 1 有 alpha,但**未规定唯一操作值**;实现自述 `actionability_threshold_provenance = "OURS: configurable reconstruction parameter; the paper does not specify one unique operational alpha"` |
+| 我方现值 | `--actionability-threshold` 未传时按 Digester 模式取默认:llm 模式 **0.5**(`OURS_DEFAULT_ACTIONABILITY_THRESHOLD`),deterministic 模式 1.0(保持字节等同) |
+| 已知先例 | `runs/a1smoke`:遗留默认 1.0 下 a_t=0.9 < 1.0,**静默跳过每一轮**;当时的修法即把 llm 模式默认降到 0.5。**同类失败(阈值高于实际 a_t ⇒ 静默不演化)已发生过一次** |
+| 🔴 本次触发 | `s2k8b50` R3/R5/R6 = a_t **0.0 / 0.4 / 0.3** < 0.5 ⇒ `short_circuit: actionability_below_threshold`,连续 4 轮无 ship。对比 R1 = a_t **0.9**(50 digests / 18 失败)正常产出 |
+| 机制 | 池分叉后 routing 把床拆给各变体(R2 = V0:19 / V1:31)⇒ **每变体每轮失败样本骤降**(19 题 / 1–4 失败),且多为模型能力极限而非 harness 可修 ⇒ a_t 结构性地上不去。**alpha 是按未分叉轮次(全床、失败多)校准的,分叉后失配** |
+| 影响面 | alpha **直接决定演化频率**,进而决定池深度与 K 的可达值 ⇒ 是 §4.5 复现的一等参数,此前未单列 |
+| 待做 | ①以 `--actionability-threshold 0.3` `--resume` 续跑二三轮,**证伪/证实「是阈值而非床」**(便宜且可证伪);②若恢复产出,须报告 alpha 敏感性(不同 alpha 下的 fork 率/门拒率/final);③Ch7 记:**小床 + 分叉路由会系统性压低 a_t**,复现 K=8 需要床大到每变体每轮仍有足够失败样本 |
+| 裁决层 | 主循环夜跑诊断(Aug-02);**alpha 改动须用户明令**,本文件不构成授权 |
