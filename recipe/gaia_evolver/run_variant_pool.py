@@ -1354,17 +1354,77 @@ def _make_journal(sessions_dir: Path):
     return HarnessJournal(base_dir=str(sessions_dir), export_jsonl=True)
 
 
+#: Builder keys that name a file the harness must actually be able to open.
+#: The Evolver writes these itself, so nothing guarantees they are well-formed.
+_ARTEFACT_PATH_KEYS = ("template_path",)
+
+
+def _as_local_path(value: str) -> Path:
+    """Coerce a config path value to a local filesystem path.
+
+    The Evolver has been observed writing ``file:///D:/...`` URIs into
+    ``template_path``. Nothing validated them, the URI never opened, and the
+    resulting ``OSError`` was swallowed by the processor-crash handler -- so the
+    agent silently ran with an *empty* system prompt instead of its evolved one.
+    """
+    if value.startswith("file:"):
+        from urllib.parse import unquote, urlparse
+        from urllib.request import url2pathname
+
+        return Path(url2pathname(unquote(urlparse(value).path)))
+    return Path(value)
+
+
+def _resolve_artefact_paths(processors: Any, config_path: Path) -> list:
+    """Normalise, then **verify**, every evolved artefact a config points at.
+
+    Fail-closed by design. A config naming an artefact that cannot be opened is
+    a broken variant, not a variant that quietly falls back to a default: the
+    evolved prompt *is* the variant. Raising here converts an invisible
+    degradation into a loud one at load time.
+    """
+    resolved = []
+    for processor in processors or []:
+        if not isinstance(processor, Mapping):
+            resolved.append(processor)
+            continue
+        builder = processor.get("system_builder")
+        if not isinstance(builder, Mapping):
+            resolved.append(processor)
+            continue
+        patched = None
+        for key in _ARTEFACT_PATH_KEYS:
+            raw = builder.get(key)
+            if not raw:
+                continue
+            path = _as_local_path(str(raw))
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"{config_path}: {key}={raw!r} does not resolve to a readable file "
+                    f"(tried {path}). The evolved artefact this variant is defined by is "
+                    "missing, so the run would silently fall back to an empty system prompt."
+                )
+            if str(path) != str(raw):
+                patched = patched or {**processor, "system_builder": {**builder}}
+                patched["system_builder"][key] = str(path)
+        resolved.append(patched or processor)
+    return resolved
+
+
 def _prepare_round_config(config_path: Path, journal: Any):
     """Load a config YAML and attach this round's tracer (``run.py`` idiom).
 
     Mirrors ``run.py``: ``HarnessConfig.from_yaml_file(...).canonicalize()`` then
     ``.copy(tracer=...)``. Kept as a module-level function so the unit tests can
     replace it without a real ``HarnessConfig`` (they never run a rollout).
+
+    Every artefact path the config names is normalised and verified here -- see
+    :func:`_resolve_artefact_paths` for why that check is fail-closed.
     """
     from harnessx.core.harness import HarnessConfig
 
     cfg = HarnessConfig.from_yaml_file(config_path).canonicalize()
-    return cfg.copy(tracer=journal)
+    return cfg.copy(tracer=journal, processors=_resolve_artefact_paths(cfg.processors, config_path))
 
 
 def _make_variant_meta_agent(template: Any, journal_path: Path) -> Any:

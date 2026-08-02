@@ -150,6 +150,20 @@ def _make_provider(
     return LiteLLMProvider(model, extra_headers=extra_headers, **effort_kwargs)
 
 
+#: Characters Windows forbids in a path component. ':' is the one that bites:
+#: decomposition subtask ids are ``<parent_task_id>::<subtask_id>``.
+_FS_UNSAFE = str.maketrans({c: "_" for c in '<>:"/\\|?*'})
+
+
+def _fs_safe(name: str) -> str:
+    """Make ``name`` usable as a single path component.
+
+    A no-op for the ids this recipe has always produced (UUIDs, ``V0``,
+    ``R3-V1-active``), so existing session directory names are unchanged.
+    """
+    return name.translate(_FS_UNSAFE)
+
+
 async def _run_task(
     harness: Any,
     task: GAIATask,
@@ -192,7 +206,16 @@ async def _run_task(
     """
     t0 = time.time()
     task_id = task.task_id or "?"
-    session_id = f"{label}-{task_id}" if attempt_idx == 0 else f"{label}-{task_id}-a{attempt_idx + 1}"
+    # The session id becomes a directory name. GAIA task ids are UUIDs and are
+    # already path-safe, but a decomposition subtask carries the synthetic id
+    # ``<parent>::<subtask>`` and ':' is illegal in a Windows path -- it made
+    # every subtask rollout die with WinError 123 before reaching the model.
+    # Sanitising here (rather than at the id's source) keeps the logical id
+    # intact for logging and accounting, and leaves UUID-only ids untouched, so
+    # the historical session id is byte-identical for every pre-existing path.
+    session_id = _fs_safe(f"{label}-{task_id}")
+    if attempt_idx != 0:
+        session_id = f"{session_id}-a{attempt_idx + 1}"
     attempt_tag = "" if attempt_idx == 0 else f" [a{attempt_idx + 1}]"
     logger.info("[%s] Running %s (Level %d)%s...", label, task_id, task.level, attempt_tag)
 
