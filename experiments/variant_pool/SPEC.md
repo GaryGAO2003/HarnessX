@@ -707,3 +707,28 @@ provenance_warnings,resume 护栏拦"换基线续跑"。
   变体池套件 **874/0**(853 基线 + 21 新测)主循环亲跑复验;核心 `tests/` 的 5 个失败
   为 Windows HOME/USERPROFILE 环境性且**先于本改动存在**(且本改动不触 harnessx/**,
   逻辑上不可能致其失败)。
+
+## 7.21 演化产物 fail-closed 校验 + 子任务路径消毒(Aug-02,用户令「先修复」;874→884)
+
+**背景**:两个静默失效,都是「跑得下去但做错事」。
+
+**7.21-1 `_resolve_artefact_paths`(`run_variant_pool.py`)**
+
+- `_prepare_round_config` 是所有变体配置进入 rollout 的唯一咽喉,校验放这
+- `_as_local_path()`:`file://` URI → 本地路径(`urlparse` + `url2pathname`,处理 `/D:/` 形)
+- 校验 `_ARTEFACT_PATH_KEYS = ("template_path",)` 指向的文件**可读,否则 raise `FileNotFoundError`**
+- **只在内存内改写 `cfg.processors`,磁盘上的运行产物一律不动**(改产物 = 伪造数据)
+- 设计理由:演化提示词**就是**变体。产物打不开时静默回落,会把「没有变体」
+  伪装成「变体表现平平」——s1k8b103 就是这么过去的
+- 未改动的配置**原对象透传**(测试 `test_an_already_plain_path_is_left_byte_identical` 用 `is` 断言)
+
+**7.21-2 `_fs_safe`(`run.py`)**
+
+- session id 用作目录名;decomp 子任务 id 为 `<parent>::<subtask>`,`:` 在 Windows 非法
+- 仅替换 `<>:"/\|?*` → `_`;**逻辑 id 不变**,日志与记账仍用原 id
+- UUID 类 id 与既有 `R3-V1-active-…` 命名逐字节不变 ⇒ 历史目录名零影响
+
+**验证**:冻结池不同提示词数 **3 → 5**(V5/V6/V7 各自独有);冒烟 ERROR/WinError/
+processor-crash 三项归零。回归测试 `tests/test_artefact_paths.py`(9 条)。
+
+**关联**:偏差登记 M-27 / M-28;RUN-LOG「Aug-02」节;FINDINGS-AUG01 B 节撤回块。
