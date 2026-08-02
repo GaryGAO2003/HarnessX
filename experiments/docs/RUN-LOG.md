@@ -1564,3 +1564,42 @@ V6/V7 各拿回 `CommitNudgeProcessor` + `StepCountdownProcessor`。
 ⚠️ **限定(须随数字走)**:该 20pp 摆动含**两个**来源 —— rollout 采样方差 **与路由漂移**
 (账本逐轮更新,任务在 V0/V1 间的分配会变)。**池的配置冻结,路由未冻结** ⇒
 它是「系统在稳态下的总体测量方差」,不是纯采样噪声。若需分离,须加一臂冻结路由重测。
+
+### 📐 分化方案设计落笔(Aug-02,用户令「可以,但不要改而是加,原版也能跑」)
+
+**产出**:`experiments/docs/DIFFERENTIATION-DESIGN.md`(设计,**未实现**)。
+铁律写在文首:每项均为**新增旗标、默认关闭、关闭时与现行为逐字节等同**;
+做不到字节等同的不实现、改设计。
+
+**追因结论(池为何不专业化)——三条,均有证据,且都不是分解质量问题**
+(四个失败计划已逐条读过,分解结构均正确;失败是预算 + 合成器编造):
+
+1. **门作用域**:`--regression-baseline` 默认 `global`,s1k8b103 未传该旗标 ⇒ 用的就是默认。
+   而 §4.5 p.11 逐字「the seesaw constraint is **scoped per-variant** … tested only against tasks
+   routed to k」。**M-23 记的「论文两读待裁」由这句解决**:§4.1 的全局表述描述单 harness 循环,
+   多变体存在后论文明说 per-variant。⇒ **我方跑的是反专业化档**。
+2. **cluster = `gaia_level`**(难度),非能力分区;论文未公布其 cluster 构造(M-02)。
+3. **诊断信号为空**:`failure_category` 分布 = {gaia_level_2 322 / gaia_level_3 130 /
+   gaia_level_1 71 / None 1125}(=难度换名),**`implicated_components` 全跑为空(1,648 条,零)**
+   ⇒ 循环拿不到任何能力级信号,无法定向演化。(硬化了 D-2「诊断层基本未实现」)
+
+**论文侧两条锚**:①§6.2 明言 GAIA 的 ∆=0.0 源于 task heterogeneity,正是变体隔离的动机;
+Ensemble 87.4/87.4/0.0 vs Global 49.5/73.8/−24.3,**我方 74.8/80.6/−5.8 卡在中间**,
+与「半残版 Ensemble」一致。②§6.3 末自认 **Domain-aware clustering / Task-level tournament
+「lack sufficient rounds and tasks for statistically meaningful comparison」** ⇒ 本方案正落此缝。
+③§6.4:AEGIS vs 单 agent evolver 差 1.0%(**在 1 SE ≈3.3% 内**)⇒ **勿投入改 meta-agent 架构**。
+
+**四项新增(全默认关)**:A1 门作用域(零开发,旗标已存在)/ A2 可插拔 cluster
+(`--cluster-source`,限**子任务级**路由以避 M-13 泄漏)/ A3 **逐子任务信用**
+(`--decomp-credit subtask_convergence`,判据=是否在步限前收敛,免费客观、对齐 C-1;
+**局限:测收敛非正确,须入威胁章**)/ A4 合成器诚实约束(禁参数化填补)。
+
+**床不用换,反而分辨率更高**:评估单元由「任务」变「子任务」⇒ 103×4.30≈**440 个单元 / 4 类
+≈ 每类 110**,对比现状 103/3≈34,**约 3 倍**,且 GAIA-103 不动、CH3 可比性不丢。
+
+**🔴 边界**:按子任务类型演化后**不再是论文 Ensemble 的复现**,
+CH3 须用论文配置(`per_variant` + `gaia_level`)单独跑一次保可比,
+**不得拿新配置结果对 Table 5**。
+
+**执行顺序建议:先只做第 1 步(只开 A1 重跑)** —— 一个旗标即可证伪/证实整套推理,
+不值得在验证前投开发。
