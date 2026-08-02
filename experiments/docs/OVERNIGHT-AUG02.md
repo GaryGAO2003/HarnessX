@@ -178,6 +178,18 @@ active 池 3 个变体(V0/V6/V7),**配置轴 3 个全不同**,但**提示词轴 
 | **出现空 prompt hash** | 🔴🔴 修复不完整 | **停一切臂**。这比任何实验结果都重要 —— 说明还有第二条投递路径没被 `_resolve_artefact_paths` 覆盖 |
 | **artefact 告警命中 / 跑挂** | fail-closed 真的炸了 | 读告警行拿到具体路径,判断是「Evolver 幻觉路径」还是「真缺文件」,再决定是补候选级兜底还是修 Evolver 提示 |
 
+### 🔬 04:0x 的重要发现:M-27 的触发条件是**稳定行为**,不是偶发
+
+`s2k8b50` 里 Evolver **又写出 `file:///` URI**,且是畸形形式(`file:///` 后跟反斜杠):
+`file:///D:\PycharmProj\...\gaia_agent_commit_nudge.j2`。
+⇒ **M-27 不是 s1k8b103 的一次意外,而是该 meta 模型的稳定习惯**。
+这显著加强 Ch7 威胁章的论点:产物投递审计不是补丁,是必需品。
+
+⚠️ 但**不能**用「本跑零 artefact 错误」证明修复有效 —— R1 是「实评 1、跳过 3」,
+带 `file://` 的候选正在被跳过之列,**从未被加载**。已改为**直测**:
+用运行现场的原始字符串跑 `_as_local_path`,三种形式(畸形/规范/裸路径)全部正确解析。
+测试缺口同时补上:原回归测试用 `Path.as_uri()` 只覆盖规范形式,**从没测过真实输入**。
+
 **取数命令**(早上直接跑,只读,不碰运行产物):
 ```
 .venv312\Scripts\python.exe experiments\variant_pool\pool_differentiation.py s2k8b50
