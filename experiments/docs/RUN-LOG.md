@@ -1309,3 +1309,28 @@ C-R2-03 连 commit bounce 也未产出 config)。**足以解释 ship 密度低,�
 **"OURS: configurable reconstruction parameter; the paper does not specify one unique operational alpha"**
 ⇒ **alpha=0.5 是我方选定值,非论文规定**。它直接决定演化频率,
 应作为可调旋钮进入偏差表与 Ch7(现有偏差表未单列该参数)。
+
+### 🎯 停滞的统一解释:床上的可整改失败已榨干(Aug-02 09:0x,三次修订后的定稿)
+
+**证据三线合流**:
+
+1. **短路轮(R3/R5/R6)** 自述理由均为「模型能力极限 / 环境问题,harness 改不了」
+   (R3 a_t=0.0:"the only failure is a model capability limitation … cannot be fixed via harness edits")。
+2. **门拒轮(R4/R7)**:4 个候选进门评估,**全部 `improved=[]`——一个任务都没改善**
+   (C-R4-02 regressed=2、C-R4-04 regressed=**0** 亦被拒、C-R7-04 regressed=3、C-R7-02 regressed=2)。
+3. **Critic 的拒因与短路理由同源**:C-R7-01「regression … is due to **bot walls (external blocker)
+   not solvable by a processor mutation**」;C-R7-03「addresses a symptom … not the root cause」。
+
+⇒ **池在这张 50 题床上已收敛**:剩余失败大多不是 harness 可修的。
+
+**对三个方案的裁决(推翻本文件早前两版建议)**:
+- **降 alpha ❌**:R7 已证 a_t 可达 1.0 却仍产出零改善候选 ⇒ 降阈值只会多造无用候选。
+- **放松门 ❌**:门拒的是 `improved=[]` 的候选,放松即 ship 零改善变更,与 §4.1 反回退直接冲突。
+- **换更大/更难的床 ✅**:唯一触及根因者 —— 但**理由不是噪声地板**(M-29 的旧论据),
+  而是**需要更多「harness 可整改」的失败样本**。
+
+⚠️ **限度**:n=1 跑,7 个演化轮。「已收敛」是当前证据下最好的解释,不是已证定理。
+反证方式:全床续跑若立刻恢复 ship,即支持本解释;若仍零改善,则问题在 meta 模型而非床。
+
+**顺带的标签缺陷**:`C-R4-04` 为 `improved=[] regressed=[]`(纯空操作)却被标 `SEESAW_REGRESSION`
+⇒ 该标签把「无改善」与「有回退」混计。报告 seesaw 统计时须分列,否则会高估回退率。
