@@ -35,6 +35,46 @@ EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 PAT = re.compile(r"^R(\d+)-(V\d+)-(.+?)-([0-9a-f]{8}-[0-9a-f-]{27})")
 
 
+#: tracer/session lines differ per run by construction and say nothing about
+#: what the variant *does*, so they are stripped before hashing a config.
+_NOISE = re.compile(r"\s*(session_id|base_dir|export_jsonl|silent):")
+
+
+def _config_axis(run: str, round_dirs: list[str]) -> None:
+    """Report differentiation at the *configuration* level.
+
+    Prompt hash alone is not enough. AEGIS evolves processors and tools as well
+    as the template, so two variants can be genuinely different agents while
+    serving byte-identical system prompts -- and, as s1k8b103 showed, they can
+    also carry three distinct configs while two of them quietly serve no prompt
+    at all. Reading both axes together is what separates "differentiated" from
+    "differentiated, but the prompt half never arrived".
+    """
+    import hashlib
+
+    latest = None
+    for rnd in reversed(round_dirs):
+        if glob.glob(os.path.join(run, rnd, "active_pool", "*", "config.yaml")):
+            latest = rnd
+            break
+    if latest is None:
+        print("\nno active-pool config dumps yet")
+        return
+
+    groups: dict[str, list[str]] = collections.defaultdict(list)
+    for path in sorted(glob.glob(os.path.join(run, latest, "active_pool", "*", "config.yaml"))):
+        vid = os.path.basename(os.path.dirname(path))
+        with open(path, encoding="utf-8") as handle:
+            body = "\n".join(l for l in handle.read().splitlines() if not _NOISE.match(l))
+        groups[hashlib.sha256(body.encode()).hexdigest()[:12]].append(vid)
+
+    print(f"\nCONFIG AXIS, {latest} active pool")
+    for digest, vids in groups.items():
+        dup = "   <-- SAME AGENT" if len(vids) > 1 else ""
+        print(f"  {digest}  {', '.join(vids)}{dup}")
+    print(f"  distinct configs: {len(groups)} across {sum(len(v) for v in groups.values())} variants")
+
+
 def main() -> int:
     tag = sys.argv[1] if len(sys.argv) > 1 else "s2k8b50"
     run = os.path.join(RUNS, tag)
@@ -119,6 +159,8 @@ def main() -> int:
         else:
             verdict = "THIN: no differentiation yet -- expected only in the first rounds"
         print(f"verdict                   : {verdict}")
+
+    _config_axis(run, round_dirs)
 
     report = os.path.join(run, "pool_report.json")
     if os.path.exists(report):
