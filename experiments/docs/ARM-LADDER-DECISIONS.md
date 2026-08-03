@@ -81,7 +81,55 @@
 
 ---
 
-## 缺口三 · 单种子(已知,无解)
+## 缺口三 · 归因每轮被算出又被扔掉(**夜间新发现,我认为这条最有意思**)
+
+**事实**(实测,非推测)。LLM Digester **每轮都产出真实的组件级归因** ——
+`tools/Bash`、`processor/TokenBudgetProcessor`、`tools/WebFetch`、`model_capability` ——
+覆盖 e_pervar3 R1 的 30/103,s1k8b103 逐轮 20–80%。
+
+**但它不跨轮传递。** 交给下一轮的 `prior_history` 条目形如:
+
+```
+{round_idx, variant_id, outcome, solved, failure_category: null, ships}
+```
+
+`failure_category` 为 null,`implicated_components` **这个字段根本不在**。
+
+原因是两处,都很具体:
+1. **持久化的 digest 是确定性版本**(`failure_category = gaia_level_N`),
+   不是 LLM Digester 的富化版本
+2. `EvidenceStore.cross_round_history()` 构造条目时**没有把 `implicated_components` 放进去**
+
+**后果**。演化器看得到「这题**这一轮**栽在 Bash 上」,
+**永远看不到「它连续五轮都栽在 Bash 上」** —— 而后者才是定向演化需要的形式。
+
+论文 §4.3 p.10 自己说这段历史的用途是让 Planner
+*"distinguish persistent failures from transient noise"* ——
+**没有归因的历史做不到这件事。**
+
+**佐证**:e_pervar3 的 R1 短路于 `planner_empty_landscape`,
+Planner 自述理由正是「**没有前轮可比**」。
+
+### 可选臂 C:`E-attrib`(归因持久化)
+
+改动:把 LLM Digester 的 `failure_category` 与 `implicated_components`
+写进持久化 digest,并让 `cross_round_history` 带上它们。旗标化,默认关。
+
+**成本** 约 22h + 小改动。
+
+**它买到什么**:这是**唯一由我们自己的诊断推导出来、且论文文本明确要求其功能的修复**。
+论文说这段历史是为了区分持续失败与瞬时噪声;我们实测它做不到;我们修好并测效果。
+比"换个分簇维度"更贴近论文自身的机制主张。
+
+**风险**:它改的是演化循环的输入,是个新变量,不能和改造臂混在一条里。
+
+**我的倾向:优先级排在缺口一(K=1)之后、缺口二之前。**
+它便宜、有论文原文支撑、而且是今晚唯一一条**"信号被算出来又扔掉"**型的缺陷 ——
+修复成本远低于其它任何改进。
+
+---
+
+## 缺口四 · 单种子(已知,无解)
 
 论文规划 3 个种子,预算允许 1 个。**不建议为此加臂** ——
 噪声地板已直测(SD 4.57pp,n=103),且同一 H0 已在三次跑里测出 64.1 / 66.0 / 69.9,

@@ -1964,3 +1964,16 @@ manifest brief 注入的是 **Evolver** 的 brief(`manifest_instructions`),
 
 ⚠️ **M-38 尚未被真正检验**:验证它需要演化器**实际写出工具**,
 而本轮零候选。验证点顺延到首个产出工具类候选的轮次。
+
+### Monitor 误报一次(已修过滤器)
+
+03:44 收到 `ERROR` 告警,查为 `asyncio.base_events — Unclosed client session` ——
+aiohttp 的 teardown,asyncio 以 ERROR 级别记录。**该族在既有日志审计里已归类为良性**,
+且后续步骤正常继续。
+
+**问题在我的监控过滤器**:把任意 ERROR/CRITICAL 当致命,监控因此退出、留下无人看守的窗口。
+已重新布防,排除 `Unclosed (client session|connector|file|transport)` 族,
+并增加**轮次推进**事件(便于确认没有卡死)。
+
+教训与 `PREFLIGHT.md` E 节同源:**良性族必须显式列白名单**,
+否则"有告警"和"有问题"分不开 —— 这正是 Aug-02 全等级日志审计要解决的问题。
