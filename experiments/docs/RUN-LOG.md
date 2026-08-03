@@ -1939,3 +1939,28 @@ s2k8b50 把这一点暴露得很清楚:它 12 个候选零改善、原始漂移 
 
 **这也是一条可写进论文的机制发现**,而且比原说法强:
 它不是"缺少信号",而是"信号被算出来又被扔掉",修复成本很低(持久化即可)。
+
+### e_pervar3 R1:零候选,`planner_empty_landscape`
+
+```
+actionability      0.85     (阈值 0.5,远高于)
+short_circuit      planner_empty_landscape
+no_op              True
+considered_candidate_ids  []
+```
+
+Planner 自述:*"First round (R1) of V0 baseline. **No prior rounds to compare.**
+Dominant failure mode is budget exhaustion, impacting 11 tasks directly."*
+
+**与刚才的归因勘误直接咬合**:Planner 要跨轮比较,而归因不跨轮持久化;
+R1 更是连前轮都没有。
+
+**与 s1k8b103 的差异**(它 R1 出了 4 个候选)已排查:
+manifest brief 注入的是 **Evolver** 的 brief(`manifest_instructions`),
+而短路发生在**上游 Planner**,故 M-38 的改动**不可能**是原因。
+
+一个待验的机制:e_pervar3 的 R0 = **69.9%**,比 s1k8b103 的 64.1% 高 **5.8pp**
+⇒ 失败样本更少 ⇒ landscape 更薄。**n=1 轮,仅记录不作结论。**
+
+⚠️ **M-38 尚未被真正检验**:验证它需要演化器**实际写出工具**,
+而本轮零候选。验证点顺延到首个产出工具类候选的轮次。
