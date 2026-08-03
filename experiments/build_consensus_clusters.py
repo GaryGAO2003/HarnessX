@@ -68,15 +68,31 @@ def main() -> int:
         print(f"  pass{i+1} vs pass{j+1}: exact {st['exact']:.1%}  "
               f"jaccard {st['jaccard']:.3f}  rand {st['rand']:.3f}  (n={st['n']})")
 
-    tasks = sorted(set.intersection(*(set(t) for t in tables)))
+    # UNION, not intersection. A pass can drop a task to an infrastructure
+    # error -- v3 lost one to a server disconnect -- and intersecting would
+    # silently shrink the partition below the bench, which the router's
+    # fail-closed coverage check would then reject. Each task is instead judged
+    # against the passes that actually have it.
+    tasks = sorted(set().union(*(set(t) for t in tables)))
     votes = {t: collections.Counter() for t in tasks}
+    present = collections.Counter()
     for table in tables:
         for t in tasks:
-            votes[t].update(set(table[t].split("+")))
+            if t in table:
+                present[t] += 1
+                votes[t].update(set(table[t].split("+")))
+
+    partial = sorted(t for t in tasks if present[t] < len(tables))
+    if partial:
+        print(f"\n=== tasks missing from some pass: {len(partial)} ===")
+        for t in partial:
+            print(f"  {t[:8]}  present in {present[t]}/{len(tables)} passes")
 
     consensus, empties = {}, []
     for t in tasks:
-        kept = sorted(c for c, n in votes[t].items() if n >= args.min_votes)
+        # Never demand more votes than there are passes carrying the task.
+        needed = min(args.min_votes, present[t])
+        kept = sorted(c for c, n in votes[t].items() if n >= needed)
         if not kept:
             # Every capability was named by only one pass. Falling back to the
             # union keeps the task in the partition rather than dropping it,
@@ -107,6 +123,7 @@ def main() -> int:
                 hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in args.passes
             ],
             "min_votes": args.min_votes,
+        "passes_per_task": {t: present[t] for t in tasks if present[t] < len(tables)},
             "no_majority_tasks": empties,
             "clusters": consensus,
             # Plans come from the FIRST pass, so the arms replay a real

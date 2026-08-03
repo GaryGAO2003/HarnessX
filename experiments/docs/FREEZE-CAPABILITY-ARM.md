@@ -39,7 +39,7 @@ python -u -m recipe.gaia_evolver.run_variant_pool \
   --regression-accountability shipped_only \
   --regression-baseline per_variant \
   --cluster-source capability \
-  --cluster-map recipe/gaia_evolver/data/task_clusters.json \
+  --cluster-map recipe/gaia_evolver/data/task_clusters_consensus.json \
   --epsilon 0.05 \
   > recipe/gaia_evolver/runs/e_capability.console.log 2>&1
 ```
@@ -120,10 +120,16 @@ python -u -m recipe.gaia_evolver.run_variant_pool \
 2. **M-37 残留**。若 Evolver 仍写错 `file:` 拼写,自测路径的产物投递仍失败。
    收官须按 `PREFLIGHT.md` E1/E2 重新计数。
 3. **搜索环境**。一部分检索返回空,压低绝对分数、增加方差。两臂条件相同。
-4. **能力标签来自分解器**。标签只从题面算、解题前冻结、两臂共用同一文件(sha 记入 lock),
-   故不构成泄漏;但标签质量本身依赖分解器,该依赖须声明。
-5. **簇数 5 < K=8**。改造后有效池上限是 5 不是 8,**这是床的性质不是配置失误**,
-   报告时须写明,避免读者以为 K=8 全部可用。
+4. **🔴 分解器是有噪声的仪器 —— 必须报这个数**。同一批 103 题三次独立分解,
+   **逐题标签完全相同只有 42.7% / 44.1% / 46.1%**(Jaccard 0.77–0.78)。
+   故已改用**三遍逐类型多数票**的共识划分。留一验证(两遍共识互比)显示可重现度
+   升到 **63.1–66.0%**(Jaccard 0.84–0.87)——**改善实质,但仍只有约 64%**。
+   ⚠️ 实际使用的是三遍共识,应不低于此,但**未直接测过**,措辞须照实。
+   标签只从题面算、解题前冻结、两臂共用同一文件(sha 记入 lock),故不构成泄漏。
+5. **簇数 7 < K=8**。共识划分 min-size=8 合并后得 **7 簇**
+   `[34,17,16,10,9,9,8]`,故有效池上限是 7 不是 8。
+   **这是床的性质不是配置失误**,报告时须写明。
+   (对照:`gaia_level` 只有 3 簇;单遍划分合并后 5 簇。)
 
 ---
 
