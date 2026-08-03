@@ -940,3 +940,23 @@ B2 读信用表决定分工;表分不出能力,headline 就没有机制。
 **记录**。`decomp_manifest.json` 的 `decomp_credit`。
 
 **测试**。`tests/test_decomp_credit.py` 11 项,含两条把缺陷钉死的测试。全量 **1005 绿**。
+
+## 7.28 `file:` 目标拼写 brief(Aug-03,用户令「改完测试再跑」;1005→1018)
+
+**问题**(承 M-37)。Evolver 写 `file:///…` 三斜杠;vendored 加载器固定截断 7 字符,
+余下前导 `/` ⇒ `D:\D:\…` ⇒ 静默失败。我方 gate/active 路径已修复,
+**Evolver 自测路径未修复**,且**异常被吞、它看不见**。
+
+**升级的严重性**。同一 brief 要求工具候选提供 Level-2 往返证据;
+工具没注册 ⇒ 永远拿不到该观察 ⇒ **工具杠杆结构性失效**。
+
+**做法**。`_FILE_TARGET_SPELLING_BRIEF` 注入 repo 与 paper 两档 brief:
+`file://<绝对路径>::<符号>`,正好两斜杠,并说明其不可观察性。
+两份 brief 均为我方文本,非论文 App B.1 提示词。
+
+**验证**。①单元:复刻 vendored 截断,证明所教形式成立、所禁形式失败
+(**教错比不教更糟**,故必须验真);②live:同模型各 10 次,
+**无 brief 0/10 → 有 brief 10/10**。
+边界:探针未复现"原本会写错",那由实跑日志佐证。
+
+**测试**。`tests/test_file_target_brief.py` 13 项。全量 **1018 绿**。

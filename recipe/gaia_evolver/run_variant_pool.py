@@ -356,6 +356,41 @@ DECISION_CONTRACT_EMPHASIS = (
     "A missing `config.yaml` is not a valid outcome."
 )
 
+#: M-38. The Evolver writes ``file://`` targets for the tools and processors it
+#: authors, and the loader in ``harnessx/core`` strips a fixed seven characters
+#: (``len("file://")``). An RFC-style third slash therefore leaves a leading
+#: ``/`` on a Windows path, which resolves against the current drive and yields
+#: ``D:\D:\...`` — the target fails to open.
+#:
+#: Our own load path repairs this (``_resolve_tool_targets`` /
+#: ``_normalise_artefact_node``), so the gate and the active pool are unaffected.
+#: What is NOT repaired is the Evolver's *own* smoke test inside
+#: ``pipeline/candidates/``: that load goes through the vendored ``Harness``
+#: directly. And the failure is silent — ``harness.py`` catches the exception,
+#: logs a warning nowhere the meta-agent can see, and returns a registry without
+#: the tool. So the Evolver evaluates its candidate without the capability that
+#: candidate declares, and cannot know it.
+#:
+#: That interacts badly with the Level-2 requirement immediately above: a tool
+#: candidate must show its output survived serialisation into the next model
+#: message. A tool that never registered can never produce that observation, so
+#: the tool lever is close to unusable until the Evolver spells the target in the
+#: form the loader accepts. This brief is ours, not the paper's published prompt
+#: (that is ``PAPER_MANIFEST_SCHEMA_BRIEF``), and it already carries several
+#: runtime contracts learned from failed runs; this is one more.
+_FILE_TARGET_SPELLING_BRIEF = (
+    "FILE TARGET SPELLING (hard requirement): write every `file:` target — for "
+    "tools in `tool_registry.custom`, for processor `_target_`, and for any "
+    "`template_path` — as `file://<absolute path>::<symbol>`, with EXACTLY TWO "
+    "slashes after `file:`. Do not write the RFC three-slash form "
+    "`file:///C:/...`. The loader removes a fixed seven characters, so a third "
+    "slash leaves a leading `/` that resolves to a doubled drive letter and the "
+    "target silently fails to open: the tool will be ABSENT from your own smoke "
+    "test, with no error you can observe, and you will be judging your candidate "
+    "without the capability it declares — and unable to produce the Level-2 "
+    "evidence the gate demands for it. "
+)
+
 # --manifest-mode paper — inject the Table 9 (p.36) schema + the C-R10-02 worked
 # instance (report §3.3) so a repo-trained meta-agent writes manifest.yaml in
 # the paper shape instead of its journal vocabulary. Recipe-layer injection
@@ -401,7 +436,10 @@ PAPER_MANIFEST_SCHEMA_BRIEF = (
     "and `predicted_impact.tasks_will_unlock` must list tasks where that trigger "
     "fires — a registered-but-never-invoked tool cannot produce capability evidence "
     "and is rejected at the gate (runs/a1pilot2: two candidates died exactly this "
-    "way; the paper's C-R10-02 ships tools+prompt+config together)."
+    "way; the paper's C-R10-02 ships tools+prompt+config together). "
+    # M-38 applies to both manifest modes: it is a platform contract about how a
+    # path is spelled, not a claim about either schema.
+    + _FILE_TARGET_SPELLING_BRIEF
 )
 
 # --manifest-mode repo — the caller adapts the meta-agent's repo-native products
@@ -433,6 +471,7 @@ REPO_MANIFEST_SCHEMA_BRIEF = (
     "registered-but-never-invoked tool cannot produce capability evidence and is "
     "rejected at the gate (runs/a1pilot2: two candidates died exactly this way; the "
     "paper's C-R10-02 ships tools+prompt+config together). "
+    + _FILE_TARGET_SPELLING_BRIEF +
     "Never fabricate: only claim what you observed in this session."
 )
 
