@@ -19,7 +19,28 @@ CH4 的「按子任务分工」预设池里有专才。实测没有:修复后 K=
 |---|---|---|---|
 | **1** | **门的作用域** | `--regression-baseline` 默认 **`global`**;s1k8b103 命令行未传该旗标,lock 亦未记录(global 是字节等同默认) | §4.5 p.11 逐字:「the seesaw constraint is **scoped per-variant**: a candidate targeting variant k is **tested only against tasks routed to k**」 |
 | **2** | **cluster 函数** | 代码 `cluster_source = "gaia_level"` —— 按**难度** 1/2/3 分簇 | 论文只说 "that task's cluster",**未公布构造**(M-02)。难度 ≠ 能力:两道 L2 题可能一个查文献一个算流体 |
-| **3** | **诊断信号** | `failure_category` 分布 = {`gaia_level_2` 322, `gaia_level_3` 130, `gaia_level_1` 71, None 1125} —— **就是难度换名**;`implicated_components` **全跑为空(1,648 条,零)** | 循环需要能力级失败归因才能定向演化 |
+| **3** | **诊断信号** | ⚠️ **Aug-03 更正,见下方勘误** —— 归因**存在但不跨轮持久化** | 循环需要能力级失败归因才能定向演化 |
+
+> ### 勘误(Aug-03)· 原第 3 条的结论下错了对象
+>
+> 原文写「`implicated_components` 全跑为空(1,648 条,零)」。**测量本身没错,但它测的是持久化证据库,
+> 而结论被推广成了「系统拿不到归因信号」——那是错的。**实际是两套记录:
+>
+> | 记录 | `failure_category` | `implicated_components` |
+> |---|---|---|
+> | `task_history.jsonl`(持久化) | `gaia_level_1/2/3` —— 确是难度换名 | **1,648 条全空** |
+> | `pipeline_audit.json`(LLM Digester 本轮产出) | `budget_exceeded` / `tool_output_dropped` / `scope_ambiguity` 等**真类别** | **非空**:`tools/Bash`、`processor/TokenBudgetProcessor`、`tools/WebFetch`、`model_capability`、`environment` |
+>
+> 实测占比:e_pervar3 R1 = 30/103(29%);s1k8b103 逐轮 = 每轮 20–80%。
+>
+> **真正的缺陷更精确,也更有意思**:归因**每轮算一次、每轮丢一次**。
+> 交给下一轮的 `prior_history` 形如
+> `{round_idx, variant_id, outcome, solved, failure_category: null, ships}` ——
+> `failure_category` 为 null,`implicated_components` 这个字段根本不在。
+>
+> 于是演化器能看到「这道题**这一轮**栽在 Bash 工具上」,
+> 却**永远看不到「它连续五轮都栽在 Bash 上」**。
+> 定向演化需要的是后者。**引用本条时必须用这个表述,不得再说「没有归因信号」。**
 
 **原因 1 是反专业化约束**:专才的定义就是有得有失;global 作用域下,
 「擅长 A 但弱于 B」的候选必被门拒。**开关早已建好(M-23),但默认停在禁止专业化那一档。**

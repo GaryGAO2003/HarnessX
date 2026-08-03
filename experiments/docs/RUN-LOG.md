@@ -1906,3 +1906,36 @@ CH4 四臂须重放同一份计划。`build_task_clusters.py` 原只存 `{id, ty
 s2k8b50 把这一点暴露得很清楚:它 12 个候选零改善、原始漂移 0.0,
 去偏后读作 +11.0 —— 那是**过度修正在显形**,不是十一个点的增益。
 工具输出中已带 `debias_is_upper_bound` 标记。
+
+---
+
+## Aug-03 凌晨 · 勘误:「系统拿不到失败归因」是错的
+
+**触发**。e_pervar3 的 R1 候选管线跑完,读 `pipeline_audit.json` 时发现
+`implicated_components` **不为空**,与我此前"全跑 1,648 条为空"的说法冲突。
+
+**查清**:两套记录,我把测量对象和结论对错了号。
+
+| 记录 | `failure_category` | `implicated_components` |
+|---|---|---|
+| `task_history.jsonl`(持久化证据库) | `gaia_level_1/2/3` —— **确是难度换名** | **1,648 条全空** |
+| `pipeline_audit.json`(LLM Digester 本轮产出) | `budget_exceeded` / `tool_output_dropped` / `scope_ambiguity` **真类别** | **非空**:`tools/Bash`、`processor/TokenBudgetProcessor`、`tools/WebFetch`、`model_capability`、`environment` |
+
+实测:e_pervar3 R1 = **30/103(29%)**;s1k8b103 逐轮 **20–80%**。
+
+**原测量没错,错在把它推广成「系统拿不到归因信号」。**
+
+**真正的缺陷更精确**:归因**每轮算一次、每轮丢一次**。
+交给下一轮的 `prior_history` 形如
+`{round_idx, variant_id, outcome, solved, failure_category: null, ships}` ——
+`failure_category` 为 null,`implicated_components` 字段根本不存在。
+
+⇒ 演化器能看到「这题**这一轮**栽在 Bash 上」,
+**永远看不到「它连续五轮都栽在 Bash 上」**。定向演化要的是后者。
+
+**处置**:`DIFFERENTIATION-DESIGN.md` 第 3 条已加勘误框。
+**重写后的 CH3 不含该错误说法**(改写时已删),无需改章。
+今后引用一律用"归因不跨轮持久化",不得再说"没有归因信号"。
+
+**这也是一条可写进论文的机制发现**,而且比原说法强:
+它不是"缺少信号",而是"信号被算出来又被扔掉",修复成本很低(持久化即可)。
