@@ -32,7 +32,17 @@ import statistics
 from pathlib import Path
 
 RUNS = Path("recipe/gaia_evolver/runs")
-NOISE_SD_103 = 4.57  # directly measured, n=103
+#: Directly measured at n=103. The floor scales as 1/sqrt(n) -- measured again
+#: at n=50 giving 6.41pp against a predicted 4.57*sqrt(103/50)=6.56 -- so a run
+#: on a smaller bench must scale it up rather than inherit this number. Using the
+#: n=103 figure on a 30-task bench under-corrects the peak bias and overstates
+#: degradation, which is the direction that flatters a "we found decay" claim.
+NOISE_SD_103 = 4.57
+NOISE_REF_N = 103
+
+
+def noise_sd(n_tasks: int) -> float:
+    return NOISE_SD_103 * math.sqrt(NOISE_REF_N / max(1, n_tasks))
 
 
 # --- helpers --------------------------------------------------------------
@@ -142,6 +152,8 @@ def r2_load(states: list[dict]) -> dict:
 
 
 def r3_accuracy(states: list[dict]) -> dict:
+    n_tasks = max((sum(len(p) for p in _cells(st).values()) for st in states), default=0)
+    sd = noise_sd(n_tasks or NOISE_REF_N)
     curve, curve1 = [], []
     for st in states:
         c = _cells(st)
@@ -153,6 +165,8 @@ def r3_accuracy(states: list[dict]) -> dict:
     peak = max(real) if real else None
     final = real[-1] if real else None
     out = {
+        "bench_tasks": n_tasks,
+        "noise_sd_pp": round(sd, 2),
         "pass_at_2_curve": curve,
         "pass_at_1_curve": curve1,
         "r0": real[0] if real else None,
@@ -168,9 +182,17 @@ def r3_accuracy(states: list[dict]) -> dict:
         # normals, E[max] ~ sigma * Phi^-1((n - 0.375) / (n + 0.25)), which gives
         # ~1.77 SD at n=16 and matches the 1.8 SD quoted in the freeze packages.
         n = len(real)
-        bias = NOISE_SD_103 * _blom_expected_max(n) if n > 1 else 0.0
+        bias = sd * _blom_expected_max(n) if n > 1 else 0.0
         out["expected_max_of_n_bias_pp"] = round(bias, 1)
         out["drift_after_debias"] = round(final - peak + bias, 1)
+        # The correction assumes the peak is the maximum of n draws from a
+        # stationary distribution. Where a run genuinely improved, part of the
+        # peak is signal rather than a lucky draw and the full correction removes
+        # too much, so the de-biased figure is an UPPER BOUND on the true drift,
+        # not a point estimate. On s2k8b50 -- twelve gate-evaluated candidates,
+        # zero improvements, raw drift 0.0 -- it reads +11.0, which is the
+        # over-correction showing itself rather than an eleven-point gain.
+        out["debias_is_upper_bound"] = True
     return out
 
 
@@ -220,6 +242,7 @@ def r4_paired(a: list[dict], b: list[dict]) -> dict:
     n = b01 + b10
     stat = ((abs(b01 - b10) - 1) ** 2 / n) if n else 0.0
     diff = 100 * (sum(y[t] for t in shared) - sum(x[t] for t in shared)) / len(shared)
+    sd = noise_sd(len(shared))
     return {
         "paired_tasks": len(shared),
         "only_arm_b": b01,
@@ -227,8 +250,8 @@ def r4_paired(a: list[dict], b: list[dict]) -> dict:
         "mcnemar_chi2_cc": round(stat, 3),
         "significant_at_0_05": stat > 3.841,
         "aggregate_diff_pp": round(diff, 1),
-        "clears_2sd_floor": abs(diff) > 2 * NOISE_SD_103,
-        "noise_floor_2sd_pp": round(2 * NOISE_SD_103, 1),
+        "clears_2sd_floor": abs(diff) > 2 * sd,
+        "noise_floor_2sd_pp": round(2 * sd, 1),
     }
 
 
