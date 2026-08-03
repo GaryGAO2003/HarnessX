@@ -405,3 +405,33 @@ C-R2-04 config 第 56 行:
 **验证层级(四层,逐层加强)**:
 ①单元 13 项(验 brief 说真话)→ ②孤立探针 10/10 →
 ③实跑 processor 目标两斜杠 → ④**实跑工具目标两斜杠 + `__pycache__` 物证**。
+
+### 🔴 M-38 严重性更正(Aug-03 晨):停跑重发的理由**不成立**
+
+**我当时的论证**(用以升级 M-37 并停掉跑了 3h 的 e_pervar2):
+工具装不上 ⇒ 演化器永远拿不到 Level-2 往返证据 ⇒ **工具杠杆结构性失效**。
+
+**该论证是错的。M-22 早已解决这一点。**
+
+`--l2-cert auto`(默认档,本跑正在用)**从候选的【闸门评测轨迹】取证**,
+不从演化器自测取证:tools 桶取新工具在评测中的真实输出、过真序列化器判 stage 4;
+processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用,缺失不致命**。
+
+而**闸门评测走 `_prepare_round_config`** —— 路径在那里被修好。
+**工具在闸门路径上装得上、证据拿得到。**
+
+**实跑佐证**(e_pervar3 R2,Critic 对 C-R2-03 的裁定原文):
+> *"No Level-2 round-trip evidence declared for processor components, but in repo
+> manifest mode **the deterministic gate certifies this from real trajectories**
+> (deviation M-22); recorded as **strategy concern rather than rejection**"*
+
+**修正后的 M-38 严重性**:
+
+| | 原述 | 实际 |
+|---|---|---|
+| 后果 | 工具杠杆结构性失效 | **演化器自我评估失真**(= M-37 的原始表述) |
+| 覆盖面 | — | 约 **88%** 候选的自测路径(此项不变,已实测) |
+| 是否值得停跑 | 是 | **否** —— 我原本已判 M-37"不值得停跑",该判断才是对的 |
+
+**M-38 的修复本身仍然正确且已四层验证通过**;错的是升级它的论证。
+引用 M-38 时**不得再使用"工具杠杆结构性失效"这一表述**。

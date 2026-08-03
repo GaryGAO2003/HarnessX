@@ -2070,3 +2070,31 @@ e_pervar3  file://D:\…\C-R2-03\retry_01\tools\fetch_and_extract.py  两斜杠,
 因而具备产出 Level-2 往返证据的条件 —— 那是工具类候选过闸门的前提。
 
 投递警告全程仍为 **0**。
+
+---
+
+## Aug-03 晨 · 🔴 更正:e_pervar2 停跑重发的理由不成立
+
+**我当时说**:工具装不上 ⇒ 拿不到 Level-2 证据 ⇒ 工具杠杆结构性失效 ⇒ 值得停跑。
+
+**实际**:`--l2-cert auto`(M-22,默认档,本跑在用)**从闸门评测轨迹取证**,
+不从演化器自测取证;而闸门走 `_prepare_round_config`,路径已修。
+**工具在那条路上装得上、证据拿得到。** 演化器亲笔申报优先但缺失不致命。
+
+Critic 在 e_pervar3 R2 对 C-R2-03 的裁定逐字写着:
+*"in repo manifest mode the deterministic gate certifies this from real
+trajectories (deviation M-22); recorded as strategy concern rather than rejection"*。
+
+**结论**:M-38 的修复正确、四层验证通过、覆盖面约 88% 候选自测 —— 这些都不变。
+**错的是升级它的论证**;其真实后果就是 M-37 的原始表述(自我评估失真),
+而我原本判 M-37"不值得停跑",**那个判断才是对的**。3 小时赔在一个不成立的前提上。
+
+### 附带更正:C-R2-03 最终交付的是 processor 不是工具
+
+04:47 我核验时读到的 `retry_01/config.yaml` 确实声明了
+`tools\fetch_and_extract.py` 且 `__pycache__` 在场 —— **那次核验在当时为真**。
+但该 config 随后被改写,最终版只声明
+`processors\bash_encoding_fallback.py::BashEncodingFallback`。
+
+故准确表述:**演化器写工具时用了正确格式并被 import 过**(M-38 的形式验证成立),
+但该候选最终交付的是 processor。**不得据此说"工具候选通过了闸门"。**
