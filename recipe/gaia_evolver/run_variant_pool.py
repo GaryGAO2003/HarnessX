@@ -4097,6 +4097,7 @@ class VariantPoolRecipe:
         self.actionability_threshold = _resolve_actionability_threshold(
             getattr(args, "actionability_threshold", None), self.aegis_digester
         )
+        self.record_gate_complement = bool(getattr(args, "record_gate_complement", False))
         self.retarget_after_freeze = bool(getattr(args, "retarget_after_freeze", False))
         if self.retarget_after_freeze:
             # A preview freeze is only sound while ``freeze_routing`` consumes no
@@ -4288,6 +4289,11 @@ class VariantPoolRecipe:
             self._score_active_portfolio(result, round_idx, set(all_ids))
             if self.candidate_mode == "paper":
                 self._record_settled_active_outcomes(round_idx)
+                # After, never before: the complement is defined against what the
+                # child actually carried this round, and it writes (child, task)
+                # keys the settled pass never touches, so it stays outside that
+                # method's double-record guard.
+                self._record_gate_complement(result, round_idx)
             self._ingest_report(result, round_idx)
             self._dump_round(result, round_idx)
             results.append(result)
@@ -4301,6 +4307,51 @@ class VariantPoolRecipe:
 
         self._dump_final()
         return results
+
+    def _record_gate_complement(self, result: Any, round_idx: int) -> None:
+        """P5 -- fold the gate's *non-carried* measurements into the child's ledger.
+
+        Deciding a fork evaluates the candidate on the parent's whole ``T_k``, but
+        the child only inherits the tasks it improved, so only that slice reaches
+        its ledger. On s1k8b103 the gate measured 386 cells across 7 forks and 66
+        were kept: **320 real measurements discarded**, and the 66 that survive are
+        exactly the ones the candidate did well on. The child's archive is thus a
+        biased sample of its own evidence, which is what makes its next-round
+        cluster estimate optimistic -- 5 of 7 newborns overestimated, 3 by more
+        than +0.30, and all 7 took the whole cluster the round after being born.
+
+        Recording the complement rather than the whole ``T_k`` is what keeps this
+        from double-counting: the child's carried cells are already folded by
+        ``_record_settled_active_outcomes``, and those cells are byte-equal to the
+        gate's on the shared tasks with ``child_cells ⊆ gate_cells`` in 7 of 7
+        forks, so the two sets partition cleanly.
+
+        Note this is not new bookkeeping. ``engine.py:591-595`` already records the
+        candidate's full ``T_k`` to the child, with a comment naming this exact
+        failure mode ("recording only improved tasks gives a child an optimistic
+        prior"); it is switched off here because ``record_selected_results`` is
+        ``candidate_mode != "paper"`` (``:4212``). Turning that on wholesale would
+        also change APPLY recording at ``engine.py:569`` and would double-count the
+        carried slice, so the complement is written from the recipe instead.
+
+        Default off, so the ledger, every downstream estimate and the lock stay
+        byte-identical.
+        """
+        if not self.record_gate_complement:
+            return
+        target = self._paper_target_variant
+        forked = list(getattr(result, "forked", None) or [])
+        if not target or not forked:
+            return
+        gate_cells = (getattr(result, "per_variant_pass", None) or {}).get(target) or {}
+        for child_id in forked:
+            carried = set(self._active_round_pass.get(child_id, {}))
+            for task_id, outcome in sorted(gate_cells.items()):
+                if task_id in carried:
+                    continue
+                self.ledger.record(
+                    child_id, task_id, int(outcome[0]), int(outcome[1]), round_idx
+                )
 
     def _retarget_eligible(self, round_idx: int, all_ids) -> set[str]:
         """Eligible evolve targets, optionally re-derived from a preview freeze.
@@ -6268,6 +6319,24 @@ def _cluster_source_provenance(args: Any) -> "str | None":
     )
 
 
+def _record_gate_complement_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--record-gate-complement``; ``None`` when off."""
+    if not enabled:
+        return None
+    return (
+        "record_gate_complement=on ENABLED (OURS): a forked child inherits the gate's "
+        "measurements on the tasks it did NOT take, not only on the improved tasks it "
+        "carries away. Off, the gate measures the candidate on the parent's whole T_k "
+        "and only the improved slice survives into the child's ledger (386 cells "
+        "measured, 66 kept, 320 discarded across s1k8b103's 7 forks), so a newborn's "
+        "cluster estimate is built from a sample selected by the very measurement "
+        "being estimated. The paper does not say whether a scoped gate rollout may be "
+        "folded back (PAPER-METHODOLOGY-DEVIATIONS M-07), so both are OURS. This "
+        "changes newborn estimates and therefore routing, so it is not comparable "
+        "byte-for-byte with an 'off' run"
+    )
+
+
 def _retarget_after_freeze_provenance(enabled: bool) -> "str | None":
     """Byte-safe lock record for ``--retarget-after-freeze``; ``None`` when off."""
     if not enabled:
@@ -6454,6 +6523,7 @@ def _build_experiment_lock(
         _cluster_source_provenance(args),
         _epsilon_provenance(float(getattr(args, "epsilon", 0.0))),
         _retarget_after_freeze_provenance(bool(getattr(args, "retarget_after_freeze", False))),
+        _record_gate_complement_provenance(bool(getattr(args, "record_gate_complement", False))),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -6931,6 +7001,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(the ablation arm). Only affects llm-role modes and the always-LLM "
             "Evolver; the provenance string records ',prompts=<mode>' whenever any "
             "role is llm, and the audit dict records it unconditionally."
+        ),
+    )
+    parser.add_argument(
+        "--record-gate-complement",
+        action="store_true",
+        help=(
+            "Give a forked child the gate's measurements on the tasks it did not "
+            "take, alongside the improved ones it carries. Default off, which keeps "
+            "the ledger and the lock byte-identical. Off, deciding a fork measures "
+            "the candidate across the parent's whole T_k but only the improved slice "
+            "reaches the child -- 386 cells measured and 66 kept across s1k8b103's 7 "
+            "forks, so a newborn's cluster estimate is built from a sample chosen by "
+            "the same measurement it is estimating, and 5 of 7 newborns came in "
+            "optimistic. Only the complement is written; the carried slice is already "
+            "recorded, so nothing is counted twice."
         ),
     )
     parser.add_argument(
