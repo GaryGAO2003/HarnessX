@@ -4097,6 +4097,25 @@ class VariantPoolRecipe:
         self.actionability_threshold = _resolve_actionability_threshold(
             getattr(args, "actionability_threshold", None), self.aegis_digester
         )
+        self.retarget_after_freeze = bool(getattr(args, "retarget_after_freeze", False))
+        if self.retarget_after_freeze:
+            # A preview freeze is only sound while ``freeze_routing`` consumes no
+            # RNG. Two paths in ``Router`` draw: epsilon-greedy exploration
+            # (router.py:296, unreachable at epsilon<=0 thanks to the early return
+            # at :291) and the random tie-break (:348). Under either, the preview
+            # would advance the generator and the *real* freeze would then return
+            # a different partition than it does today -- the flag would silently
+            # change routing rather than only change which variant is targeted.
+            epsilon = float(getattr(args, "epsilon", 0.0) or 0.0)
+            tie_break = str(getattr(args, "tie_break", "fewest_attempts"))
+            if epsilon > 0.0 or tie_break == "random":
+                raise ValueError(
+                    "--retarget-after-freeze needs a deterministic router: it previews "
+                    "the freeze before picking a target, and a preview that draws from "
+                    "the RNG would change the real freeze. Got "
+                    f"epsilon={epsilon}, tie_break={tie_break!r}. Use epsilon=0 with a "
+                    "deterministic tie-break, or drop the flag."
+                )
         self.target_strategy = str(
             getattr(
                 args,
@@ -4262,7 +4281,7 @@ class VariantPoolRecipe:
                         self.ledger,
                         strategy=self.target_strategy,
                         round_idx=round_idx,
-                        eligible=self._variants_with_settled_trajectories(),
+                        eligible=self._retarget_eligible(round_idx, all_ids),
                     )
                 result = self.engine.run_round(round_idx, set(all_ids))
                 self._reconcile(result)
@@ -4282,6 +4301,42 @@ class VariantPoolRecipe:
 
         self._dump_final()
         return results
+
+    def _retarget_eligible(self, round_idx: int, all_ids) -> set[str]:
+        """Eligible evolve targets, optionally re-derived from a preview freeze.
+
+        The target is picked here, in the recipe, *before* ``engine.run_round``
+        freezes this round's routing (``engine.py:297``). Eligibility therefore
+        reads ``variant.routed_tasks``, which still holds the **previous** round's
+        partition. When the freeze then reassigns that variant's cluster to a
+        stronger sibling, the target enters the round carrying nothing, the engine
+        skips it as an empty cluster (``engine.py:316-319``), and the round yields
+        no candidate at all. That is 6 of 15 rounds on s1k8b103.
+
+        With ``--retarget-after-freeze`` we run ``freeze_routing`` once as a
+        preview and keep only variants that will actually carry tasks. The preview
+        is exact rather than an estimate: at ``epsilon=0`` with a deterministic
+        tie-break the call reads the ledger and pool without mutating either and
+        draws no RNG, so it returns precisely the partition the real freeze will
+        return moments later (the constructor rejects the configurations where
+        that stops holding). ``freeze_routing``'s own leak check is a ledger read,
+        so running it twice is not a second write.
+
+        Default off: the flag returns the unchanged eligible set, so routing,
+        targets and the lock all stay byte-identical, and a resume of a run
+        started before this flag existed still matches.
+        """
+        settled = self._variants_with_settled_trajectories()
+        if not self.retarget_after_freeze:
+            return settled
+        preview = self.engine.router.freeze_routing(
+            set(all_ids), self.pool, self.ledger, round_idx
+        )
+        carrying = set(preview.values())
+        # Falling back to ``settled`` keeps the old behaviour in the corner where
+        # no settled variant carries anything, rather than handing the selector an
+        # empty set and turning a recoverable round into a hard failure.
+        return {vid for vid in settled if vid in carrying} or settled
 
     def _variants_with_settled_trajectories(self) -> set[str]:
         """Variant ids eligible to be this round's evolve target.
@@ -6213,6 +6268,23 @@ def _cluster_source_provenance(args: Any) -> "str | None":
     )
 
 
+def _retarget_after_freeze_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--retarget-after-freeze``; ``None`` when off."""
+    if not enabled:
+        return None
+    return (
+        "retarget_after_freeze=on ENABLED (OURS): the evolve target is picked from a "
+        "preview of this round's routing freeze instead of from the previous round's "
+        "partition, so a variant whose cluster is about to be reassigned can no longer "
+        "be selected and then enter the round carrying nothing. The paper does not "
+        "define target selection at all (PAPER-METHODOLOGY-DEVIATIONS M-16), so both "
+        "the old and new orderings are OURS; this one removes the zero-candidate rounds "
+        "the old one produced (6 of 15 on s1k8b103). It changes which variant is "
+        "evolved on rounds where the freeze moves a cluster, so it is not comparable "
+        "byte-for-byte with an 'off' run"
+    )
+
+
 def _epsilon_provenance(epsilon: float) -> "str | None":
     """Byte-safe lock record for ``--epsilon``; ``None`` at the 0.0 default."""
     if epsilon <= 0.0:
@@ -6381,6 +6453,7 @@ def _build_experiment_lock(
         ),
         _cluster_source_provenance(args),
         _epsilon_provenance(float(getattr(args, "epsilon", 0.0))),
+        _retarget_after_freeze_provenance(bool(getattr(args, "retarget_after_freeze", False))),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -6858,6 +6931,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(the ablation arm). Only affects llm-role modes and the always-LLM "
             "Evolver; the provenance string records ',prompts=<mode>' whenever any "
             "role is llm, and the audit dict records it unconditionally."
+        ),
+    )
+    parser.add_argument(
+        "--retarget-after-freeze",
+        action="store_true",
+        help=(
+            "Pick the evolve target from a preview of this round's routing freeze "
+            "instead of from last round's partition. Default off, which keeps the "
+            "lock and every routing decision byte-identical. Off, the target is "
+            "chosen in the recipe before the engine freezes routing, so a variant "
+            "can be selected on last round's tasks, lose its cluster to a stronger "
+            "sibling at freeze time, and then be skipped as an empty cluster -- 6 of "
+            "15 rounds produced no candidate that way on s1k8b103. On, freeze_routing "
+            "runs once as a read-only preview and only variants that will actually "
+            "carry tasks stay eligible. Requires a deterministic router (epsilon=0 and "
+            "a non-random tie-break); otherwise the preview would draw from the RNG "
+            "and change the real freeze, and startup fails loudly instead. The paper "
+            "does not define target selection (M-16), so both orderings are OURS."
         ),
     )
     parser.add_argument(
