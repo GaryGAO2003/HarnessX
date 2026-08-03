@@ -30,7 +30,7 @@
 工具没注册就永远拿不到那个观察 ⇒ **论文四个演化杠杆里的"工具"杠杆近乎结构性失效**,
 而论文自己 GAIA 上最大的单项改进恰是一次工具编辑。
 
-**验证三层**:①单元 13 项(核心是**验 brief 说的是真话** —— 教错格式比不教更糟);
+**验证四层**:①单元 13 项(核心是**验 brief 说的是真话** —— 教错格式比不教更糟);
 ②孤立探针同模型各 10 次:**无 brief 0/10 → 有 brief 10/10**;
 ③**实跑验证(04:4x,e_pervar3 R2)** —— 首个写出产物的候选 `C-R2-04` 写了个 processor:
 
@@ -43,8 +43,8 @@ _target_: file://D:\…\processors\search_budget_guard.py::SearchBudgetGuardProc
 与作废跑失败的**同一目录形状**逐位对照:
 
 ```
-e_pervar2  file:///D:\…\C-R1-02etry_01	ools\pdf_text_tool.py    三斜杠,加载失败
-e_pervar3  file://D:\…\C-R2-03etry_01	oolsetch_and_extract.py  两斜杠,已 import
+e_pervar2  file:///D:\…\C-R1-02\retry_01\tools\pdf_text_tool.py     三斜杠,加载失败
+e_pervar3  file://D:\…\C-R2-03\retry_01\tools\fetch_and_extract.py  两斜杠,已 import
 ```
 
 **`tools/__pycache__` 存在** —— Python 只在模块**真被 import** 时生成。
