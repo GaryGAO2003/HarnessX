@@ -104,10 +104,25 @@ async def main() -> int:
             if not types:
                 raise ValueError("plan carried no subtask types")
             clusters[tid] = "+".join(types)
+            # Store the FULL record, not just id+type. The partition needs only
+            # the type set, but the same plans are replayed by the CH4 arms via
+            # --decomp-source file:, and a plan stripped of its instruction and
+            # dep edges cannot be replayed. Deriving both from one pass is what
+            # lets those arms run the very plans the partition was built from
+            # rather than a second, differently-sampled set.
             plans[tid] = [
                 {
                     "id": str(getattr(s, "id", None) or s["id"]),
                     "type": str(getattr(s, "type", None) or s["type"]),
+                    "instruction": str(
+                        getattr(s, "instruction", None)
+                        or (s.get("instruction", "") if isinstance(s, dict) else "")
+                    ),
+                    "dep": list(
+                        getattr(s, "dep", None)
+                        or (s.get("dep", []) if isinstance(s, dict) else [])
+                        or []
+                    ),
                 }
                 for s in subtasks
             ]
