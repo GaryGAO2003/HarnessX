@@ -9,7 +9,7 @@
 
 | 跑 | 状态 |
 |---|---|
-| **e_pervar3** | 🟢 03:44 起跑,进行中。参数与 s1k8b103 全字段 diff **残余差异为空**,唯一变量 `regression_baseline=per_variant` |
+| **e_pervar3** | 🟢 02:41 起跑,进行中。参数与 s1k8b103 全字段 diff **残余差异为空**,唯一变量 `regression_baseline=per_variant` |
 | ~~e_pervar~~ | ❌ 作废:漏传 `--candidates-per-round 4` |
 | ~~e_pervar2~~ | ❌ 作废:M-38 修复前发的车 |
 
