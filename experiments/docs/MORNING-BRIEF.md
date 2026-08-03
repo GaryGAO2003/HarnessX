@@ -39,7 +39,18 @@ _target_: file://D:\…\processors\search_budget_guard.py::SearchBudgetGuardProc
                 ^^ 两斜杠 | 三斜杠 0 次 | 运行期解析成功、文件存在
 ```
 
-**brief 在真实演化循环中被遵守。**
+④**工具路径终验(04:47)** —— `C-R2-03/retry_01` 写了工具,
+与作废跑失败的**同一目录形状**逐位对照:
+
+```
+e_pervar2  file:///D:\…\C-R1-02etry_01	ools\pdf_text_tool.py    三斜杠,加载失败
+e_pervar3  file://D:\…\C-R2-03etry_01	oolsetch_and_extract.py  两斜杠,已 import
+```
+
+**`tools/__pycache__` 存在** —— Python 只在模块**真被 import** 时生成。
+这是"工具确实被自测加载"的**物证**,不是"路径看起来对"。
+
+⇒ **M-37 的失效通道已闭合**,演化器现在具备产出闸门要求的 Level-2 证据的条件。
 
 ⚠️ **影响面我此前说窄了。** 原表述是"工具杠杆结构性失效",实测历史:
 
