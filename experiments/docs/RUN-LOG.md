@@ -2052,3 +2052,21 @@ _target_: file://D:\…\C-R2-04\processors\search_budget_guard.py::SearchBudgetG
 我此前把它表述为"工具杠杆结构性失效" —— **说窄了**。
 正确表述:**M-38 之前约 88% 的候选,其产物目标在自身自测中静默加载失败**;
 工具只是最小的那个子集。偏差登记已补记。
+
+### M-38 终验:工具路径,`__pycache__` 物证
+
+`C-R2-03/retry_01` 写了工具 `tools/fetch_and_extract.py`,目标为
+`file://D:\…::fetch_and_extract`(**两斜杠**)。运行期解析:文件存在 True,
+且 `tools/__pycache__` **存在** —— Python 只在模块真被 import 时生成。
+
+**与作废跑的同形状失败逐位对照**:
+
+```
+e_pervar2  file:///D:\…\C-R1-02\retry_01\tools\pdf_text_tool.py   三斜杠,加载失败
+e_pervar3  file://D:\…\C-R2-03\retry_01\tools\fetch_and_extract.py  两斜杠,已 import
+```
+
+**M-37 的失效通道已闭合。** 演化器现在能在自测中真正装载自己写的工具,
+因而具备产出 Level-2 往返证据的条件 —— 那是工具类候选过闸门的前提。
+
+投递警告全程仍为 **0**。
