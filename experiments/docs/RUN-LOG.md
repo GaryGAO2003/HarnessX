@@ -2098,3 +2098,35 @@ trajectories (deviation M-22); recorded as strategy concern rather than rejectio
 
 故准确表述:**演化器写工具时用了正确格式并被 import 过**(M-38 的形式验证成立),
 但该候选最终交付的是 processor。**不得据此说"工具候选通过了闸门"。**
+
+---
+
+## Aug-03 07:0x · e_pervar3 被外部杀死 → 恢复(含 M-40 补救)
+
+**06:56:55 运行被外部杀掉** —— 日志在 rollout 中途戛然而止,**无异常、无 traceback**,
+进程消失。存活 4h15m。非崩溃。
+
+**状态**:rollout 826,R0/R1/R2 已结算,死于 R3 中途。
+
+**06:58 首次 resume**:`continuing from R3 (3 settled rounds, 2 variants)`,
+R0/R1/R2 完好、未被覆盖。**但带一条警告**:
+
+```
+[resume] variant V1: no active-pool config snapshot found on disk;
+         config path points at the (missing) canonical snapshot
+```
+
+**查实 = M-40**(resume 通用缺口,非本次损坏):V1 在 R2 结算末尾 fork,
+其快照要到下一轮首次测量才写;resume 只扫 `<= 末结算轮`,故找不到,
+返回一个**不存在的路径**并**仅警告不阻断**。V1 持 **14 题**,R3 必测它 ⇒ 必崩。
+
+**处置**:停车 → 把来源候选 `C-R2-01` 的**原始** config(sha `a914cec4…`,
+两次尝试逐位相同)补写为 `R2/active_pool/V1/config.yaml`,留 `RESTORED.md` 说明 →
+再 resume。**补的是指针不是测量值**;刻意不用 `candidate_gate` 那份(那是预处理后的)。
+
+**未改代码**:纪律是运行期间冻结 runner 代码,否则 auto-resume 会造成同跑版本漂移。
+代码修复推迟到本跑结束。
+
+**验证**:07:03:41 的 resume **不再出现 V1 警告**,进程存活,R3-V0 续跑,rollout 874。
+
+⚠️ **被杀原因不明**,日志无线索。若再次在相近时长后死亡,则存在系统性原因,需另查。

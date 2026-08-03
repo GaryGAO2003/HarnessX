@@ -435,3 +435,22 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 
 **M-38 的修复本身仍然正确且已四层验证通过**;错的是升级它的论证。
 引用 M-38 时**不得再使用"工具杠杆结构性失效"这一表述**。
+
+## M-40 resume 在「刚 fork 的变体」上丢失配置指针(Aug-03 新增,**未改代码,已数据补救**)
+
+> **这不是本次被杀造成的损坏,是 resume 路径的通用缺口** ——
+> **任何在 fork 之后立刻 resume 都会命中**。
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | **不适用**(复现基建) |
+| 现象 | 变体在某轮**结算末尾** fork 诞生,其 `active_pool/<vid>/config.yaml` 快照要到**下一轮首次测量**才写出。`resume._latest_snapshot_round` 只扫描 `<= 末结算轮`,因而找不到 |
+| 处置缺陷 | `resume.py:726` 返回一个**指向不存在文件**的路径,provenance 标 `unresolved_missing_snapshot`,**仅警告不阻断**。运行随后在测量该变体时读该文件而崩 |
+| 实例 | e_pervar3:V1 于 R2 结算末尾 fork(持 **14 题**),运行在 R3 中途被外部杀死。resume 警告 `variant V1: no active-pool config snapshot found on disk` 后继续,若不干预将在 R3 测 V1 时崩溃 |
+| 我方处置(**数据补救,非代码修改**) | 将 V1 的来源候选 `C-R2-01` 的**原始** config 复制到 `R2/active_pool/V1/config.yaml`,并在同目录留 `RESTORED.md` 说明来历 |
+| 为何该补救不是伪造 | fork 时 `child.config_path = Path(candidate.config_path)`,**候选的配置就是 V1 的配置**;且该候选两次尝试(`output_dir` / `retry_01`)**逐位相同**(sha `a914cec4…`),无歧义。补的是**指针**不是**测量值** |
+| 刻意不用哪一份 | **不用** `candidate_gate/C-R2-01/config.yaml`(sha `b6fa9fe3…`)——那是 `_prepare_round_config` **预处理后**的配置,写回去等于让预处理跑两遍 |
+| 为何不改代码 | 本项目纪律:**运行期间冻结 runner 代码**,否则 auto-resume 会把新代码载入一个 lock 记录着旧 SHA 的跑(同跑版本漂移)。故代码修复推迟到本跑结束 |
+| 验证 | 补写后再次 resume,`[resume] continuing … from R3` **不再出现 V1 警告**,配置解析干净 |
+| 待办(代码层) | `resume.py` 应在无快照时,从 `pool_state.selected_candidate_ids` + `forked` 反解该变体的来源候选配置路径,而非返回一个已知不存在的路径。**当前实现"警告后带着坏指针继续"是最差的一种**——既不 fail-closed 也不自愈 |
+| 裁决层 | 夜间自主处置(Aug-03);运行已恢复 |
