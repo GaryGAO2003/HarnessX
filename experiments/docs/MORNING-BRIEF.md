@@ -199,7 +199,7 @@ actionability 0.85(阈值 0.5) | short_circuit: planner_empty_landscape | 候选
 Planner 自述「**没有前轮可比**」—— **和发现 ① 直接咬合**。
 
 已排除是我改动造成的(M-38 的 brief 注入的是 Evolver,短路在上游 Planner)。
-一个待验机制:本跑 R0 = **69.9%**,比 s1k8b103 的 64.1% 高 5.8pp ⇒ 失败样本更少 ⇒ landscape 更薄。
+一个待验机制:本跑 R0 = **70.9%**,比 s1k8b103 的 64.1% 高 6.8pp ⇒ 失败样本更少 ⇒ landscape 更薄。
 
 ~~M-38 至今未被真正检验~~ → **R2 已验证通过**,见 §2 M-38 第三层验证。
 
