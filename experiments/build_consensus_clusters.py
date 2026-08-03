@@ -106,6 +106,26 @@ def main() -> int:
         st = _agreement(consensus, table)
         print(f"  consensus vs pass{i+1}: exact {st['exact']:.1%}  jaccard {st['jaccard']:.3f}")
 
+    # Pick the plan source: the first pass whose subtask records carry
+    # everything a replay needs. Falling back silently to an incomplete pass
+    # would produce a plan file that export_frozen_plans.py then rejects, or
+    # worse, one that replays with empty instructions.
+    required = {"id", "type", "instruction", "dep"}
+    plan_source = None
+    for path, payload in zip(args.passes, payloads):
+        plans = payload.get("plans") or {}
+        if plans and all(
+            required <= set(s) for subs in plans.values() for s in subs
+        ):
+            plan_source = (str(path), plans)
+            break
+    if plan_source is None:
+        raise SystemExit(
+            "no pass carries replayable plans (need id/type/instruction/dep on "
+            "every subtask); re-run build_task_clusters.py with full-record export"
+        )
+    print(f"\nplans taken from: {plan_source[0]} ({len(plan_source[1])} tasks)")
+
     sizes = collections.Counter(consensus.values())
     print(f"\n=== consensus partition ===\nclusters: {len(sizes)}")
     for k, n in sizes.most_common():
@@ -126,11 +146,14 @@ def main() -> int:
         "passes_per_task": {t: present[t] for t in tasks if present[t] < len(tables)},
             "no_majority_tasks": empties,
             "clusters": consensus,
-            # Plans come from the FIRST pass, so the arms replay a real
-            # decomposition rather than a synthesised consensus that no
-            # decomposer ever produced.
-            "plans": payloads[0].get("plans", {}),
-            "plans_from": str(args.passes[0]),
+            # Plans come from ONE pass, never from the consensus: the consensus
+            # is a per-capability vote and no decomposer ever produced it as a
+            # plan, so replaying it would replay something that was never run.
+            # It must be the first pass whose records are complete -- the
+            # earliest pass stored only id+type, which is enough to derive the
+            # partition but cannot be replayed.
+            "plans": plan_source[1],
+            "plans_from": plan_source[0],
         },
         indent=2, ensure_ascii=False, sort_keys=True,
     )

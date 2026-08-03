@@ -43,7 +43,7 @@ COMMON="--provider-id deepseek --decomp-eval \
     --decomp-concurrency 8 --run-tag ch4_a1
 
 # 三条 B 臂共用(注意 --decomp-credit 也在这里,见下)
-BCOMMON="--decomp-source file:<冻结计划> --decomp-budget shared \
+BCOMMON="--decomp-source file:recipe/gaia_evolver/data/frozen_plans.json --decomp-budget shared \
          --decomp-credit subtask_convergence"
 
 # B0 — 拆开,不分工,等预算
@@ -63,9 +63,21 @@ B0/B1 的路由不读账本,故该旗标对它们**无行为影响**,只是让 m
 
 **成本**:A1/B0/B1 各约 41 分(并发 8),B2 约 6h(强制串行)。合计约 **8h**。
 
-**冻结计划**:四条臂必须重放**同一份**计划文件,否则臂间差异混入"计划不同"。
-`task_clusters.json` 里已含 103 题的计划(`plans` 字段),导出为 oracle 格式即可,
-**不要各臂现场生成**。
+**冻结计划**(已产出,四臂必须共用):
+
+```
+recipe/gaia_evolver/data/frozen_plans.json
+  sha256 60abc1dc1b8adef4afcdb16cddbf5431b12ac28a35c8f4d360ce1459eb085fb4
+  103 题,子任务数 1–9(均 4.25)
+  已验证 FileDecomposer 可重放 103/103
+```
+
+计划取自**第二遍分解**(第一遍只存了 id+type,不可重放);
+**不是取自共识** —— 共识是逐类型投票的产物,没有任何分解器真的产出过它,
+重放它等于重放一个从未跑过的东西。
+
+配套划分:`task_clusters_consensus.json`,sha256 `ae3fec2f…`,
+三遍多数票,合并后 **7 簇** `[34,17,16,10,9,9,8]`。
 
 ---
 
