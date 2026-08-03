@@ -117,7 +117,8 @@ Planner 自述「**没有前轮可比**」—— **和发现 ① 直接咬合**�
 | `PREFLIGHT.md` | 发车前检查清单,**每条对应一次真实事故** |
 | `FREEZE-CAPABILITY-ARM.md` | 改造臂冻结包 |
 | `FREEZE-CH4-ARMS.md` | CH4 四臂冻结包,主读数 `B2 − B1` |
-| `ARM-LADDER-DECISIONS.md` | **待你拍板的两条可选臂** |
+| `ARM-LADDER-DECISIONS.md` | **待你拍板的三条可选臂** |
+| `build_consensus_clusters.py` | 多次分解取逐类型多数票,修划分不稳(见 §2.5 ②) |
 | `compare_arms.py` | 按冻结包规则读出四类读数,**写在结果之前** |
 | `export_frozen_plans.py` | 导出四臂共用的重放计划 |
 
@@ -176,7 +177,7 @@ E-capability          22h  ← 已定
 [E-capability-noeps]  22h  ← 待拍板(优先级 3)
 CH4 四臂               8h
 ──────────────────────────
-全上约 102h ≈ 4.3 天,距 9/5 有 33 天
+全上约 124h ≈ 5.2 天,距 9/5 有 33 天
 ```
 
 **机时不是瓶颈。**
