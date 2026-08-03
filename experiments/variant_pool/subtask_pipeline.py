@@ -46,6 +46,26 @@ logger = logging.getLogger(__name__)
 SUBTASK_TYPES: frozenset[str] = frozenset({"search", "browse", "compute", "verify"})
 ROUTING_MODES: tuple[str, ...] = ("single", "round_robin", "ledger")
 
+#: ``--decomp-budget``. How the step budget is spread over a decomposed attempt.
+#:
+#: ``per_subtask`` (default) gives EACH subtask the full cap, so a decomposed
+#: attempt spends roughly ``n_subtasks x cap`` steps against an undivided
+#: attempt's ``cap`` -- measured at 2.2x on the smoke bench. Any positive result
+#: under that arrangement is answerable with "you spent twice the compute", and
+#: any null one is uninterpretable.
+#:
+#: ``shared`` gives the CHAIN the cap and divides it: each subtask gets
+#: ``max(1, cap // n_subtasks)``. A decomposed attempt then costs no more than an
+#: undivided one, so ``A1 - B0`` is an equal-budget contrast by construction
+#: rather than by post-hoc normalisation.
+#:
+#: A fixed per-subtask number cannot substitute for this. Over the frozen 103-task
+#: plans the subtask count runs 1..12 (mean 4.38, median 4), so a cap of 4 still
+#: lets 25% of tasks exceed the undivided budget and a cap of 5 lets 41% -- the
+#: division has to be per-task because the plan length is.
+BUDGET_MODES: tuple[str, ...] = ("per_subtask", "shared")
+DEFAULT_BUDGET_MODE = "per_subtask"
+
 #: ``--decomp-credit``. What a ``(variant x type)`` observation is scored on.
 #:
 #: ``task`` (default) books the WHOLE task's pass/fail against every distinct
@@ -656,12 +676,16 @@ class PipelineExecutor:
         synthesizer: Synthesizer,
         credit_ledger: TypeCreditLedger | None = None,
         credit_mode: str = CREDIT_TASK,
+        budget_mode: str = DEFAULT_BUDGET_MODE,
         verify_gate: VerifyGate | None = None,
         subtask_max_steps: int,
     ) -> None:
         if credit_mode not in CREDIT_MODES:
             raise ValueError(f"credit_mode must be one of {CREDIT_MODES}, got {credit_mode!r}")
+        if budget_mode not in BUDGET_MODES:
+            raise ValueError(f"budget_mode must be one of {BUDGET_MODES}, got {budget_mode!r}")
         self.credit_mode = credit_mode
+        self.budget_mode = budget_mode
         self.runner = runner
         self.scorer = scorer
         self.decomposer = decomposer
@@ -739,6 +763,16 @@ class PipelineExecutor:
                 reason=_fallback_reason(exc),
             )
 
+        # The per-subtask cap can only be derived once the plan length is known,
+        # which is why 'shared' cannot be expressed as a fixed --decomp-subtask-
+        # max-steps: plans on this bench run 1..12 subtasks. Floor division with a
+        # floor of 1 means the chain never exceeds the undivided budget, and a
+        # 12-subtask plan still gets one step each rather than zero.
+        step_cap = self.subtask_max_steps
+        if self.budget_mode == "shared":
+            n_sub = max(1, len(list(plan.ordered())))
+            step_cap = max(1, self.subtask_max_steps // n_sub)
+
         outputs: dict[str, str] = {}
         records: list[SubtaskRecord] = []
         used: list[tuple[str, str]] = []
@@ -756,7 +790,7 @@ class PipelineExecutor:
             res = await self.runner(
                 instruction=prompt,
                 variant_id=variant,
-                max_steps=self.subtask_max_steps,
+                max_steps=step_cap,
                 subtask_id=spec.id,
                 subtask_type=spec.type,
             )
@@ -767,7 +801,7 @@ class PipelineExecutor:
                     res = await self.runner(
                         instruction=prompt,
                         variant_id=variant,
-                        max_steps=self.subtask_max_steps,
+                        max_steps=step_cap,
                         subtask_id=spec.id,
                         subtask_type=spec.type,
                     )
@@ -811,7 +845,7 @@ class PipelineExecutor:
                 for rec in records:
                     self.credit_ledger.record(
                         pairs=[(rec.variant_id, rec.type)],
-                        passed=rec.steps < self.subtask_max_steps,
+                        passed=rec.steps < step_cap,
                     )
 
         return AttemptResult(

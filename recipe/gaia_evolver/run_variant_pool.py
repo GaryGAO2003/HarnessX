@@ -7035,6 +7035,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--decomp-budget",
+        choices=("per_subtask", "shared"),
+        default="per_subtask",
+        help=(
+            "How the step budget is spread over a decomposed attempt (M-39). "
+            "'per_subtask' (default, byte-identical) gives EACH subtask the full "
+            "cap, so a decomposed attempt spends ~n_subtasks x cap against an "
+            "undivided attempt's cap -- measured at 2.2x, which makes any "
+            "positive result answerable with 'you spent twice the compute'. "
+            "'shared' gives the CHAIN the cap and divides it per task: each "
+            "subtask gets max(1, cap // n_subtasks), so A1 - B0 is an "
+            "equal-budget contrast by construction. A fixed "
+            "--decomp-subtask-max-steps cannot substitute: plans on this bench "
+            "run 1..12 subtasks, so a flat cap of 4 still lets 25%% of tasks "
+            "exceed the undivided budget."
+        ),
+    )
+    parser.add_argument(
         "--decomp-credit",
         choices=("task", "subtask_convergence"),
         default="task",
@@ -7283,6 +7301,7 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
     min_obs = int(getattr(args, "decomp_ledger_min_obs", 3))
 
     credit_mode = str(getattr(args, "decomp_credit", "task"))
+    budget_mode = str(getattr(args, "decomp_budget", "per_subtask"))
 
     decomp_concurrency = int(getattr(args, "decomp_concurrency", 1))
     if decomp_concurrency < 1:
@@ -7408,6 +7427,7 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
                     synthesizer=synthesizer,
                     credit_ledger=credit_ledger,
                     credit_mode=credit_mode,
+                    budget_mode=budget_mode,
                     verify_gate=verify_gate,
                     subtask_max_steps=subtask_max_steps,
                 )
@@ -7489,6 +7509,7 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
         "decomp_synth_guard": str(getattr(args, "decomp_synth_guard", "off")),
         "decomp_concurrency": decomp_concurrency,
         "decomp_credit": credit_mode,
+        "decomp_budget": budget_mode,
         "pass_k": pass_k,
         "num_tasks": len(rows),
         "max_steps": int(args.max_steps),
