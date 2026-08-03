@@ -308,3 +308,21 @@
 | 与 M-35 的交互 | `ledger` 路由在并发 >1 时被拒(M-35),与本条无关:换信用信号不改变"读账本时账本正被写"这一竞态 |
 | 测试 | `tests/test_decomp_credit.py`(11 项)。含两条**把缺陷本身钉死**的测试:`test_task_credit_books_one_outcome_against_every_pair_on_the_chain`(三个子任务全部撞顶、任务仍通过 ⇒ 三格全记功)与 `test_task_credit_cannot_tell_a_capped_subtask_from_a_clean_one`(全撞顶与全干净产出**完全相同**的矩阵) |
 | 裁决层 | 用户指出「B2 不是我们实验的主要测试对象吗」→ 我方原将"降级 B2"与"换信号"并列为等价选项,**该并列是错的**;用户令「可以」(Aug-02);全量 **1005 绿** |
+
+## M-37 meta-agent 自测路径上的产物投递失败(Aug-03 新增,**未修复,已裁定接受**)
+
+> **与 M-27/M-31 同因不同果,严重性低一档,不可混为一谈**:
+> 那两条污染的是**测量**(变体声称有演化产物却在跑原版 ⇒ 整跑作废);
+> 本条污染的是 **meta-agent 对自己候选的自测**,**闸门与 active 池的测量不受影响**。
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | **不适用**(候选生成期的自测不是论文机制) |
+| 现象 | meta-agent 生成候选时会拿刚写好的配置自试跑。该次加载由 vendored `Harness` 直接进行,**不经 `_prepare_round_config`**,故 M-27/M-31 的 `file://` 截断缺陷在此路径上依然存在 |
+| 实证(e_pervar2) | 三条警告,全部位于 `R1/V0/**pipeline/candidates/**C-R1-0{2,3}/`:①`processor crashed: SystemPromptProcessor … [Errno 22] '/D:/…/templates/gaia…'`(M-27 形状);②③`tool_registry.custom: failed to load 'file:///D:\…\retry_01\tools\{pdf_text,html_extract}_tool.py' … 'D:\D:\PycharmProj\…'`(M-31 形状,双盘符) |
+| 🔴 作用域(**必须随本条引用**) | 截至 R1 为止,**零条**出现在 `candidate_gate/` 或 `active_pool/` 路径下。闸门评估经 `_run_evaluation → _run_config_evaluation → _prepare_round_config`,产物路径在那里被改写,**我们报告的测量因此是干净的**。⚠️ 该核验是**跑到 R1 的快照,不是终局**;收官时必须按作用域重新计数,若出现在 gate/active 路径下则结论翻转 |
+| 后果 | meta-agent 在**缺少自己所写工具**的条件下评估自己的候选 ⇒ 自我反馈失真 ⇒ 可能丢弃好候选或保留坏候选。**候选质量正是 CH3 所测对象**,故这是一个真实 confound,不是纯噪声 |
+| 为何不修(用户裁定 Aug-03「那就不改」) | ①加载发生在 **vendored `harnessx/`** 内,受零改动约束;②我方层唯一可行的修法是**改 meta-agent 提示词**令其写两斜杠形式 —— 但那等于改变演化器的输入,引入新变量,与本轮的单因子设计冲突;③两条臂承受同一缺陷,**是常量**,对照仍成立 |
+| 威胁章表述 | 「候选生成期的自测在缺少候选自身工具的条件下进行,故 meta-agent 的自我评估被系统性削弱;所有报告的测量取自闸门与 active 池路径,该路径的产物投递经校验。两条臂条件相同。」 |
+| 未来工作 | 提示词层修法(令 meta-agent 写 `file://<abs>` 两斜杠形式)是干净且低成本的,但必须作为**独立变量**在单独一轮中引入,不可与本轮混合 |
+| 裁决层 | 用户令「那就不改」(Aug-03);e_pervar2 继续跑 |

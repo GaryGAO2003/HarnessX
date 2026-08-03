@@ -1778,3 +1778,33 @@ K=8 最多三个变体有负载,五个算术上闲置且按闸门作用域**无�
 
 **仍过期**:CH1(RQ/贡献)、CH7(缺 M-33..M-36)、附录 A(止于 M-32)。
 等实验数据齐了一次性改 —— 现在改会白改。
+
+---
+
+## Aug-03 凌晨 · e_pervar 作废重发 + M-37
+
+### 发车失误(我方)
+
+`e_pervar` 漏传 `--candidates-per-round 4`,CLI 默认 1 ⇒ `candidate_limit=1`、
+`meta_concurrency=1`,**演化压力比 s1k8b103 少 4 倍**,且偏离论文 Table 8 的 `K_t=4`。
+R0–R3 已差出 3 个候选 vs 8 个。
+
+**根因是我的检查方法**:发车前的"最终确认"是从 lock 的 **provenance 反推**参数清单,
+而取默认值的旗标**不产生 provenance 记录**,故该方法在结构上看不见这一项。
+正确做法 = **两份 lock 的 hyperparams 全字段 diff**,一条命令。
+
+**处置**:用户令「重开」。停 `e_pervar`(损失 6h22m / 1110 rollout,现金≈0),
+重发 `e_pervar2` 并做全字段 diff —— **剩余差异为空**,唯一变量 `regression_baseline=per_variant`。
+作废目录保留不删。
+
+### M-37(新缺陷,已裁定接受)
+
+e_pervar2 在 R1 出现 3 条投递警告,**全部位于 `pipeline/candidates/`** ——
+meta-agent 自试跑候选时由 vendored `Harness` 直接加载,不经 `_prepare_round_config`。
+
+**与 M-27/M-31 同因不同果**:那两条污染测量(⇒ 整跑作废),本条污染的是
+meta-agent 的自我反馈。截至 R1,`candidate_gate/` 与 `active_pool/` 路径**零条**,
+故报告的测量干净。⚠️ **该核验是 R1 快照,收官须按作用域重新计数。**
+
+用户令「那就不改」:提示词层修法会引入新变量,与单因子设计冲突;
+两臂同缺陷,是常量。记入威胁章。
