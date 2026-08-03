@@ -42,19 +42,24 @@ COMMON="--provider-id deepseek --decomp-eval \
 ... $COMMON --decomp-source file:recipe/gaia_evolver/data/empty_plans.json \
     --decomp-concurrency 8 --run-tag ch4_a1
 
+# 三条 B 臂共用(注意 --decomp-credit 也在这里,见下)
+BCOMMON="--decomp-source file:<冻结计划> --decomp-budget shared \
+         --decomp-credit subtask_convergence"
+
 # B0 — 拆开,不分工,等预算
-... $COMMON --decomp-source file:<冻结计划> --decomp-routing single \
-    --decomp-budget shared --decomp-concurrency 8 --run-tag ch4_b0
+... $COMMON $BCOMMON --decomp-routing single      --decomp-concurrency 8 --run-tag ch4_b0
 
 # B1 — 分工,无专业化
-... $COMMON --decomp-source file:<冻结计划> --decomp-routing round_robin \
-    --decomp-budget shared --decomp-concurrency 8 --run-tag ch4_b1
+... $COMMON $BCOMMON --decomp-routing round_robin --decomp-concurrency 8 --run-tag ch4_b1
 
 # B2 — 分工 + 专业化。⚠️ 必须串行:ledger 路由读的账本正被并发任务写
-... $COMMON --decomp-source file:<冻结计划> --decomp-routing ledger \
-    --decomp-budget shared --decomp-credit subtask_convergence \
-    --decomp-concurrency 1 --run-tag ch4_b2
+... $COMMON $BCOMMON --decomp-routing ledger      --decomp-concurrency 1 --run-tag ch4_b2
 ```
+
+⚠️ **`--decomp-credit subtask_convergence` 必须三条 B 臂全开,不能只给 B2。**
+否则 `B2 − B1` 差的是**两样**东西(路由 + 信用信号),主读数就不再是单因子。
+B0/B1 的路由不读账本,故该旗标对它们**无行为影响**,只是让 manifest 三臂一致、
+消除审稿疑点。A1 不涉分解,保持默认。
 
 **成本**:A1/B0/B1 各约 41 分(并发 8),B2 约 6h(强制串行)。合计约 **8h**。
 
