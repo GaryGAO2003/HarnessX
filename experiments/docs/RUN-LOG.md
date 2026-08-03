@@ -2643,3 +2643,95 @@ R3–R6 连续四轮 `shipped=False forked=[]`,idle 1→4,R6 `no_candidate=True`
 
 **纪律更新:分析脚本产出进入任何 findings 文档前,脚本须先归档进 repo,
 再清 scratchpad。**清理前应检查是否存在承重分析的唯一副本。
+
+---
+
+## Aug-03 21:xx · ship 轮的变体分数是 in-sample 选择值(轮内选择偏置,可配对量化)
+
+### 0. 起因与结论顺序
+
+起因是核对同池集合的边界(R8 该归哪一组)。过程中一度怀疑是代码缺陷,
+**核完确认不是** —— 是系统的既定行为,且产生一个可测量的偏置。
+
+### 1. 先确认分析口径无误
+
+`pool_report.json` 的 `measurement_scope = 'settled_active_pool'`,并自带 15 点 `curve`。
+用 `task_history.jsonl` 重算 s1k8b103 逐轮 pass@2 与之对比:
+
+```
+R1–R15   15 / 15 轮逐轮完全一致,最大偏差 +0.0pp
+```
+
+⇒ **`task_history.jsonl` 即指标源,此前所有 pass@2 数字的来源正确。**
+(task_history 另有 R0 一行,官方 curve 从 R1 起,非错位:错位假设 0/15 命中。)
+
+### 2. ship 轮的执行结构(e_pervar3 R8 实测)
+
+```
+R8/active_pool        只有 V1,无 V0
+R8 轨迹文件           V1 128 | candidate_gate 156 | V0 活跃池 0
+156 = 4 候选 × 39 题  （--candidates-per-round 4,V0 簇 39 题）
+R8 decisions          {"V0": "apply"}
+task_history R8/V0    39 条,evidence_anchors 全指向 R8（新测,非搬运）
+                      与 R7/V0 逐题对比:39 题中 14 题结果不同（确为重跑）
+```
+
+流程:4 个候选各在目标变体的任务上跑 → 选最优 → apply → **结算池的成绩直接复用门评估**,不重跑。
+
+**这是合理的成本设计,不是缺陷。**
+
+### 3. 但由此产生轮内选择偏置,且可配对量化
+
+被 apply 的配置**正是因为在这 39 题上考得最高才被选中**,故其记录分是 max-of-4 的 in-sample 值。
+
+```
+R8  V0 = 39/39 = 100.0%    in-sample,4 选 1 最高分
+R9  V0 = 35/39 =  89.7%    同一配置,脱离选择后首次测量
+                 差 10.3pp
+```
+
+同一份配置、同一批 39 题、配对 ⇒ **单轮 in-sample 选择偏置 = 10.3pp**。
+
+### 4. 该现象在每个 ship 轮都出现
+
+```
+R2  ship + fork V1  →  V1 = 14/14 = 100%
+R8  ship apply V0   →  V0 = 39/39 = 100%
+```
+
+**两次 ship,被 ship 变体均为满分。**这是选择机制的构造性结果,非巧合。
+
+### 5. 与论文的关系:量化了它自认的偏置
+
+§7.7 第一条限制逐字:
+
+> "All reported gains are measured on the same task set used for evolution.
+> Since we report peak accuracy and evaluate on the adaptation set itself, the
+> numbers carry both **selection bias** and potential overfitting."
+
+论文只作定性承认。**我方给出轮内、同配置、配对的定量值(10.3pp),并指出其出现位置是每个 ship 轮。**
+
+### 6. 与既有 peak 偏置的关系:两重叠加
+
+```
+第一重（已记）  peak 是跨轮 max-of-N            n=16 时上偏约 8.1pp（Blom）
+第二重（本条）  ship 轮变体分是 max-of-K 候选   实测 10.3pp（K=4）
+```
+
+若所报 peak 落在某个 ship 轮上,则该点同时经过**跨轮选择**与**轮内候选选择**。
+e_pervar3 的 R2(79.6%)与 R8(82.5%)均为 ship 轮。
+
+⇒ **CH3 报 peak 时须标注该轮是否为 ship 轮。**
+
+### 7. 同池集合的正确划分
+
+```
+第一组  R3–R7    76.7 / 85.4 / 83.5 / 84.5 / 76.7    极差 8.7pp   五点
+第二组  R9–R11   78.6 / 80.6 / 78.6                  极差 2.0pp   三点
+R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池测量不可比
+```
+
+⚠️ **工具修正**:`samepool` 自动检测脚本仅读 `shipped` 字段判断边界,
+未核对该轮目录内实际执行了什么,曾把 R8 并入第二组。
+**判断同池须同时满足:该轮 shipped=False、forked=[]、routing 逐题相同、
+且 active_pool 下存在全部变体目录。**
