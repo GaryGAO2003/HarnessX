@@ -53,6 +53,63 @@ s2k8b50 把这点暴露得很清楚:12 候选零改善、原始漂移 0.0,去偏
 
 ---
 
+## 2.5 夜里挖出的三项发现(都影响论文内容)
+
+### ① 勘误:「系统拿不到失败归因」是错的 —— 而真相更有价值
+
+我此前说 `implicated_components` 全跑 1,648 条为空、`failure_category` 只是难度改名。
+**测量没错,但下错了对象。** 是两套记录:
+
+| 记录 | `failure_category` | `implicated_components` |
+|---|---|---|
+| `task_history.jsonl`(**持久化**) | `gaia_level_1/2/3` 确是难度改名 | **1,648 条全空** |
+| `pipeline_audit.json`(**LLM Digester 本轮产出**) | `budget_exceeded` / `tool_output_dropped` / `scope_ambiguity` **真类别** | **非空**:`tools/Bash`、`processor/TokenBudgetProcessor`、`tools/WebFetch`、`model_capability` |
+
+实测占比:e_pervar3 R1 **30/103**;s1k8b103 逐轮 **20–80%**。
+
+**真正的缺陷**:归因**每轮算一次、每轮丢一次**。交给下一轮的 `prior_history` 里
+`failure_category: null`,`implicated_components` 字段根本不存在。
+
+⇒ 演化器看得到「这题**这一轮**栽在 Bash 上」,**永远看不到「它连续五轮都栽在 Bash 上」**。
+
+**这比原说法强**:不是"缺少信号",而是"信号被算出来又扔掉",**修复成本极低(持久化即可)**。
+可作为 CH3 的机制发现,也可能是一条低成本的改进臂。
+
+### ② 能力划分只有 43% 可重现
+
+两次独立分解同一批 103 题:
+
+```
+逐题标签完全相同   44/103 = 42.7%
+类型集合 Jaccard    0.781
+Rand 指数           0.779
+
+但边际频率很稳:search 96→95 / browse 64→57 / compute 81→76 / verify 63→65
+```
+
+**"某类能力有没有"是稳的,"某题的确切类型集合"不稳。** 那个划分有一多半是一次采样的产物。
+
+**已在修**:第三遍分解跑着,然后取**逐类型多数票**(边际稳 ⇒ 按类型投票远比按集合稳)。
+工具 `build_consensus_clusters.py` 已就绪。
+
+⚠️ 这条无论如何都要进威胁章:**LLM 分解器是个有噪声的仪器**,
+任何拿它的输出做路由的工作都欠读者这个数字。
+
+### ③ e_pervar3 的 R1 零候选
+
+```
+actionability 0.85(阈值 0.5) | short_circuit: planner_empty_landscape | 候选 0
+```
+
+Planner 自述「**没有前轮可比**」—— **和发现 ① 直接咬合**。
+
+已排除是我改动造成的(M-38 的 brief 注入的是 Evolver,短路在上游 Planner)。
+一个待验机制:本跑 R0 = **69.9%**,比 s1k8b103 的 64.1% 高 5.8pp ⇒ 失败样本更少 ⇒ landscape 更薄。
+
+⚠️ **M-38 至今未被真正检验** —— 验证它需要演化器实际写出工具,本轮没写。
+
+---
+
 ## 3. 新建的规格与工具
 
 | 文件 | 作用 |
