@@ -145,22 +145,45 @@ def main(run: str = C.DEFAULT_RUN) -> None:
         tag = "  (actual alpha)" if a == 0.5 else ""
         print("  {:>6}  {:>18}  {:>22}{}".format(a, len(cont), len(cut), tag))
     minact = min(float(r["actionability"]) for r in scored)
-    print(f"  min persisted actionability = {minact}; so at every alpha in {alphas} "
-          f"the digester gate short-circuits {sum(1 for r in scored if float(r['actionability'])<max(alphas))} "
-          f"of {len(scored)} scored rounds -> alpha is inert in the observed range.")
+    maxact = max(float(r["actionability"]) for r in scored)
+    cut_at = {a: sum(1 for r in scored if float(r["actionability"]) < a) for a in alphas}
+    if len(set(cut_at.values())) == 1:
+        print(f"  min persisted actionability = {minact}; every alpha in {alphas} cuts the "
+              f"same {next(iter(cut_at.values()))} of {len(scored)} scored rounds "
+              f"-> alpha is inert in the observed range.")
+    else:
+        print(f"  min persisted actionability = {minact}; the cut count MOVES with alpha "
+              f"({', '.join(f'{a}->{n}' for a, n in cut_at.items())} of {len(scored)}) "
+              f"-> alpha is NOT inert in the observed range.")
 
-    # --- one-line conclusion ---
+    # --- conclusion, derived from this run's own rows (never hard-coded) ---
     print("\nCONCLUSION:")
     n_starve = len(starved)
+    n_boot = sum(1 for r in rows if r["stage"] == "bootstrap")
+    n_dig = sum(1 for r in rows if r["stage"] == "digester_below_a")
+    n_plan = sum(1 for r in rows if r["stage"] == "planner_empty")
     n_down = len(downstream)
-    print(f"  The drought is UPSTREAM short-circuit, not a downstream gate wall.")
-    print(f"  {n_starve}/{len(droughts)} droughts (all except bootstrap R0) are routing_starvation:")
-    print(f"  worst_first selected a target carrying 0 routed tasks (requested_slots=0,")
-    print(f"  no pipeline_audit written). In all {len(scored)} rounds that DID run the")
-    print(f"  pipeline, actionability was {minact}-{max(float(r['actionability']) for r in scored)},")
-    print(f"  always >= alpha=0.5, and never short-circuited at the digester -- so the")
-    print(f"  actionability threshold is NOT the lever. Only {n_down} non-drought rounds")
-    print(f"  ({downstream}) failed downstream (all candidates rejected at critic/gate).")
+    cut_actual = cut_at[0.5]
+    parts = []
+    if n_starve:
+        parts.append(f"{n_starve} routing_starvation (target carried 0 routed tasks)")
+    if n_dig:
+        parts.append(f"{n_dig} digester_below_alpha")
+    if n_plan:
+        parts.append(f"{n_plan} planner_empty")
+    if n_boot:
+        parts.append(f"{n_boot} bootstrap")
+    print(f"  {len(droughts)} drought rounds break down as: {'; '.join(parts) or 'none'}.")
+    if n_dig:
+        print(f"  The digester gate DOES bite: actionability fell below alpha=0.5 in "
+              f"{cut_actual} of {len(scored)} scored rounds (range {minact}-{maxact}).")
+        print(f"  Whether alpha is the lever depends on the counterfactual table above,")
+        print(f"  not on this line -- read the cut counts, they are the evidence.")
+    else:
+        print(f"  The digester gate never bit: actionability was {minact}-{maxact}, always "
+              f">= alpha=0.5, so the actionability threshold is not the lever here.")
+    print(f"  {n_down} non-drought rounds ({downstream}) failed downstream "
+          f"(all candidates rejected at critic/gate).")
 
 
 if __name__ == "__main__":
