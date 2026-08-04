@@ -781,6 +781,13 @@ async def main() -> None:
         action="store_true",
         help="Disable LLMJudgeProcessor (verdict fields omitted from frontmatter). Default: judge enabled.",
     )
+    parser.add_argument(
+        "--traj-failure-signals",
+        action="store_true",
+        help="Emit flat per-attempt failure-signal counts (search_unavailable_count, "
+        "fetch_error_count, fetch_empty_count, loop_warning_count) into trajectory "
+        "frontmatter. Default off keeps frontmatter byte-identical.",
+    )
     parser.add_argument("--evolve-cost", type=float, default=EVOLVE_COST_CAP_USD)
     parser.add_argument("--evolve-steps", type=int, default=EVOLVE_MAX_STEPS)
     parser.add_argument("--evolve-wall-clock", type=int, default=EVOLVE_WALL_CLOCK_S)
@@ -1117,6 +1124,7 @@ async def main() -> None:
                     traj_text,
                     record=record,
                     filename=traj_name,
+                    failure_signals=bool(getattr(args, "traj_failure_signals", False)),
                 )
             return record
 
@@ -1410,7 +1418,43 @@ def _compute_tool_counts(result: Any) -> tuple[dict[str, int], dict[str, int]]:
     return call_counts, error_counts
 
 
-def _render_trajectory_frontmatter(record: dict) -> str:
+#: Exact failure-marker substrings that only ever appear in the trajectory
+#: *body*, mapped to the flat frontmatter scalar that counts them. The
+#: search/fetch tools return ``[SEARCH UNAVAILABLE]`` / ``Fetch error for `` /
+#: ``[fetch failed`` / ``No content retrieved from`` as their result string, and
+#: LoopDetectionProcessor appends ``[LoopDetection]`` onto the tool result it is
+#: warning about (never the system prompt). A meta-agent whose scanners read
+#: only frontmatter never sees any of these, so ``--traj-failure-signals`` lifts
+#: their per-attempt counts up where those scanners can act on them. Both fetch
+#: hard-failure spellings roll into ``fetch_error_count``; the distinct
+#: ``No content retrieved from`` (a fetch that returned nothing) is
+#: ``fetch_empty_count``.
+_FAILURE_SIGNAL_MARKERS: "dict[str, tuple[str, ...]]" = {
+    "search_unavailable_count": ("[SEARCH UNAVAILABLE]",),
+    "fetch_error_count": ("Fetch error for ", "[fetch failed"),
+    "fetch_empty_count": ("No content retrieved from",),
+    "loop_warning_count": ("[LoopDetection]",),
+}
+
+
+def _count_trajectory_failure_signals(text: str) -> "dict[str, int]":
+    """Count exact-string failure markers in a rendered trajectory body.
+
+    Counts over the serialized step content (``text``, exactly what the body
+    serializer produced), not over the tool-result fields in isolation: every
+    marker is emitted into the body, and ``[LoopDetection]`` is appended onto a
+    tool result rather than surfaced as its own field, so scanning the rendered
+    body is both sufficient and the closest match to what a frontmatter-only
+    scanner is being taught to summarise. Returns one flat scalar per key in
+    :data:`_FAILURE_SIGNAL_MARKERS`, summing every marker mapped to that key. A
+    marker the model happens to echo verbatim in its own text is counted too;
+    the meta-agent reads these as a coarse "did this failure mode appear this
+    attempt" signal, not a provenance-exact tally.
+    """
+    return {key: sum(text.count(m) for m in markers) for key, markers in _FAILURE_SIGNAL_MARKERS.items()}
+
+
+def _render_trajectory_frontmatter(record: dict, failure_signals: "dict[str, int] | None" = None) -> str:
     """Render per-task YAML frontmatter (v2 schema) for the trajectory .md file.
 
     Agent-facing contract: ``Read limit=30`` yields the key measurements + judge
@@ -1466,6 +1510,13 @@ def _render_trajectory_frontmatter(record: dict) -> str:
         ("tool_error_counts", tool_error_counts),
     ]
 
+    # Optional failure-signal tier (``--traj-failure-signals``). Off => this
+    # block is skipped and the frontmatter is byte-identical to the v1/v2
+    # schema. On => four flat scalars land in the behaviour tier, ahead of the
+    # eval block, so they fall inside the agent-facing ``Read limit=30`` window.
+    if failure_signals is not None:
+        fields.extend((key, int(failure_signals.get(key, 0))) for key in _FAILURE_SIGNAL_MARKERS)
+
     total_tokens = record.get("total_tokens")
     if total_tokens is not None:
         fields.insert(4, ("total_tokens", int(total_tokens)))
@@ -1520,6 +1571,7 @@ def _write_task_trajectory(
     text: str,
     record: dict | None = None,
     filename: str | None = None,
+    failure_signals: bool = False,
 ) -> None:
     """Write a single task's trajectory to ``round_dir/<task_id>.md``.
 
@@ -1532,11 +1584,18 @@ def _write_task_trajectory(
     attempts of one task would otherwise overwrite each other; attempt 0 keeps
     the historical name and later attempts get a suffix, so each rollout has
     its own trajectory with its own (per-attempt) frontmatter.
+
+    ``failure_signals`` (``--traj-failure-signals``, default off) adds the flat
+    body-derived failure counts to the frontmatter. Off keeps the frontmatter
+    byte-identical; the counts are computed from ``text`` (the body) so they
+    reflect exactly what the meta-agent would otherwise have to read the body
+    to find.
     """
     round_dir.mkdir(parents=True, exist_ok=True)
     tid = getattr(task, "task_id", None) or "unknown"
     if record is not None:
-        fm = _render_trajectory_frontmatter(record)
+        counts = _count_trajectory_failure_signals(text) if failure_signals else None
+        fm = _render_trajectory_frontmatter(record, failure_signals=counts)
         text = f"{fm}\n\n{text.lstrip()}"
     (round_dir / (filename or f"{tid}.md")).write_text(text, encoding="utf-8")
 
