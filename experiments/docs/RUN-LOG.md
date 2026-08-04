@@ -2735,3 +2735,24 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 未核对该轮目录内实际执行了什么,曾把 R8 并入第二组。
 **判断同池须同时满足:该轮 shipped=False、forked=[]、routing 逐题相同、
 且 active_pool 下存在全部变体目录。**
+
+---
+
+## Aug-04 观测通道分支 `feat/observation-channel`(worktree `HarnessX-channel`,自 e8d3541 切出)
+
+**审计落盘**:`experiments/docs/novelty/10-CHANNEL-AUDIT.md` —— 双 run 全量核查:
+
+- **s1k8b103 上线编辑仅 2/7 生效**(R1 提示词、R11 StepCountdown;其余 5 条死于 `file:///` 剥 7 字符 bug,890 rollout 空提示词=M-27 的"空 890"逐字核实);meta-agent 自述 `FrozenInstanceError` 为编造(`state.py:119` 普通 dataclass)。
+- **e_pervar3 干净 2/2**(参数级指纹:`escalate_within` 2/3 对应升级触发步 18/17)——CH3 主跑编辑交付链可信。
+- **观测通道=自写扫描器只读 frontmatter**:fetch 652 次/loop 807 次/搜索 437 次正文信号到达率 0;digester 判"model_capability 不可修"自我关停 7 轮(旱灾真因,推翻 P8 沿用 s1 病因的猜测);**R8 自然实验**:某实例自写正文扫描器后当场诊断搜索失败并提案 `SearchUnavailableSwitch`(未被采纳)。
+- 失败客观规模(pervar R6-R15,n=2060):pass 70.1%,fetch 29.1%,搜索 17.8%,撞墙 12.6%,**真答错仅 7.2%**;撞墙死因 73.9% 伴 web 工具失败,纯净墙 17.3%。
+- 步数墙终判:过题中位数 8 步,≥18 步的过题仅 10.3% ⇒ 抬上限=弱杠杆。
+
+**代码落盘**(全部含测试;变体池 1026 绿,tests/unit 864 绿,8 项既有 gbk/沙箱失败与基线逐项一致):
+
+1. **M-41** `file:` 装载器侧鲁棒化(`builder._resolve_target_path` 全拼写;`_instantiate_proc`/工具注册失败 ERROR 级响亮化)。⚠️ 明示打破 M-38 遗留栏"vendored 零改动"约束,依据=用户 Aug-04「robust 框架」令,隔离于本分支。
+2. **M-42** `--traj-failure-signals`(默认关=frontmatter 字节等同;开=四平铺失败计数键入 `Read limit=30` 窗口)。零 `Hyperparams` 新字段,provenance 走 `_epsilon_provenance` 模式。
+
+**方法学警告(跨 session 必读)**:① `ripgrep` 对轨迹 `.md` 假零(NUL 字节判 binary),一切轨迹计数必须 `grep -a`;② `[SEARCH UNAVAILABLE]` 全树计数口径敏感(908/703 vs 1327/946,范围不同),可靠口径=settled 逐尝试受影响数;③ e_pervar3 `comparison.json` 仅覆盖 R6-R15。
+
+**未做**:臂 0/臂 1 对比跑(待用户明令);`run_meta.py` 未接旗标(独立渲染器,非变体池路径,刻意不接)。

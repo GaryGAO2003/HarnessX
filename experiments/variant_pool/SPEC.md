@@ -983,3 +983,13 @@ B2 读信用表决定分工;表分不出能力,headline 就没有机制。
 **兜底不分割**。分解失败退化的整任务 rollout 保持全额(它就是 A1 的等价物)。
 
 **测试**。`tests/test_decomp_budget.py` 25 项。全量 **1043 绿**。
+
+## 7.30 观测通道分支:`file:` 装载鲁棒化 + `--traj-failure-signals`(Aug-04,用户令「可以把这份也改进,放进新的 branch 里」;分支 `feat/observation-channel`)
+
+**两项裁决,详表见 M-41 / M-42;审计依据 `experiments/docs/novelty/10-CHANNEL-AUDIT.md`。**
+
+**① M-41 装载器侧修复(政策偏离,明示)**。M-37/M-38 只教了 Evolver 拼写,缺陷本体未动("vendored 零改动"约束)。本分支打破该约束:`builder._resolve_target_path` 使 `file:///`、`file://`、裸路径、POSIX 全拼写可解析;`_instantiate_proc` 失败保留"返回 None 不炸跑"但 **ERROR 级响亮记录**,消费端记录被丢弃组件。依据=用户 Aug-04「robust 框架」指令;隔离于独立分支,不触活跑(M-40 纪律仍守)。
+
+**② M-42 通道拓宽旗标(实验自变量,默认关)**。`--traj-failure-signals` 开时把正文专属失败信号计数入 frontmatter 四平铺键(`search_unavailable_count / fetch_error_count / fetch_empty_count / loop_warning_count`),落在扫描器已读的 `Read limit=30` 窗口;**默认关=字节等同**(测试钉死)。provenance 走 `_epsilon_provenance` 模式,零 `Hyperparams` 新字段。臂 0/臂 1 对比跑**须另行用户明令**。
+
+**测试**。变体池套件 **1026 绿**;`tests/unit` **864 绿**(8 项既有 gbk/沙箱环境失败与 HEAD 基线逐项一致,`git stash` 法证)。新增:`test_builder.py` 拼写参数化、`test_trajectory_frontmatter_v2.py` 双态字节等同;`test_processor_targets.py` 由断言缺陷改为断言修复(史料注释保留)。
