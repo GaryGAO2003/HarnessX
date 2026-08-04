@@ -1,5 +1,8 @@
 # Copyright 2026 Darwin-Agent
 # SPDX-License-Identifier: MIT
+import logging
+import os
+
 import pytest
 
 from harnessx.core.builder import HarnessBuilder, HarnessConflictError
@@ -336,3 +339,119 @@ class TestBuilder:
 
         config = HarnessBuilder().add(OnDecoratorProc()).build()
         assert "*" in _rt_procs(config)
+
+
+# ---------------------------------------------------------------------------
+# file:// / bare-path target resolution (s1k8b103 regression)
+# ---------------------------------------------------------------------------
+#
+# The Evolver writes a processor's ``_target_`` as a ``file:`` URI in several
+# spellings, all of which must land on the same file. builder._parse_file_target
+# used to strip a fixed ``len("file://")`` bytes, which left an RFC-style third
+# slash in front of a Windows drive (``/D:\\x``); the OSError was swallowed and
+# the variant ran the stock stack. Drive-letter cases are guarded with os.name
+# so a POSIX run never asserts a ``D:\\`` result; the POSIX form runs anywhere.
+
+_WIN_PATH_FORMS = [
+    ("file:///D:/eco/proc.py", "D:/eco/proc.py"),  # RFC third slash — the s1k8b103 defect
+    ("file://D:/eco/proc.py", "D:/eco/proc.py"),  # two-slash — the persisted form
+    (r"file:///D:\eco\proc.py", r"D:\eco\proc.py"),  # RFC third slash, backslash separators
+    (r"D:\eco\proc.py", r"D:\eco\proc.py"),  # bare local path — untouched (no scheme)
+]
+
+_POSIX_PATH_FORMS = [
+    ("file:///home/u/proc.py", "/home/u/proc.py"),  # POSIX file URI — resolved on any host
+    ("/home/u/proc.py", "/home/u/proc.py"),  # bare POSIX path — untouched
+]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows drive-letter resolution is a Windows property")
+@pytest.mark.parametrize("value,expected", _WIN_PATH_FORMS)
+def test_resolve_target_path_windows_forms(value, expected):
+    from harnessx.core.builder import _resolve_target_path
+
+    assert _resolve_target_path(value) == expected
+
+
+@pytest.mark.parametrize("value,expected", _POSIX_PATH_FORMS)
+def test_resolve_target_path_posix_forms(value, expected):
+    from harnessx.core.builder import _resolve_target_path
+
+    assert _resolve_target_path(value) == expected
+
+
+_FILE_TARGET_PROC_SRC = '''
+class SampleProc:
+    def __init__(self, k: int = 1):
+        self.k = k
+'''
+
+
+def test_instantiate_resolves_rfc_three_slash_file_target(tmp_path):
+    """s1k8b103: a ``file:///`` target must now resolve and build.
+
+    Before the fix the third slash left ``/D:\\x`` in front of a Windows drive,
+    the OSError was swallowed by ``_instantiate_proc``'s bare ``except: return
+    None``, and the variant ran the stock stack. It must instantiate now.
+    """
+    from harnessx.core.builder import _instantiate
+
+    p = tmp_path / "sample_proc.py"
+    p.write_text(_FILE_TARGET_PROC_SRC, encoding="utf-8")
+
+    inst = _instantiate({"_target_": f"file:///{p}::SampleProc", "k": 7})
+    assert type(inst).__name__ == "SampleProc"
+    assert inst.k == 7
+
+
+def test_instantiate_resolves_bare_path_with_symbol(tmp_path):
+    """A bare local path + ``::Symbol`` (no scheme) is a valid file target.
+
+    Dispatch keys on ``::`` (which a dotted module path never contains), so the
+    Evolver can emit ``<abs path>.py::Class`` with no ``file://`` scheme at all.
+    """
+    from harnessx.core.builder import _instantiate
+
+    p = tmp_path / "sample_proc.py"
+    p.write_text(_FILE_TARGET_PROC_SRC, encoding="utf-8")
+
+    inst = _instantiate({"_target_": f"{p}::SampleProc"})
+    assert type(inst).__name__ == "SampleProc"
+
+
+# ---------------------------------------------------------------------------
+# _instantiate_proc: a dropped processor is now loud (s1k8b103 left no trace)
+# ---------------------------------------------------------------------------
+
+_BAD_PROC_TARGET = "file:///no/such/dir/missing_proc.py::Missing"
+
+
+def test_instantiate_proc_logs_error_and_returns_none(caplog):
+    """A processor that will not build returns None but no longer silently.
+
+    s1k8b103 dropped 19 configs' processors with zero trace across 408,880 log
+    lines. The drop must stay non-fatal (one bad component must not crash the
+    variant) but be logged at ERROR with the full ``_target_``.
+    """
+    from harnessx.core.harness import _instantiate_proc
+
+    with caplog.at_level(logging.ERROR, logger="harnessx.core.harness"):
+        out = _instantiate_proc({"_target_": _BAD_PROC_TARGET})
+
+    assert out is None
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("DROPPED" in m for m in messages)
+    assert any("missing_proc.py" in m for m in messages), "the dropped _target_ must be in the log"
+
+
+def test_instantiate_runtime_logs_the_dropped_spec(caplog):
+    """The consumption site names the processor it drops from the stack."""
+    config = HarnessConfig(processors=[{"_target_": _BAD_PROC_TARGET}])
+
+    with caplog.at_level(logging.ERROR, logger="harnessx.core.harness"):
+        rt = _instantiate_runtime(config)
+
+    # dropped, so it is absent from every hook bucket
+    assert all(type(p).__name__ != "Missing" for procs in rt.processors.values() for p in procs)
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("DROPPED" in m and "missing_proc.py" in m for m in messages)

@@ -480,6 +480,38 @@ def _expand_type(cfg: dict) -> dict:
     return cfg
 
 
+def _resolve_target_path(value: str) -> str:
+    """Resolve the path portion of a file ``_target_`` (or a ``template_path``)
+    to a local filesystem path.
+
+    The evolver and the recipe's own round-tripping emit several spellings, all
+    of which must land on the same file:
+
+    * ``file:///D:/x.py`` / ``file:///D:\\x.py`` — the RFC-style third slash the
+      meta-agent writes. The old ``value[len("file://"):]`` stripped seven bytes
+      and left ``/D:\\x`` in front of the drive, which Windows resolved against
+      the current directory as ``D:\\D:\\x`` and raised.
+    * ``file://D:/x.py`` — the two-slash form :func:`to_yaml_file` persists and a
+      later round reads back. ``urllib.parse.urlparse`` cannot handle this one:
+      it reads the drive letter as a netloc and drops it.
+    * ``D:/x.py`` / ``D:\\x.py`` — a bare local path, returned untouched (no
+      scheme, so a Windows drive letter is never mistaken for a URL scheme).
+    * ``file:///home/u/x.py`` — POSIX, resolved to ``/home/u/x.py`` on any host.
+
+    Kept byte-for-byte in step with ``recipe.gaia_evolver.run_variant_pool.
+    _as_local_path`` (the recipe-side twin) without importing across the layer.
+    """
+    if not value.startswith("file:"):
+        return value
+    from urllib.parse import unquote
+
+    rest = unquote(value[len("file:") :])
+    body = rest.lstrip("/")
+    if len(body) >= 2 and body[0].isascii() and body[0].isalpha() and body[1] == ":":
+        return body  # Windows absolute, whatever the slash count/separator
+    return "/" + body if body else rest
+
+
 def _instantiate(cfg: "dict | None", default_factory=None) -> "Any":
     """Instantiate a ``{"_target_": "fully.qualified.ClassName", **kwargs}`` dict.
 
@@ -518,16 +550,20 @@ def _instantiate(cfg: "dict | None", default_factory=None) -> "Any":
             resolved[k] = v
 
     def _parse_file_target(_target: str) -> tuple[str, str]:
-        spec = _target[len("file://") :]
-        path_part, sep, class_name = spec.rpartition("::")
+        # Split on the LAST ``::`` first (a POSIX/Windows path never contains it),
+        # then resolve the path so every file:// spelling and bare path loads.
+        path_part, sep, class_name = _target.rpartition("::")
         if not sep or not path_part.strip() or not class_name.strip():
             raise ValueError("invalid file target; expected 'file:///abs/path.py::ClassName'")
-        return path_part, class_name.strip()
+        return _resolve_target_path(path_part.strip()), class_name.strip()
 
     target = cfg["_target_"]
-    # File-based direct target:
+    # File-based direct target. ``::`` separates a filesystem path (or file://
+    # URI) from the class symbol; dotted module paths never contain ``::``, so it
+    # is a safe discriminator that also catches the bare-path spellings the
+    # meta-agent emits without a scheme (``D:\\x\\y.py::MyProcessor``).
     #   file:///abs/path/to/processor.py::MyProcessor
-    if isinstance(target, str) and target.startswith("file://"):
+    if isinstance(target, str) and ("::" in target or target.startswith("file://")):
         import uuid as _uuid
 
         file_path, class_name = _parse_file_target(target)

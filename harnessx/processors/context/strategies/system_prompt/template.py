@@ -16,9 +16,16 @@ class TemplateSystemPromptBuilder:
     """
 
     def __init__(self, template_path: str, extra_context: dict | None = None):
-        # Strip file:// URI scheme so plain filesystem open() works
-        if isinstance(template_path, str) and template_path.startswith("file://"):
-            template_path = template_path[len("file://") :]
+        # Resolve a file:// URI (any spelling the evolver emits) to a plain path
+        # so open() works. Shares the builder's resolver so template and
+        # processor targets agree byte-for-byte; the old
+        # ``template_path[len("file://"):]`` left an RFC-style third slash in
+        # front of a Windows drive and the resulting OSError was swallowed into
+        # an EMPTY system prompt (890 rollouts in s1k8b103 ran promptless).
+        if isinstance(template_path, str):
+            from .....core.builder import _resolve_target_path
+
+            template_path = _resolve_target_path(template_path)
         self.template_path = template_path
         self._extra_context: dict = extra_context or {}
         self._template = None

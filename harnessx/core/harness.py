@@ -351,12 +351,26 @@ class _HarnessRuntime:
 
 
 def _instantiate_proc(d: dict) -> "Any | None":
-    """Instantiate a processor from a _target_ dict using builder._instantiate."""
+    """Instantiate a processor from a _target_ dict using builder._instantiate.
+
+    Returns ``None`` when the spec cannot be built — one bad component must not
+    crash the whole variant evaluation — but logs the failure at ERROR with the
+    full ``_target_`` and the exception. A silently dropped processor makes a
+    variant run the stock stack while its config claims an evolved one; in
+    s1k8b103 that hit 19 active-pool configs and left ZERO trace across 408,880
+    log lines, so the drop is loud even though it stays non-fatal.
+    """
     try:
         from .builder import _instantiate
 
         return _instantiate(d)
-    except Exception:
+    except Exception as exc:
+        _log.error(
+            "processor spec failed to instantiate and was DROPPED: _target_=%r (%r); "
+            "this variant will run WITHOUT it",
+            (d or {}).get("_target_", d),
+            exc,
+        )
         return None
 
 
@@ -534,8 +548,15 @@ def _build_tool_registry_from_config(cfg: ToolRegistryConfig) -> Any:
                     # want the registration itself to stand.
                     pass
             except Exception as exc:
-                _log.warning(
-                    "tool_registry.custom: failed to load %r: %s",
+                # ERROR, not WARNING: a custom tool that fails to load hands the
+                # model an incomplete tool schema while the config still claims
+                # the tool is present (the s1k8b103 ``python_eval`` died here the
+                # same Windows file:// way as the dropped processors). Non-fatal —
+                # the rest of the set still registers — but loud, with the target
+                # and the exception repr.
+                _log.error(
+                    "tool_registry.custom: DROPPED tool target %r (%r); the model "
+                    "will run without it",
                     target,
                     exc,
                 )
@@ -588,6 +609,13 @@ def _instantiate_runtime(config: "HarnessConfig") -> _HarnessRuntime:
                 if hook_override:
                     inst.__hx_hook_override__ = hook_override
                 flat.append(inst)
+            else:
+                _log.error(
+                    "processor _target_=%r is declared in the harness config but was "
+                    "DROPPED (see _instantiate_proc error above); the runtime stack "
+                    "will NOT include it",
+                    p.get("_target_"),
+                )
     # _rt_procs holds runtime-only processor instances that cannot be serialized.
     for p in getattr(config, "_rt_procs", None) or []:
         flat.append(p)
