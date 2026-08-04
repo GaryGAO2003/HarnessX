@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from harnessx.core.file_uri import normalize_file_uri
 from harnessx.core.processor import MultiHookProcessor
 from harnessx.home import agent_home
 
@@ -86,7 +87,7 @@ def parse_file_target(target: str) -> tuple[Path, str]:
     """Parse ``file://...::ClassName`` target into ``(path, class_name)``."""
     if not isinstance(target, str) or not target.startswith("file://"):
         raise ValueError("target is not a file:// target")
-    spec = target[len("file://") :]
+    spec = normalize_file_uri(target)
     path_part, sep, class_name = spec.rpartition("::")
     if not sep or not path_part.strip() or not class_name.strip():
         raise ValueError("invalid file target; expected 'file:///abs/path.py::ClassName'")

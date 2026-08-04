@@ -71,10 +71,16 @@ def _spec(target: str, **kwargs) -> dict:
 # ---------------------------------------------------------------------------
 # 1. the rewrite, verified against the vendored builder
 # ---------------------------------------------------------------------------
-def test_rfc_spelling_is_the_one_that_breaks(processor_file: Path):
-    """Pins why the emitted form is two-slash, so nobody 'corrects' it back."""
-    with pytest.raises(Exception):
-        _instantiate(_spec(f"file:///{processor_file}::NudgeProcessor"))
+def test_rfc_spelling_now_instantiates(processor_file: Path):
+    """The three-slash form now builds in the vendored builder.
+
+    ``builder._parse_file_target`` used to leave a leading slash in front of the
+    drive letter and fail; it now normalises the file URI (defense-in-depth), so
+    the processor builds directly and the recipe-layer rewrite is belt-and-
+    suspenders rather than the only thing that makes it instantiate.
+    """
+    obj = _instantiate(_spec(f"file:///{processor_file}::NudgeProcessor"))
+    assert type(obj).__name__ == "NudgeProcessor"
 
 
 def test_rewritten_target_instantiates(processor_file: Path):

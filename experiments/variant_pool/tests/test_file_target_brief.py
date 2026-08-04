@@ -40,13 +40,19 @@ def test_the_spelling_the_brief_teaches_survives_the_vendored_truncation():
     assert not stripped.startswith("/")
 
 
-def test_the_spelling_the_brief_forbids_is_the_one_that_breaks():
-    target = f"file:///{WIN}"
-    stripped = target[len("file://") :]
-    # This is the observed failure: a leading slash, which then resolves against
-    # the current drive and produces 'D:\D:\...'.
-    assert stripped.startswith("/")
-    assert stripped == "/" + WIN
+def test_the_spelling_the_brief_forbids_now_loads_too():
+    # The brief text is unchanged and still teaches EXACTLY TWO slashes, but the
+    # vendored loader now normalises the three-slash form as defense-in-depth:
+    # a candidate that ignores the brief is repaired rather than silently
+    # dropped. A bare ``target[len("file://"):]`` would still leave the leading
+    # slash (the observed 'D:\D:\...' failure), so this asserts against the real
+    # loader instead.
+    from harnessx.core.harness import _parse_file_tool_target
+
+    path_part, symbol = _parse_file_tool_target(f"file:///{WIN}::pdf_tool")
+    assert symbol == "pdf_tool"
+    assert not path_part.startswith("/")
+    assert path_part == WIN
 
 
 def test_our_own_resolver_accepts_the_taught_spelling_too():

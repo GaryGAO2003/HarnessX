@@ -22,6 +22,7 @@ from .config_schema import (
     SandboxConfig,
 )
 from .events import make_run_id
+from .file_uri import normalize_file_uri
 from .processor import Processor
 from .runloop import run_loop
 from .state import State
@@ -459,8 +460,10 @@ def _parse_file_tool_target(target: str) -> tuple[str, str]:
 
     Mirrors the file-URI form supported for processors in
     :mod:`harnessx.core.builder`. Raises ``ValueError`` on malformed input.
+    The path is normalised via :func:`harnessx.core.file_uri.normalize_file_uri`
+    so every reasonable slash-count spelling of a drive path loads.
     """
-    spec = target[len("file://") :]
+    spec = normalize_file_uri(target)
     path_part, sep, sym_name = spec.rpartition("::")
     if not sep or not path_part.strip() or not sym_name.strip():
         raise ValueError(f"invalid file target: {target!r} (expected 'file:///abs/path.py::symbol')")

@@ -107,38 +107,36 @@ def test_as_local_path_leaves_a_plain_path_alone(tmp_path: Path):
 # 2. the rewritten target must survive the *vendored* parser
 # ---------------------------------------------------------------------------
 def test_rewritten_target_loads_through_the_vendored_loader(tool_file: Path):
-    """End-to-end: the tool is absent before the rewrite and present after.
+    """End-to-end: the tool registers, both before and after the rewrite.
 
-    This is the assertion that actually matters. ``harnessx/`` is vendored and
-    not ours to patch, so the only thing that makes the tool arrive is the
-    shape we hand it.
+    The loader now normalises the RFC three-slash form itself, so the tool is
+    present straight from the ``file:///`` config; the recipe-layer rewrite is
+    defense-in-depth and must leave the loaded set unchanged.
     """
-    broken = _Registry(builtin=[], custom=[f"file:///{tool_file}::probe_tool"])
+    rfc = _Registry(builtin=[], custom=[f"file:///{tool_file}::probe_tool"])
 
-    before = set(_build_tool_registry_from_config(broken).list_names())
-    assert "probe_tool" not in before, "fixture no longer reproduces the bug"
+    before = set(_build_tool_registry_from_config(rfc).list_names())
+    assert "probe_tool" in before, "the loader now normalises file:/// directly"
 
-    fixed = _resolve_tool_targets(broken, tool_file.parent / "config.yaml")
+    fixed = _resolve_tool_targets(rfc, tool_file.parent / "config.yaml")
     after = set(_build_tool_registry_from_config(fixed).list_names())
 
-    assert "probe_tool" in after
-    assert after - before == {"probe_tool"}, "the rewrite must not disturb other tools"
+    assert after == before, "the rewrite must not change what loads"
 
 
-def test_the_rfc_spelling_is_the_one_that_breaks(tool_file: Path):
-    """Pins *why* the emitted form is two-slash, so nobody 'corrects' it back.
+def test_the_rfc_spelling_now_parses_to_the_real_file(tool_file: Path):
+    """The three-slash RFC form now resolves in the vendored loader.
 
-    If a future change makes the RFC spelling work in the vendored loader this
-    test fails loudly, which is the right moment to revisit the rewrite.
+    It used to leave a leading slash in front of the drive letter and break;
+    the loader now normalises it (defense-in-depth), so ``_resolve_tool_targets``
+    is belt-and-suspenders rather than the only thing that makes the tool arrive.
     """
     rfc = f"file:///{tool_file}::probe_tool"
     path_part, symbol = _parse_file_tool_target(rfc)
 
     assert symbol == "probe_tool"
-    assert not Path(path_part).is_file(), (
-        "the vendored parser has started handling file:/// correctly; "
-        "_resolve_tool_targets can be simplified"
-    )
+    assert Path(path_part).is_file()
+    assert Path(path_part) == tool_file
 
 
 # ---------------------------------------------------------------------------
@@ -203,3 +201,82 @@ def test_rewriting_is_idempotent(tool_file: Path):
 
     assert twice.custom == once.custom
     assert twice is once, "a second pass should be a no-op, not another copy"
+
+
+# ---------------------------------------------------------------------------
+# 4. the vendored loader normalises every spelling the Evolver emits
+#    (so an agent artefact loads regardless of slash count -- C-R8-04)
+# ---------------------------------------------------------------------------
+def _drive_uri(tool_file: Path, prefix: str, sep: str) -> str:
+    """A ``file:`` URI for ``tool_file`` with the given slash count and sep."""
+    return prefix + str(tool_file).replace("\\", sep) + "::probe_tool"
+
+
+@pytest.mark.parametrize("prefix", ["file://", "file:///", "file:////"])
+@pytest.mark.parametrize("sep", ["\\", "/"])
+def test_every_drive_spelling_parses_to_the_same_file(tool_file: Path, prefix, sep):
+    """Two-, three-, and four-slash drive URIs, both separators, all resolve.
+
+    ``file:///`` (three slashes) is the RFC form the Evolver writes and the one
+    that killed C-R8-04 by leaving ``/D:\\...`` in front of the drive letter; it
+    must now land on the real file, as must the backslash and four-slash forms.
+    """
+    path_part, symbol = _parse_file_tool_target(_drive_uri(tool_file, prefix, sep))
+
+    assert symbol == "probe_tool"
+    assert Path(path_part).is_file()
+    assert Path(path_part) == tool_file
+
+
+def test_the_c_r8_04_killer_loads_through_the_registry(tool_file: Path):
+    """The three-slash tool target that was silently dropped now registers.
+
+    C-R8-04 declared ``file:///D:/...::pdf_fetch_tool``; the loader logged a
+    warning and ran the candidate without the tool. The same shape must now
+    register straight from the config, with no recipe-layer rewrite.
+    """
+    rfc = _Registry(builtin=[], custom=[f"file:///{tool_file}::probe_tool"])
+
+    names = set(_build_tool_registry_from_config(rfc).list_names())
+    assert "probe_tool" in names
+
+
+@pytest.mark.parametrize(
+    "uri, expected",
+    [
+        ("file:///abs/path.py::probe_tool", "/abs/path.py"),
+        ("file:////abs/path.py::probe_tool", "/abs/path.py"),
+    ],
+)
+def test_posix_absolute_paths_keep_exactly_one_leading_slash(uri, expected):
+    """A POSIX absolute path must never be collapsed into a relative one."""
+    path_part, symbol = _parse_file_tool_target(uri)
+
+    assert symbol == "probe_tool"
+    assert path_part == expected
+
+
+def test_normalisation_never_invents_a_missing_file(tmp_path: Path):
+    """Spelling is repaired; a file that was never written stays absent.
+
+    The path parses cleanly (the drive-letter slash is dropped) but points at
+    nothing, so the loader registers no tool -- fail-closed, unchanged.
+    """
+    missing = tmp_path / "never_written.py"
+    path_part, symbol = _parse_file_tool_target(f"file:///{missing}::probe_tool")
+    assert symbol == "probe_tool"
+    assert not Path(path_part).is_file()
+
+    reg = _Registry(builtin=[], custom=[f"file:///{missing}::probe_tool"])
+    assert "probe_tool" not in set(_build_tool_registry_from_config(reg).list_names())
+
+
+def test_dotted_targets_never_enter_file_uri_normalisation():
+    """A dotted target must go through module import, not file handling.
+
+    A bogus dotted path fails as an import (no tool registered) rather than
+    being mangled into a filesystem path, proving the file:// branch -- and its
+    normalisation -- is skipped entirely for dotted targets.
+    """
+    reg = _Registry(builtin=[], custom=["nonexistent_pkg_zzz.some_tool_symbol"])
+    assert set(_build_tool_registry_from_config(reg).list_names()) == set()

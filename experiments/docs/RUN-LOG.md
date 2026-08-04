@@ -2777,3 +2777,9 @@ byte-identical no-op 5(4 次在 R8 后,枯竭信号)、no-flip 3、bucket-missin
 evidence-gate 1、ROUNDTRIP_L2 1(=C-R8-04:三斜杠 file:/// → 加载 Errno 22 →
 工具未注册 → 无能力证据;M-38 brief 探针有效但未兜住实跑,加载端无 URI 正规化是根)。
 DECISION_REQUIRED 逐字根因:"ended with analysis but did not commit to a final decision"。
+
+### 🔧 Aug-04 · P4 落地:`file://` 加载端正规化(SPEC §7.31)
+
+用户裁「基建必须保证 agent 能读到东西」。`normalize_file_uri` 收敛全部斜杠拼写,
+四个 core 加载点接入;三个金丝雀断言翻转;全量 1046 绿(1035→1046)。
+C-R8-04 类"工具静默不注册→评测后才 ROUNDTRIP_L2"的形态从结构上消失。

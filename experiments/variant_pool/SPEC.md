@@ -1015,3 +1015,24 @@ Bing 失败 996 / DDG-HTML 675 / DDG-Lite 690 / 熔断 22;原生链成功不留�
 
 **测试**。`tests/test_serper_backend.py` +10 项。全量 **1035 绿**
 (本分支改前实测 1025;§7.29 尾注 1043 与本分支现量不一致,疑测试集随分支漂移,按实测记账)。
+
+## 7.31 `file://` URI 加载端正规化(Aug-04,用户令「一定要保证 agent 能读到东西,你想办法修」;1035→1046)
+
+**问题**(承 §7.28,C-R8-04 实证)。四处加载器各自硬切 `target[len("file://"):]`:
+canonical 三斜杠 `file:///D:/x.py::sym` 剥出 `/D:/x.py`,Windows 拼成 `D:\D:/…` → Errno 22 静默死。
+e_pervar3 的 C-R8-04 pdf_fetch 因此从未注册,烧完一轮评测后才被 ROUNDTRIP_L2 宣判。
+
+**修法**。新增 `harnessx/core/file_uri.py::normalize_file_uri`:剥 scheme 后,盘符前的
+前导斜杠全剥(`^[/\]+(?=[A-Za-z]:[/\])`),POSIX 绝对路径收敛为恰一个斜杠(绝不变相对),
+容忍反斜杠;**只修拼写、不猜路径**,fail-closed 不变。四个调用点全部接入:tool loader
+(harness.py)、processor builder(builder.py)、direct_targets、模板系统提示加载
+(template.py,懒导入避免深层模块对 core 的 import 期依赖)。meta_harness 的
+`_tool_label_from_custom_target` 只取 `::` 后符号、无此 bug,不动;recipe 层加载器已另修,不动。
+
+**教育层与防御层**。§7.28 的 brief 文本不改(两斜杠仍是教的 canonical);本条是防御纵深:
+brief 是概率性的(C-R8-04 实证违反),加载端必须兜底。原三个「验证三斜杠必死」的
+金丝雀测试断言同步翻转(test_tool_targets / test_processor_targets / test_file_target_brief)。
+
+**测试**。`test_tool_targets.py` +11(2/3/4 斜杠 × 正反斜杠矩阵、C-R8-04 killer 经注册表
+真加载、POSIX 保留、缺文件仍 fail-closed、dotted target 不入正规化)。全量 **1046 绿**
+(1035→1046);core 侧 `tests/unit` 加载器三件 41 绿(PYTHONUTF8=1)。

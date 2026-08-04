@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .file_uri import normalize_file_uri
+
 _log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -518,7 +520,9 @@ def _instantiate(cfg: "dict | None", default_factory=None) -> "Any":
             resolved[k] = v
 
     def _parse_file_target(_target: str) -> tuple[str, str]:
-        spec = _target[len("file://") :]
+        # Normalise the file URI first so every slash-count spelling of a
+        # drive path resolves (see harnessx.core.file_uri.normalize_file_uri).
+        spec = normalize_file_uri(_target)
         path_part, sep, class_name = spec.rpartition("::")
         if not sep or not path_part.strip() or not class_name.strip():
             raise ValueError("invalid file target; expected 'file:///abs/path.py::ClassName'")
