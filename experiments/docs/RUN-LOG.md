@@ -2833,3 +2833,9 @@ P3 提案出口 schema 修复重试。三旗标默认字节等同;+50 测试,全
 6. **`experiments/docs/RUN-LOG.md`** — append-only,两侧条目按序全留,零删除(本条即合并记录)。
 
 `test_builder.py` 的两条 `_resolve_target_path` 参数化测试随收敛改测 `normalize_file_uri`(Win/POSIX/裸路径六拼写全绿)。**全量(变体池)1109 绿**(s4 1108 + 并存测试 1);`tests/unit` 882 绿(5 项 sandbox/plugin/workspace-home 环境失败经 detached-worktree 法证与 c6064b6 基线逐项一致,非合并回归)。默认行为字节等同:`--traj-failure-signals` 默认关、`_traj_failure_signals_provenance` 默认 `None`。
+
+---
+
+## Aug-05 · F4 落地:`--planner-retry N` 空 landscape 重试(SPEC §7.36)
+
+用户裁「1、2 都可以」。LLM Planner 空手 landscape(`briefs=0`)时,`N>0` 打响亮 WARNING(`planner returned empty landscape, retry i/N`)并重发 meta call 至多 N 次,全空才落原 `empty_landscape` 短路;`N=0` 默认字节等同(单调用、无重试、无 WARNING、结果不变)。parse 失败 / provider error 仍首次即整轮回退确定性臂。名取 STATPOOL §8 预留;`_planner_retry_provenance` 走 `_epsilon_provenance` 模式,`_LLMPlanner` 加 `planner_retry` 字段,`_make_planner` 经 `getattr` 注入,零 `Hyperparams` 新字段。+3 测试(空→有效 / 全空 / 默认 0),全量 **1112 绿**(1109→1112)。

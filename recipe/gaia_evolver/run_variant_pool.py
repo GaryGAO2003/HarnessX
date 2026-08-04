@@ -3545,6 +3545,10 @@ class _LLMPlanner:
     #: constant so every existing construction stays byte-identical; the recipe
     #: passes ``_PAPER_PLANNER_PROMPT`` in ``paper`` mode.
     prompt: str = _LLM_PLANNER_PROMPT
+    #: F4 --planner-retry: extra meta-call attempts when the model returns an
+    #: empty mutation landscape (briefs=0). ``0`` (default) keeps the single-call
+    #: path byte-identical, including the empty-landscape result and its notes.
+    planner_retry: int = 0
 
     async def plan(
         self,
@@ -3553,14 +3557,33 @@ class _LLMPlanner:
         digests: Sequence[TaskDigest],
     ) -> PlanningArtifact:
         digests = tuple(digests)
-        try:
-            return await self._plan_llm(context, digests)
-        except _PlannerWholesaleFallback as exc:
-            return await self._wholesale_fallback(context, digests, str(exc))
-        except Exception as exc:  # noqa: BLE001 - provider/other error must not kill the round
-            return await self._wholesale_fallback(
-                context, digests, f"{type(exc).__name__}: {exc}"
-            )
+        # F4 --planner-retry: when the model returns an empty mutation landscape
+        # (briefs=0), re-issue the meta call up to ``planner_retry`` extra times
+        # before falling through to the existing empty-landscape artifact. A parse
+        # failure / provider error still reverts wholesale to the deterministic arm
+        # on the first attempt (a retry only buys a fresh non-empty landscape, not
+        # a fix for a broken model). ``planner_retry=0`` is byte-identical: one
+        # call, and an empty landscape is returned unchanged with no WARNING.
+        attempts = max(0, self.planner_retry) + 1
+        artifact: PlanningArtifact | None = None
+        for attempt in range(attempts):
+            try:
+                artifact = await self._plan_llm(context, digests)
+            except _PlannerWholesaleFallback as exc:
+                return await self._wholesale_fallback(context, digests, str(exc))
+            except Exception as exc:  # noqa: BLE001 - provider/other error must not kill the round
+                return await self._wholesale_fallback(
+                    context, digests, f"{type(exc).__name__}: {exc}"
+                )
+            if not artifact.empty_landscape:
+                return artifact
+            if attempt < attempts - 1:
+                logger.warning(
+                    "planner returned empty landscape, retry %d/%d",
+                    attempt + 1,
+                    self.planner_retry,
+                )
+        return artifact
 
     async def _plan_llm(
         self,
@@ -5234,6 +5257,7 @@ class VariantPoolRecipe:
                 if self.aegis_prompts == "paper"
                 else _LLM_PLANNER_PROMPT
             ),
+            planner_retry=int(getattr(self.args, "planner_retry", 0)),
         )
 
     @property
@@ -7377,6 +7401,26 @@ def _traj_failure_signals_provenance(args: Any) -> "str | None":
     )
 
 
+def _planner_retry_provenance(value: int) -> "str | None":
+    """Byte-safe lock record for ``--planner-retry`` (F4).
+
+    Returns ``None`` for the default ``0`` (the lock stays byte-identical); a
+    provenance warning otherwise. ``value`` is the number of EXTRA meta calls the
+    LLM Planner is allowed when the model returns an empty landscape; the retries
+    actually consumed in a run are logged at WARNING, one line per attempt.
+    """
+    if value <= 0:
+        return None
+    return (
+        f"planner_retry={value} ENABLED (F4): when the LLM Planner's meta call "
+        "returns an empty mutation landscape (briefs=0), the call is re-issued up "
+        f"to {value} more time(s) before the round falls through to the empty-"
+        "landscape short-circuit. This adds meta-agent invocations and can turn a "
+        "degenerate single-variant round into a full-width pool, so it is not "
+        "comparable byte-for-byte with a '0' run"
+    )
+
+
 def _task_reasoning_effort(args: Any) -> str | None:
     """Effective reasoning effort for the task (inner) agent, or ``None`` to omit.
 
@@ -7527,6 +7571,7 @@ def _build_experiment_lock(
         _retarget_after_freeze_provenance(bool(getattr(args, "retarget_after_freeze", False))),
         _record_gate_complement_provenance(bool(getattr(args, "record_gate_complement", False))),
         _traj_failure_signals_provenance(args),
+        _planner_retry_provenance(int(getattr(args, "planner_retry", 0))),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -8169,6 +8214,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
             f"the legal enum {list(BUCKETS)} or predicted_impact is empty; a second "
             "failure is archived exactly as today. Draws the P1 step ledger when "
             "--evolve-continuity is on."
+        ),
+    )
+    parser.add_argument(
+        "--planner-retry",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "F4: extra LLM-Planner meta calls to make when the model returns an "
+            "empty mutation landscape (briefs=0). 0 (default) is byte-identical: "
+            "one call, and an empty landscape short-circuits the round as today. "
+            "N>0 re-issues the meta call up to N more times, logging a WARNING per "
+            "retry, before falling through to the empty-landscape path."
         ),
     )
     parser.add_argument(

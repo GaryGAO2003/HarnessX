@@ -1115,3 +1115,13 @@ no-op 免检;continuity 下重试同扣一本账。
 **M-42 通道拓宽旗标(实验自变量,默认关)**。`--traj-failure-signals` 开时把正文专属失败信号计数入 frontmatter 四平铺键(`search_unavailable_count / fetch_error_count / fetch_empty_count / loop_warning_count`),落在扫描器已读的 `Read limit=30` 窗口;**默认关=字节等同**(测试钉死)。provenance 走 `_epsilon_provenance` 模式,零 `Hyperparams` 新字段。臂 0/臂 1 对比跑**须另行用户明令**。
 
 **测试**。本分支新增:`test_builder.py` 拼写参数化(合并后改测收敛解析器 `normalize_file_uri`)、`test_trajectory_frontmatter_v2.py` 双态字节等同;`test_processor_targets.py` 由断言缺陷改为断言修复(史料注释保留,两侧测试并存)。合并后全量绿数见 RUN-LOG 合并条目。
+
+## 7.36 `--planner-retry N` 空 landscape 重试(Aug-05,F4 修复,用户裁「1、2 都可以」;1109→1112)
+
+**起因**。LLM Planner 每轮一次 meta call 产出初始变体 landscape;模型返回空(`briefs=0`)时记 `empty_landscape=model_returned_zero` 并以退化池继续。e_pervar3 实测 34 次 planner call 有 2 次白卷 ⇒ e_pervar3 16 轮只跑 2 个变体。
+
+**接口**。`--planner-retry N`(int,默认 `0`=字节等同;名取 STATPOOL-DESIGN §8 预留)。`N=0`:单次调用,空 landscape 照旧短路(`short_circuit="planner_empty_landscape"`),无重试、无 WARNING、结果与 notes 一字不改。`N>0`:meta call 产出零变体时打响亮 WARNING(`planner returned empty landscape, retry i/N`)并重发,至多 N 次额外尝试;全部白卷后才落到原 `empty_landscape` 路径。parse 失败 / provider error 仍在首次尝试整轮回退确定性臂(重试只买新的非空 landscape,不修坏模型)。
+
+**记账**。`_planner_retry_provenance(value)` 走 `_epsilon_provenance` 模式(默认 `0` 返回 `None`,入 `_build_experiment_lock` warnings);`_LLMPlanner` 加 `planner_retry` dataclass 字段(默认 `0`,现有构造字节等同),`_make_planner` 经 `getattr(self.args, "planner_retry", 0)` 注入;**零 `Hyperparams` 新字段**。实际消耗的重试数逐次 WARNING 落日志。
+
+**测试**。`tests/test_planner_retry.py` +3(空→有效 retry=1 全宽池 + 单 WARNING / 全空 retry=2 落原路径 + 尝试计数 / 默认 0 单调用不重试字节等同)。全量 **1112 绿**(1109→1112)。
