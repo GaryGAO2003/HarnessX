@@ -16,12 +16,15 @@ class TemplateSystemPromptBuilder:
     """
 
     def __init__(self, template_path: str, extra_context: dict | None = None):
-        # Strip the file:// scheme and normalise the path so plain filesystem
-        # open() works for every slash-count spelling of a drive path (a
-        # canonical file URI carries three slashes; a Windows drive path must
-        # not keep the leading slash). Imported lazily to keep this deep
+        # Resolve a file:// URI (any spelling the evolver emits) to a plain path
+        # so open() works. Routes through the shared resolver so template and
+        # processor targets agree byte-for-byte; the old
+        # ``template_path[len("file://"):]`` left an RFC-style third slash in
+        # front of a Windows drive and the resulting OSError was swallowed into
+        # an EMPTY system prompt (890 rollouts in s1k8b103 ran promptless). A
+        # bare path passes through untouched. Imported lazily to keep this deep
         # processor module free of an import-time dependency on core.
-        if isinstance(template_path, str) and template_path.startswith("file://"):
+        if isinstance(template_path, str):
             from .....core.file_uri import normalize_file_uri
 
             template_path = normalize_file_uri(template_path)

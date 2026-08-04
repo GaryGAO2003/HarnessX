@@ -6082,7 +6082,14 @@ class VariantPoolRecipe:
             _, err_count = _compute_tool_stats(raw)
             record["error_count"] = err_count
             traj_text = _build_trajectory_text(task, raw, harness_config=round_config)
-            _write_task_trajectory(traj_dir, task, traj_text, record=record, filename=traj_name)
+            _write_task_trajectory(
+                traj_dir,
+                task,
+                traj_text,
+                record=record,
+                filename=traj_name,
+                failure_signals=bool(getattr(self.args, "traj_failure_signals", False)),
+            )
         return record
 
     # ------------------------------------------------------------------
@@ -7347,6 +7354,29 @@ def _ship_confirmation_provenance(mode: str) -> "str | None":
     )
 
 
+def _traj_failure_signals_provenance(args: Any) -> "str | None":
+    """Byte-safe lock record for ``--traj-failure-signals``; ``None`` when off.
+
+    Observation-only: the flag adds four flat scalar counts
+    (search_unavailable_count / fetch_error_count / fetch_empty_count /
+    loop_warning_count) to each trajectory's frontmatter, lifted from the body
+    so the meta-agent's frontmatter-only scanners can read tool-failure and loop
+    signals they otherwise never see. No rollout behaviour changes, but the
+    meta-agent's input does, so an 'on' run's evolution decisions are not
+    comparable byte-for-byte with an 'off' one.
+    """
+    if not bool(getattr(args, "traj_failure_signals", False)):
+        return None
+    return (
+        "traj_failure_signals=on ENABLED (OURS): each trajectory's frontmatter carries "
+        "four extra flat counts -- search_unavailable_count, fetch_error_count, "
+        "fetch_empty_count, loop_warning_count -- lifted from the body so the meta-agent's "
+        "frontmatter scanners can read tool-failure and loop signals it otherwise never "
+        "sees. No rollout behaviour changes, but the meta-agent's input does, so its "
+        "evolution decisions are not comparable byte-for-byte with an 'off' run"
+    )
+
+
 def _task_reasoning_effort(args: Any) -> str | None:
     """Effective reasoning effort for the task (inner) agent, or ``None`` to omit.
 
@@ -7496,6 +7526,7 @@ def _build_experiment_lock(
         _epsilon_provenance(float(getattr(args, "epsilon", 0.0))),
         _retarget_after_freeze_provenance(bool(getattr(args, "retarget_after_freeze", False))),
         _record_gate_complement_provenance(bool(getattr(args, "record_gate_complement", False))),
+        _traj_failure_signals_provenance(args),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -7699,6 +7730,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--clean", action="store_true", help="Wipe runs/<tag>/ before starting.")
     parser.add_argument("--no-judge", action="store_true", help="Disable LLMJudgeProcessor.")
+    parser.add_argument(
+        "--traj-failure-signals",
+        action="store_true",
+        help="Emit flat per-attempt failure-signal counts (search_unavailable_count, "
+        "fetch_error_count, fetch_empty_count, loop_warning_count) into trajectory "
+        "frontmatter, so the meta-agent's frontmatter-only scanners can see them. "
+        "Default off keeps frontmatter byte-identical.",
+    )
     parser.add_argument("--evolve-cost", type=float, default=EVOLVE_COST_CAP_USD)
     parser.add_argument("--evolve-steps", type=int, default=EVOLVE_MAX_STEPS)
     parser.add_argument("--evolve-wall-clock", type=int, default=EVOLVE_WALL_CLOCK_S)

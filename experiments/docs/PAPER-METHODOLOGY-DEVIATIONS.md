@@ -454,3 +454,31 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | 验证 | 补写后再次 resume,`[resume] continuing … from R3` **不再出现 V1 警告**,配置解析干净 |
 | 待办(代码层) | `resume.py` 应在无快照时,从 `pool_state.selected_candidate_ids` + `forked` 反解该变体的来源候选配置路径,而非返回一个已知不存在的路径。**当前实现"警告后带着坏指针继续"是最差的一种**——既不 fail-closed 也不自愈 |
 | 裁决层 | 夜间自主处置(Aug-03);运行已恢复 |
+
+## M-41 `file:` 装载器侧鲁棒化 + 实例化失败不再静默(Aug-04 新增,分支 `feat/observation-channel`)
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | **不适用**(平台契约,非论文机制) |
+| 起因 | M-37/M-38 只修了**提示词侧**(教 Evolver 正确拼写),装载缺陷本体仍在 vendored 代码内。s1k8b103 法证(`novelty/10-CHANNEL-AUDIT.md` §1):**7 条上线编辑仅 2 条生效**,5 条死于 `file:///D:/…` 剥 7 字符剩 `/D:/…`;`harness.py` 裸 `except: return None` 零日志吞掉;模板同病 ⇒ **890 个 rollout 跑在空系统提示词上**(=M-27 的"空 890")。e_pervar3 因 Evolver 恰好写了点分模块路径而幸免——纯属运气,非机制保障 |
+| 我方做法 | ① `builder.py` 新增 `_resolve_target_path`:`file:///D:/`、`file://D:/`(M-38 brief 教的两斜杠形)、裸盘符路径、POSIX `file:///home/…` **全部可解析**;`::` 作判据,点分模块路径不受影响。② `harness.py` `_instantiate_proc` 保留"失败返回 None 不炸整跑",但**ERROR 级记录完整 `_target_` 与异常**;消费端记录被丢弃的组件;工具注册同法 WARNING→ERROR。③ `template.py` 模板路径复用同一解析器 |
+| 与 M-38 的关系 | **互补两层**:M-38=预防(教拼写,防新错),本条=鲁棒(任何拼写都能载,旧错也能活)。M-38 遗留栏预言的"若 Evolver 某轮仍写错,M-37 现象复现"**自此关闭** |
+| ⚠️ 政策偏离(明示) | 本条**打破 M-38 遗留栏所记的"vendored 代码零改动"约束**。依据:用户 Aug-04 指令「我们需要一个 robust 的框架来 evolve」「可以把这份也改进,放进新的 branch 里」;隔离于 `feat/observation-channel` 分支(worktree `HarnessX-channel`),主线与活跑不受影响,M-40 的"运行期冻结 runner"纪律仍被遵守 |
+| 读数影响 | 纯前向:对已落盘 run 零影响。前向效果=消除 s1k8b103 型静默蒸发;比较跨越本分支前后的 run 时,**"编辑落地率"是新的混杂变量,必须并报** |
+| 测试 | `tests/unit/test_builder.py`(5 种拼写参数化 + caplog 断言 ERROR);`experiments/variant_pool/tests/test_processor_targets.py` 由"断言缺陷存在"改为"断言修复生效"(史料注释保留);`test_custom_tool_registry.py` 2 项 WARNING→ERROR。变体池套件 **1026 绿**;`tests/unit` **864 绿**、8 项既有失败(gbk locale/沙箱)与 HEAD 基线逐项一致(`git stash` 法证) |
+| 裁决层 | 用户令「可以把这份也改进,放进新的 branch 里」(Aug-04) |
+
+## M-42 观测通道拓宽旗标 `--traj-failure-signals`(Aug-04 新增,默认关,实验自变量)
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | Digester 的输入=轨迹文本;论文未定义任何失败信号的结构化通道,frontmatter 无失败列 |
+| 起因 | 通道审计(`novelty/10-CHANNEL-AUDIT.md` §2-4):Evolver 实为**自写扫描器只读 frontmatter**的编程 agent;正文专属信号 **fetch 652 次 / loop 807 次 / 搜索 437 次到达率 0**;digester 据此把工具失败判成"model_capability…not addressable"并自我关停 7 轮;**R8 自然实验**证明信号一进去它立刻产出对症提案(`SearchUnavailableSwitch`) |
+| 我方做法 | 旗标开时,轨迹落盘阶段对**渲染后的正文**计数 5 个精确标记串,四个平铺标量写入 frontmatter 行为层(落在 `Read limit=30` 窗口内):`search_unavailable_count / fetch_error_count / fetch_empty_count / loop_warning_count`。**默认关=frontmatter 逐字节等同**(专项测试钉死) |
+| 为何是 frontmatter 而非改工具/提示词 | meta-agent 的扫描器**本来就只读 frontmatter**——信号从它已用的通道进入,零提示词改动、零工具语义改动(搜索失败仍是 `return` 不是 `raise`,不扰动 agent 行为、不污染对照) |
+| 无标签泄漏 | 四个计数全部来自运行时工具输出,**零字节来自数据集标注**(呼应"按 GAIA level 分步数"因偷标签被否的裁定) |
+| 锁与 resume | 走 `_epsilon_provenance` 模式:`_traj_failure_signals_provenance(args)` 默认返回 `None`(lock 逐字节不变),开启时记 provenance 警告。**未新增 `Hyperparams` 字段,`experiment_lock.py` 未动** |
+| 实验设计(待用户明令) | 臂 0=关(论文原样通道) vs 臂 1=开;同床同预算同轮数。预注册预言:臂 1 的 actionability 不再把工具失败判死、旱灾轮数下降、出现 fetch/搜索方向的候选 |
+| 已知边界 | 计数按渲染正文做,模型若在自述中逐字回显标记串会被计入——按"该失败模式是否出现"的粗信号使用,不作供源精确计量(docstring 已注明) |
+| 测试 | `tests/unit/test_trajectory_frontmatter_v2.py`:开=计数正确(2/1/0/1 用例),关=键不存在、输出与 HEAD 逐字节一致;端到端过 `_write_task_trajectory` 双态 |
+| 裁决层 | 用户令「可以把这份也改进,放进新的 branch 里」(Aug-04);**跑臂对比须另行明令** |

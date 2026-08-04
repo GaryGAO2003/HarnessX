@@ -1105,3 +1105,13 @@ no-op 免检;continuity 下重试同扣一本账。
 (仍防御性 save/restore);全部改动在 recipe/experiments 层,`harnessx/` 零触碰。
 
 **测试**。+50(continuity 18 / abstain 17 / repair 15)。全量 **1108 绿**(1058→1108)。
+
+## 7.34 观测通道:`file:` 装载鲁棒化(M-41)(Aug-04,用户令「可以把这份也改进,放进新的 branch 里」;分支 `feat/observation-channel`,并入 `fix/novelty-s4`)
+
+**审计依据 `experiments/docs/novelty/10-CHANNEL-AUDIT.md`。** M-37/M-38 只教了 Evolver 拼写,缺陷本体未动("vendored 零改动"约束)。本分支打破该约束,但**合并时与 §7.31 收敛为单一解析器**:M-41 的全拼写覆盖(`file:///`、`file://`、裸路径、POSIX)与 percent 解码并入 `harnessx/core/file_uri.py::normalize_file_uri`,`builder._resolve_target_path` 移除,builder / template / harness / direct_targets 四点统一经此(裸路径原样返回,模板加载因此不再需 `file://` 守卫;`::` 判别保留使无 scheme 的裸路径目标仍可加载)。响亮化不变:`_instantiate_proc` 失败保留"返回 None 不炸跑"但 **ERROR 级响亮记录**(harness.py 三处 `DROPPED`),消费端记录被丢弃组件。依据=用户 Aug-04「robust 框架」指令;隔离于独立分支,不触活跑(M-40 纪律仍守)。
+
+## 7.35 通道拓宽旗标 `--traj-failure-signals`(M-42)(Aug-04,分支 `feat/observation-channel`,并入 `fix/novelty-s4`)
+
+**M-42 通道拓宽旗标(实验自变量,默认关)**。`--traj-failure-signals` 开时把正文专属失败信号计数入 frontmatter 四平铺键(`search_unavailable_count / fetch_error_count / fetch_empty_count / loop_warning_count`),落在扫描器已读的 `Read limit=30` 窗口;**默认关=字节等同**(测试钉死)。provenance 走 `_epsilon_provenance` 模式,零 `Hyperparams` 新字段。臂 0/臂 1 对比跑**须另行用户明令**。
+
+**测试**。本分支新增:`test_builder.py` 拼写参数化(合并后改测收敛解析器 `normalize_file_uri`)、`test_trajectory_frontmatter_v2.py` 双态字节等同;`test_processor_targets.py` 由断言缺陷改为断言修复(史料注释保留,两侧测试并存)。合并后全量绿数见 RUN-LOG 合并条目。

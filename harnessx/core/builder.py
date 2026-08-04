@@ -520,18 +520,23 @@ def _instantiate(cfg: "dict | None", default_factory=None) -> "Any":
             resolved[k] = v
 
     def _parse_file_target(_target: str) -> tuple[str, str]:
-        # Normalise the file URI first so every slash-count spelling of a
-        # drive path resolves (see harnessx.core.file_uri.normalize_file_uri).
+        # One resolver for every load point: normalise the file:// URI (any
+        # slash-count/scheme spelling) -- or leave a bare local path untouched --
+        # then split on the LAST ``::`` (a POSIX/Windows path never contains it).
+        # See harnessx.core.file_uri.normalize_file_uri.
         spec = normalize_file_uri(_target)
         path_part, sep, class_name = spec.rpartition("::")
         if not sep or not path_part.strip() or not class_name.strip():
             raise ValueError("invalid file target; expected 'file:///abs/path.py::ClassName'")
-        return path_part, class_name.strip()
+        return path_part.strip(), class_name.strip()
 
     target = cfg["_target_"]
-    # File-based direct target:
+    # File-based direct target. ``::`` separates a filesystem path (or file://
+    # URI) from the class symbol; dotted module paths never contain ``::``, so it
+    # is a safe discriminator that also catches the bare-path spellings the
+    # meta-agent emits without a scheme (``D:\\x\\y.py::MyProcessor``).
     #   file:///abs/path/to/processor.py::MyProcessor
-    if isinstance(target, str) and target.startswith("file://"):
+    if isinstance(target, str) and ("::" in target or target.startswith("file://")):
         import uuid as _uuid
 
         file_path, class_name = _parse_file_target(target)

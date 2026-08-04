@@ -83,6 +83,23 @@ def test_rfc_spelling_now_instantiates(processor_file: Path):
     assert type(obj).__name__ == "NudgeProcessor"
 
 
+def test_rfc_spelling_now_resolves_at_the_builder(processor_file: Path):
+    """Historical: the RFC three-slash form used to break the builder.
+
+    ``builder._parse_file_target`` stripped a fixed ``len("file://")`` bytes and
+    left the third slash in front of a Windows drive (``/D:\\x``), which the OS
+    resolved against the current drive and raised -- swallowed by
+    ``_instantiate_proc``'s bare ``except: return None``. This test used to
+    assert that raise, to pin *why* the recipe rewrites the target to two-slash.
+    The builder now resolves every spelling, so the same target instantiates
+    directly; the recipe still rewrites to the two-slash form for a stable,
+    idempotent config (``test_rewritten_target_instantiates``), but correctness
+    no longer *depends* on that rewrite.
+    """
+    inst = _instantiate(_spec(f"file:///{processor_file}::NudgeProcessor"))
+    assert type(inst).__name__ == "NudgeProcessor"
+
+
 def test_rewritten_target_instantiates(processor_file: Path):
     out = _resolve_artefact_paths(
         [_spec(f"file:///{processor_file}::NudgeProcessor")], processor_file.parent / "c.yaml"

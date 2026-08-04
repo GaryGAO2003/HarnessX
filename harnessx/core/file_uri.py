@@ -1,45 +1,48 @@
 # Copyright 2026 Darwin-Agent
 # SPDX-License-Identifier: MIT
-"""Normalisation for ``file://`` artifact URIs shared by the loaders.
+"""Normalisation for artifact ``file:`` URIs (and bare paths) shared by loaders.
 
-Agent-authored configs reference tools, processors, and templates by
-``file://`` URI, and several loaders (tool registry, processor builder,
-template builder) strip that scheme before opening the path. Keeping the
-scheme-stripping and path normalisation here means every loader repairs the
-same spellings the same way instead of each re-deriving a naive slice.
+Agent-authored configs reference tools, processors, and templates by ``file://``
+URI in several spellings, and the meta-agent also emits bare local paths
+(``D:\\x\\y.py``). Every loader -- tool registry, processor builder, template
+builder, direct-target parser -- routes through this single resolver so the same
+spelling is repaired the same way instead of each loader re-deriving a naive
+slice.
 """
 from __future__ import annotations
 
-import re
-
-# Canonical POSIX file URIs carry three slashes (``file:///D:/x``), so once the
-# ``file://`` scheme is removed a Windows drive path arrives with one or more
-# leading slashes in front of the drive letter. The OS cannot path-join such a
-# string (``/D:/x`` joins to ``<cwd-drive>:\D:\x`` and raises ``[Errno 22]``),
-# so a Windows drive path must not keep the leading slash.
-_DRIVE_LEADING_SLASHES = re.compile(r"^[/\\]+(?=[A-Za-z]:[/\\])")
-
 
 def normalize_file_uri(target: str) -> str:
-    """Strip the ``file://`` scheme and normalise the path for the local OS.
+    """Resolve a ``file:`` URI (or a bare local path) to a local filesystem path.
 
-    ``target`` is a ``file://`` URI with any leading-slash count (``file://``,
-    ``file:///``, ``file:////``...). The scheme is removed and:
+    Handles every spelling the evolver and the recipe's round-tripping emit:
 
-    * a Windows drive path loses every leading slash before the drive letter
-      (``file:///D:/x`` -> ``D:/x``);
-    * a POSIX absolute path keeps exactly one leading slash, collapsing any
-      extras (``file:////abs/x`` -> ``/abs/x``); it is never turned relative.
+    * ``file:///D:/x.py`` / ``file:///D:\\x.py`` -- the RFC-style third slash the
+      meta-agent writes. A naive ``target[len("file://"):]`` left ``/D:\\x`` in
+      front of the drive, which Windows resolved against the current directory
+      and raised.
+    * ``file://D:/x.py`` -- the two-slash form ``to_yaml_file`` persists and a
+      later round reads back. ``urllib.parse.urlparse`` mis-reads the drive
+      letter as a netloc and drops it, so it cannot be used here.
+    * ``D:/x.py`` / ``D:\\x.py`` -- a bare local path, returned untouched (no
+      scheme, so a Windows drive letter is never mistaken for a URL scheme).
+    * ``file:///home/u/x.py`` -- POSIX, resolved to ``/home/u/x.py`` on any host;
+      extra leading slashes collapse to exactly one and it is never turned
+      relative.
 
-    Backslashes in the remainder are tolerated. Any ``::symbol`` suffix is left
-    untouched for the caller to split. Normalisation only repairs URI spelling;
-    it never rewrites or guesses a path that was not given.
+    Percent-escapes are decoded. Any ``::symbol`` suffix is left untouched for
+    the caller to split. Normalisation only repairs URI spelling; it never
+    rewrites or guesses a path that was not given.
+
+    Mirrors ``recipe.gaia_evolver.run_variant_pool._as_local_path`` (the
+    recipe-side twin), kept in step without importing across the layer.
     """
-    remainder = target[len("file://") :]
-    drive = _DRIVE_LEADING_SLASHES.match(remainder)
-    if drive:
-        return remainder[drive.end() :]
-    if remainder.startswith("/"):
-        # POSIX absolute path: keep exactly one leading slash, never relative.
-        return "/" + remainder.lstrip("/")
-    return remainder
+    if not target.startswith("file:"):
+        return target
+    from urllib.parse import unquote
+
+    rest = unquote(target[len("file:") :])
+    body = rest.lstrip("/")
+    if len(body) >= 2 and body[0].isascii() and body[0].isalpha() and body[1] == ":":
+        return body  # Windows absolute, whatever the slash count/separator
+    return "/" + body if body else rest

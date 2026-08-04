@@ -4,7 +4,11 @@
 
 from __future__ import annotations
 
-from recipe.gaia_evolver.run import _render_trajectory_frontmatter  # noqa: E402
+from recipe.gaia_evolver.run import (  # noqa: E402
+    _count_trajectory_failure_signals,
+    _render_trajectory_frontmatter,
+    _write_task_trajectory,
+)
 
 
 def _record(**overrides) -> dict:
@@ -161,3 +165,77 @@ def test_fields_appear_in_stable_order_for_limit_30_reads():
     ]
     indices = [idx(k) for k in order if idx(k) >= 0]
     assert indices == sorted(indices), f"frontmatter order unstable: {indices}"
+
+
+# ---------------------------------------------------------------------------
+# --traj-failure-signals: body-only failure strings lifted into frontmatter
+# ---------------------------------------------------------------------------
+
+# A rendered body carrying 2x [SEARCH UNAVAILABLE], 1x "Fetch error for ",
+# 0x "No content retrieved from", and 1x [LoopDetection] (the last appended onto
+# a tool result exactly as LoopDetectionProcessor writes it).
+_FAILURE_BODY = (
+    "## Execution Steps\n"
+    "  -> web_search: [SEARCH UNAVAILABLE] All search providers failed for query: x\n"
+    "  -> web_search: [SEARCH UNAVAILABLE] All search providers failed for query: y\n"
+    "  -> web_fetch: Fetch error for https://example.com: read timed out\n"
+    "  -> web_fetch: some real content here\n\n[LoopDetection] the same tool call was issued\n"
+)
+
+_EXPECTED_COUNTS = {
+    "search_unavailable_count": 2,
+    "fetch_error_count": 1,
+    "fetch_empty_count": 0,
+    "loop_warning_count": 1,
+}
+
+
+class _StubTask:
+    task_id = "gaia-fs"
+
+
+def test_count_trajectory_failure_signals_counts_each_marker():
+    assert _count_trajectory_failure_signals(_FAILURE_BODY) == _EXPECTED_COUNTS
+
+
+def test_count_trajectory_failure_signals_covers_alternate_fetch_spellings():
+    # [fetch failed rolls into fetch_error_count; No content retrieved from is
+    # the empty-result marker (fetch_empty_count).
+    body = "[fetch failed: 503] and No content retrieved from https://x and [fetch failed after retries]"
+    counts = _count_trajectory_failure_signals(body)
+    assert counts["fetch_error_count"] == 2
+    assert counts["fetch_empty_count"] == 1
+
+
+def test_failure_signals_emitted_into_frontmatter_when_enabled():
+    counts = _count_trajectory_failure_signals(_FAILURE_BODY)
+    fm = _render_trajectory_frontmatter(_record(), failure_signals=counts)
+    assert "search_unavailable_count: 2" in fm
+    assert "fetch_error_count: 1" in fm
+    assert "fetch_empty_count: 0" in fm
+    assert "loop_warning_count: 1" in fm
+
+
+def test_failure_signals_absent_and_byte_identical_by_default():
+    # Default call must not emit any of the four keys, and must be byte-identical
+    # to passing failure_signals=None explicitly.
+    fm = _render_trajectory_frontmatter(_record())
+    for key in _EXPECTED_COUNTS:
+        assert key not in fm
+    assert fm == _render_trajectory_frontmatter(_record(), failure_signals=None)
+
+
+def test_write_task_trajectory_flag_off_is_byte_identical(tmp_path):
+    _write_task_trajectory(tmp_path, _StubTask(), _FAILURE_BODY, record=_record(), failure_signals=False)
+    off = (tmp_path / "gaia-fs.md").read_text(encoding="utf-8")
+    for key in _EXPECTED_COUNTS:
+        assert key not in off
+
+
+def test_write_task_trajectory_flag_on_emits_counts(tmp_path):
+    _write_task_trajectory(tmp_path, _StubTask(), _FAILURE_BODY, record=_record(), failure_signals=True)
+    on = (tmp_path / "gaia-fs.md").read_text(encoding="utf-8")
+    assert "search_unavailable_count: 2" in on
+    assert "fetch_error_count: 1" in on
+    assert "fetch_empty_count: 0" in on
+    assert "loop_warning_count: 1" in on

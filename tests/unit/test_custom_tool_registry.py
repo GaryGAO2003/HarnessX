@@ -89,10 +89,16 @@ class TestBuildToolRegistryFromConfig:
         assert hasattr(registry, "list_names")
 
     def test_malformed_file_uri_is_logged_not_raised(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        """A malformed file:// target is skipped with a WARNING (we
+        """A malformed file:// target is skipped with an ERROR (we
         must not crash the whole harness build, but we also must not
-        fail silently the way the old loader did)."""
-        caplog.set_level(logging.WARNING, logger="harnessx.core.harness")
+        fail silently the way the old loader did).
+
+        The level is ERROR, not WARNING: a custom tool that fails to load
+        hands the model an incomplete tool schema while the config still
+        claims the tool is present — the same silent-drop class the
+        observation-channel processor fix makes loud.
+        """
+        caplog.set_level(logging.ERROR, logger="harnessx.core.harness")
         cfg = ToolRegistryConfig(
             builtin=[],
             # Missing ``::symbol`` — parser must reject it.
@@ -100,15 +106,15 @@ class TestBuildToolRegistryFromConfig:
         )
         registry = _build_tool_registry_from_config(cfg)
         assert registry.list_names() == []
-        # The key point: there must be a WARNING record describing
+        # The key point: there must be an ERROR record describing
         # WHICH target failed and WHY, rather than the old silent pass.
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("tool_registry.custom" in r.getMessage() for r in warnings), (
-            f"expected a tool_registry.custom warning, got: {[r.getMessage() for r in warnings]}"
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("tool_registry.custom" in r.getMessage() for r in errors), (
+            f"expected a tool_registry.custom error, got: {[r.getMessage() for r in errors]}"
         )
 
     def test_missing_custom_file_is_logged_not_raised(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        caplog.set_level(logging.WARNING, logger="harnessx.core.harness")
+        caplog.set_level(logging.ERROR, logger="harnessx.core.harness")
         cfg = ToolRegistryConfig(
             builtin=[],
             custom=[f"file://{tmp_path / 'does_not_exist.py'}::demo_echo_tool"],
@@ -118,7 +124,7 @@ class TestBuildToolRegistryFromConfig:
         assert any(
             "tool_registry.custom" in r.getMessage() and "does_not_exist" in r.getMessage()
             for r in caplog.records
-            if r.levelno == logging.WARNING
+            if r.levelno == logging.ERROR
         )
 
     def test_unknown_builtin_is_logged_not_silently_dropped(self, caplog: pytest.LogCaptureFixture) -> None:

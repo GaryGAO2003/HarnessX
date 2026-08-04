@@ -2797,3 +2797,39 @@ post-ship 试用期)。工作树遗留:`l_rank_ablation.py` 的 E1-power 段(+56
 P1 continuity(NOTES.md 记忆+步数一本账+保底弃权)/ P2 一等 ABSTAIN(理由回流 planner)/
 P3 提案出口 schema 修复重试。三旗标默认字节等同;+50 测试,全量 1108 绿(1058→1108)。
 按用户令提交在新分支 fix/novelty-s4(s3 保持在确认门 9315e3e + 会话文档)。
+
+---
+
+## Aug-04 观测通道分支 `feat/observation-channel`(worktree `HarnessX-channel`,自 e8d3541 切出)
+
+**审计落盘**:`experiments/docs/novelty/10-CHANNEL-AUDIT.md` —— 双 run 全量核查:
+
+- **s1k8b103 上线编辑仅 2/7 生效**(R1 提示词、R11 StepCountdown;其余 5 条死于 `file:///` 剥 7 字符 bug,890 rollout 空提示词=M-27 的"空 890"逐字核实);meta-agent 自述 `FrozenInstanceError` 为编造(`state.py:119` 普通 dataclass)。
+- **e_pervar3 干净 2/2**(参数级指纹:`escalate_within` 2/3 对应升级触发步 18/17)——CH3 主跑编辑交付链可信。
+- **观测通道=自写扫描器只读 frontmatter**:fetch 652 次/loop 807 次/搜索 437 次正文信号到达率 0;digester 判"model_capability 不可修"自我关停 7 轮(旱灾真因,推翻 P8 沿用 s1 病因的猜测);**R8 自然实验**:某实例自写正文扫描器后当场诊断搜索失败并提案 `SearchUnavailableSwitch`(未被采纳)。
+- 失败客观规模(pervar R6-R15,n=2060):pass 70.1%,fetch 29.1%,搜索 17.8%,撞墙 12.6%,**真答错仅 7.2%**;撞墙死因 73.9% 伴 web 工具失败,纯净墙 17.3%。
+- 步数墙终判:过题中位数 8 步,≥18 步的过题仅 10.3% ⇒ 抬上限=弱杠杆。
+
+**代码落盘**(全部含测试;变体池 1026 绿,tests/unit 864 绿,8 项既有 gbk/沙箱失败与基线逐项一致):
+
+1. **M-41** `file:` 装载器侧鲁棒化(`builder._resolve_target_path` 全拼写;`_instantiate_proc`/工具注册失败 ERROR 级响亮化)。⚠️ 明示打破 M-38 遗留栏"vendored 零改动"约束,依据=用户 Aug-04「robust 框架」令,隔离于本分支。
+2. **M-42** `--traj-failure-signals`(默认关=frontmatter 字节等同;开=四平铺失败计数键入 `Read limit=30` 窗口)。零 `Hyperparams` 新字段,provenance 走 `_epsilon_provenance` 模式。
+
+**方法学警告(跨 session 必读)**:① `ripgrep` 对轨迹 `.md` 假零(NUL 字节判 binary),一切轨迹计数必须 `grep -a`;② `[SEARCH UNAVAILABLE]` 全树计数口径敏感(908/703 vs 1327/946,范围不同),可靠口径=settled 逐尝试受影响数;③ e_pervar3 `comparison.json` 仅覆盖 R6-R15。
+
+**未做**:臂 0/臂 1 对比跑(待用户明令);`run_meta.py` 未接旗标(独立渲染器,非变体池路径,刻意不接)。
+
+---
+
+## Aug-05 · 合并 `feat/observation-channel`(67859d1)入 `fix/novelty-s4`
+
+无冲突自动合并:`harness.py`(`_instantiate_proc` / 消费端 else 分支 / 工具注册三处 ERROR 级 `DROPPED` 响亮化)、`test_builder.py` / `test_custom_tool_registry.py` / `test_trajectory_frontmatter_v2.py`(净入)、`run.py`、`PAPER-METHODOLOGY-DEVIATIONS.md`、novelty 文档。六处冲突逐一裁决(每行一处):
+
+1. **`harnessx/core/builder.py`** — 收敛为单一解析器:删除 channel 的 `_resolve_target_path`,`_parse_file_target` 统一经 `file_uri.normalize_file_uri`(与 harness/direct_targets 同型);channel 的 `::` 判别(无 scheme 裸路径目标可加载、dotted module 不碰)保留。
+2. **`harnessx/core/file_uri.py`**(非冲突文件,收敛顺带改) — `normalize_file_uri` 扩为超集,吸收 channel 独有拼写:`file:` 单冒号 / 任意斜杠数、percent 解码(`unquote`)、裸路径原样返回;镜像 recipe 侧 `_as_local_path`。
+3. **`template.py`** — 保留 channel 行为(无条件解析 + 空提示词 890-rollout bug 注释),改经 `file_uri.normalize_file_uri`(裸路径穿透,不再需 `file://` 守卫)。
+4. **`experiments/variant_pool/tests/test_processor_targets.py`** — 两侧测试并存(`test_rfc_spelling_now_instantiates` + `test_rfc_spelling_now_resolves_at_the_builder`:断言同、史料注释异,非字面重复故不去重)。
+5. **`experiments/variant_pool/SPEC.md`** — s4 §7.30–7.33 为准保号;channel 自写「§7.30」renumber 为 §7.34(M-41)/§7.35(M-42),内部交叉引用(`_resolve_target_path`→`normalize_file_uri`)随收敛订正。
+6. **`experiments/docs/RUN-LOG.md`** — append-only,两侧条目按序全留,零删除(本条即合并记录)。
+
+`test_builder.py` 的两条 `_resolve_target_path` 参数化测试随收敛改测 `normalize_file_uri`(Win/POSIX/裸路径六拼写全绿)。**全量(变体池)1109 绿**(s4 1108 + 并存测试 1);`tests/unit` 882 绿(5 项 sandbox/plugin/workspace-home 环境失败经 detached-worktree 法证与 c6064b6 基线逐项一致,非合并回归)。默认行为字节等同:`--traj-failure-signals` 默认关、`_traj_failure_signals_provenance` 默认 `None`。
