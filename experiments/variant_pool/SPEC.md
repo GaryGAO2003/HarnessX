@@ -1061,3 +1061,47 @@ next_round 修选择与计分同源(winner's curse)。
 **测试**。`tests/test_ship_confirmation.py` 12 项(off 字节等同 / 窗口×全床四种组合 /
 REJECT 不触发确认 / 记账条件落盘 / provenance / lock 往返 / argparse 拒预留档)。
 全量 **1058 绿**(1046→1058)。
+
+## 7.33 evolver 三修:continuity / abstain / proposal-repair(Aug-04,用户令「可以开工」「提交到新的 novelty branch」;1058→1108)
+
+**三旗标,默认全 off/error/0 字节等同**(有显式测试):
+
+```
+--evolve-continuity {off,on}         P1 槽内连续性
+--evolve-abstain {error,outcome}     P2 一等弃权
+--proposal-repair-retry {0,1}        P3 提案出口修复重试
+```
+
+约束:`continuity on` 需 `abstain outcome`(否则自动弃权会被记成错误),
+且与 `--evolve-commit-bounce on` 互斥(continuity 取代 bounce)——argparse 期报错。
+
+**P1**(起因:11 空手死、R4/R7 团灭;bounce 已开仍死;现行 retry 每次新会话+全额步数)。
+attempt 仍开新线程(新想法能换路);contract 要求维护 `_meta_scratch/NOTES.md`,
+重试时把上一 attempt 的笔记(缺失则摘其最后 assistant 分析,~4k 上限)连同
+DECISION_REQUIRED 一并注入;**步数一本账**——slot 总额=配置 evolve_steps,
+每 attempt 授予剩余(用量从 newest session `*_state.json` 的 `step` 读回,
+不可读按满额保守计),floor=5 步;耗尽仍无 config → 拷父配置自动落显式弃权
+(理由 "exhausted without decision …")。RuntimeError 死亡路径在此旗标下消失
+(超时/非 DECISION_REQUIRED 硬错误照旧 raise)。`max_steps` 进入即存、finally 恢复。
+
+**P2**(起因:白卷=设计内合法弃权,却记 producer ValueError、无理由、planner 无信号)。
+`_maybe_abstain`:byte-identical 在 `outcome` 档返回一等 `AbstainProposal`
+(candidate_pipeline 新 dataclass,audit phase="abstain" 复用现有
+`PIPELINE_{phase}` 归档器 ⇒ 台账行 `failed_stage="PIPELINE_ABSTAIN"`、
+`archive_reason="ABSTAIN: <理由>"`);理由取 `_meta_scratch/ABSTAIN.md`
+(contract 有 gated 指令),缺省 "(no reason given)",P1 自动弃权用其生成理由。
+`candidate_accounting` 增 `abstains`/`abstain_records`(仅 outcome 档落盘);
+`PipelineContext.prior_abstains`(默认空元组=字节等同)由 recipe 注入上一轮同
+目标弃权,`_LLMPlanner._compose_input` 仅在非空时附 "PRIOR ABSTAINS" 节;
+确定性 planner 不读。弃权照常占槽,`actual_candidates` 口径不变。
+
+**P3**(起因:bucket 缺失 ×2、no-flip ×3 下游才炸,各烧一次 evolve)。
+producer 出口以 manifest.py 同一套 `BUCKETS` / `validate_complete` /
+`_predicted_impact_problems` 校验(错误串逐字复用),违规且有额度时一次定向重试
+(contract 携 `proposal_repair_instruction` 指名字段与合法值);再败按原样归档;
+no-op 免检;continuity 下重试同扣一本账。
+
+**实现注记**。slot agent 每 producer 调用 `copy.copy` 新建,无跨槽共享
+(仍防御性 save/restore);全部改动在 recipe/experiments 层,`harnessx/` 零触碰。
+
+**测试**。+50(continuity 18 / abstain 17 / repair 15)。全量 **1108 绿**(1058→1108)。

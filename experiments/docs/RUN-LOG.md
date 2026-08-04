@@ -2791,3 +2791,9 @@ C-R8-04 类"工具静默不注册→评测后才 ROUNDTRIP_L2"的形态从结构
 全量 1058 绿(1046→1058)。旗标并入 STATPOOL §8 预留命名空间(next_round/eprocess 留给
 post-ship 试用期)。工作树遗留:`l_rank_ablation.py` 的 E1-power 段(+56 行)系先前
 未提交工作,与本特性无关,未入本提交。
+
+### 🛠 Aug-04 · evolver 三修落地(SPEC §7.33),分支切 fix/novelty-s4
+
+P1 continuity(NOTES.md 记忆+步数一本账+保底弃权)/ P2 一等 ABSTAIN(理由回流 planner)/
+P3 提案出口 schema 修复重试。三旗标默认字节等同;+50 测试,全量 1108 绿(1058→1108)。
+按用户令提交在新分支 fix/novelty-s4(s3 保持在确认门 9315e3e + 会话文档)。
