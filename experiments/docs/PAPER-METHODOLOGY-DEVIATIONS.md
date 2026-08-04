@@ -467,6 +467,7 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | 读数影响 | 纯前向:对已落盘 run 零影响。前向效果=消除 s1k8b103 型静默蒸发;比较跨越本分支前后的 run 时,**"编辑落地率"是新的混杂变量,必须并报** |
 | 测试 | `tests/unit/test_builder.py`(5 种拼写参数化 + caplog 断言 ERROR);`experiments/variant_pool/tests/test_processor_targets.py` 由"断言缺陷存在"改为"断言修复生效"(史料注释保留);`test_custom_tool_registry.py` 2 项 WARNING→ERROR。变体池套件 **1026 绿**;`tests/unit` **864 绿**、8 项既有失败(gbk locale/沙箱)与 HEAD 基线逐项一致(`git stash` 法证) |
 | 裁决层 | 用户令「可以把这份也改进,放进新的 branch 里」(Aug-04) |
+| 合并订正(Aug-05) | 并入 `fix/novelty-s4` 时与 §7.31 的 `normalize_file_uri` 收敛为**单一解析器**:`builder._resolve_target_path` 移除,其全拼写覆盖 + percent 解码并入 `harnessx/core/file_uri.py::normalize_file_uri`;builder / template / harness / direct_targets 四点统一经此(裸路径原样返回,故模板加载不再需 `file://` 守卫;`::` 判别保留)。上「我方做法 ①③」的机制随之改经该函数,`test_builder.py` 两条参数化测试改测 `normalize_file_uri`。合并后全量(变体池)**1112 绿**(含 F4);`tests/unit` 5 项 sandbox/plugin/workspace-home 环境失败经 detached-worktree 法证与 c6064b6 基线逐项一致(取代上「测试」栏 channel 分支的 1026/864 独立计数) |
 
 ## M-42 观测通道拓宽旗标 `--traj-failure-signals`(Aug-04 新增,默认关,实验自变量)
 
