@@ -135,16 +135,30 @@ DEFAULT_REGRESSION_BASELINE = REGRESSION_BASELINE_GLOBAL
 
 
 class GateStage(Enum):
-    """The ordered deterministic checks of §4.3 p.10."""
+    """The ordered deterministic checks of §4.3 p.10.
+
+    The first five members are the run_gate sequence (see :data:`GATE_SEQUENCE`).
+    ``SHIP_CONFIRM`` is **not** a run_gate stage: it is the engine-level pre-ship
+    full-bed confirmation (``--ship-confirmation full_bed``). ``run_gate`` never
+    reaches it — the window seesaw still exits at ``SEESAW_REGRESSION`` — but a
+    candidate the window gate would ship can be overturned by the full-bed
+    re-classification, and that archival record carries this stage. It is
+    deliberately excluded from :data:`GATE_SEQUENCE` so the five-stage sequence
+    (and its order tests) stay exactly the paper's.
+    """
 
     MANIFEST_COMPLETE = "manifest_complete"
     CANONICALIZE = "canonicalize"
     BUILD_SMOKE_L1 = "build_smoke_l1"
     ROUNDTRIP_L2 = "roundtrip_l2"
     SEESAW_REGRESSION = "seesaw_regression"
+    #: Engine-level pre-ship full-bed confirmation (not a run_gate check).
+    SHIP_CONFIRM = "ship_confirm"
 
 
-#: Evaluation order; the first failing stage halts the gate.
+#: Evaluation order; the first failing stage halts the gate. ``SHIP_CONFIRM`` is
+#: intentionally absent — it is enacted by the engine after the gate, never by
+#: ``run_gate`` (see :class:`GateStage`).
 GATE_SEQUENCE = (
     GateStage.MANIFEST_COMPLETE,
     GateStage.CANONICALIZE,

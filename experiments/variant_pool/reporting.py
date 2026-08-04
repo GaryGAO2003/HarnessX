@@ -157,6 +157,14 @@ class CandidateTaskResult:
     archive_reason: str = ""
     skipped_reason: str | None = None
     evaluated: bool = True
+    #: --ship-confirmation full_bed only. ``confirm_attempts`` is the candidate's
+    #: full-bed confirmation rollout count (a separate bucket, never mixed into
+    #: ``n_att`` / infra / budget, which stay the window gate's counts);
+    #: ``ship_confirm`` carries the window-vs-full verdict meta. Both stay at their
+    #: defaults (0 / ``None``) when confirmation did not run and are then omitted
+    #: from :meth:`to_dict`, so an ``off`` run's candidate stream is byte-identical.
+    confirm_attempts: int = 0
+    ship_confirm: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _validate_attempt_counts(
@@ -166,9 +174,14 @@ class CandidateTaskResult:
             infra_failures=self.infra_failures,
             budget_exhaustions=self.budget_exhaustions,
         )
+        if self.confirm_attempts < 0:
+            raise ValueError(
+                f"{self.candidate_id}:{self.task_id}: confirm_attempts must be >= 0, "
+                f"got {self.confirm_attempts}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        row: dict[str, Any] = {
             "task_id": self.task_id,
             "round_idx": self.round_idx,
             "candidate_id": self.candidate_id,
@@ -183,6 +196,12 @@ class CandidateTaskResult:
             "skipped_reason": self.skipped_reason,
             "evaluated": self.evaluated,
         }
+        # Emitted only when confirmation ran, so an ``off`` run stays byte-identical.
+        if self.confirm_attempts:
+            row["confirm_attempts"] = self.confirm_attempts
+        if self.ship_confirm is not None:
+            row["ship_confirm"] = self.ship_confirm
+        return row
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:

@@ -2783,3 +2783,11 @@ DECISION_REQUIRED 逐字根因:"ended with analysis but did not commit to a fina
 用户裁「基建必须保证 agent 能读到东西」。`normalize_file_uri` 收敛全部斜杠拼写,
 四个 core 加载点接入;三个金丝雀断言翻转;全量 1046 绿(1035→1046)。
 C-R8-04 类"工具静默不注册→评测后才 ROUNDTRIP_L2"的形态从结构上消失。
+
+### 🚢 Aug-04 · 覆盖主修第一刀落地:`--ship-confirmation full_bed`(SPEC §7.32)
+
+用户裁「变体没好好测过,这个才是该修的」。窗口=预筛、全床=判决、REJECT 零确认成本;
+`SHIP_CONFIRM` 引擎级归档携双窗口证据;确认 rollouts 独立记账;默认 off 字节等同。
+全量 1058 绿(1046→1058)。旗标并入 STATPOOL §8 预留命名空间(next_round/eprocess 留给
+post-ship 试用期)。工作树遗留:`l_rank_ablation.py` 的 E1-power 段(+56 行)系先前
+未提交工作,与本特性无关,未入本提交。

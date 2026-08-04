@@ -1036,3 +1036,28 @@ brief 是概率性的(C-R8-04 实证违反),加载端必须兜底。原三个「
 **测试**。`test_tool_targets.py` +11(2/3/4 斜杠 × 正反斜杠矩阵、C-R8-04 killer 经注册表
 真加载、POSIX 保留、缺文件仍 fail-closed、dotted target 不入正规化)。全量 **1046 绿**
 (1035→1046);core 侧 `tests/unit` 加载器三件 41 绿(PYTHONUTF8=1)。
+
+## 7.32 上船确认门 `--ship-confirmation full_bed`(Aug-04,用户裁「这个才是我们该修复的问题」;1046→1058)
+
+**起因**。候选只在 ~12/103 题路由窗口受审(312 evaluated_tasks / 25 候选),apply/fork
+决定全在窗口内做出,窗外提升/缺陷结构性不可见;终局 coverage V0=39 / V1=64。
+
+**语义**。**窗口=预筛,全床=判决**:窗口 REJECT 照旧(零确认成本);窗口 APPLY/FORK →
+先在全任务床重评(同一 evaluate 回调,`phase=ship_confirm`),同 ledger /
+regression_baseline / min_fork 重跑 `_classify`→`_decide`,**全床裁决与其
+improved/regressed 集整体取代窗口的**;全床 REJECT → 引擎级新阶段 `SHIP_CONFIRM`
+归档,archive_reason 携双窗口证据(window said … but full bed said …),不上船。
+
+**边界**。`GateStage.SHIP_CONFIRM` 不入 `GATE_SEQUENCE`(五阶段论文序不动,枚举分割
+测试改指 `GATE_SEQUENCE − {SHIP_CONFIRM}`);确认 attempts 独立记账
+(`confirm_attempts`,scope=`ship_confirm`),不混窗口 candidate_gate、不混
+settled_active_pool;全部新字段仅在确认实际发生时落盘 ⇒ 默认 off 字节等同(有显式测试)。
+`next_round` / `eprocess` 两档为 STATPOOL-DESIGN §6.2/§8 预留(post-ship 试用期),
+本条只实现 pre-ship `full_bed`,两机制互补:full_bed 修决定前的覆盖盲区,
+next_round 修选择与计分同源(winner's curse)。
+
+**成本**。每个准上船者 103×2=206 attempts;e_pervar3 档全跑仅 2 个准上船者 ⇒ ≈全跑量 20%。
+
+**测试**。`tests/test_ship_confirmation.py` 12 项(off 字节等同 / 窗口×全床四种组合 /
+REJECT 不触发确认 / 记账条件落盘 / provenance / lock 往返 / argparse 拒预留档)。
+全量 **1058 绿**(1046→1058)。

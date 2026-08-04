@@ -124,6 +124,9 @@ from benchmarks.gaia.task import GAIATask, load_gaia_tasks, load_gaia_tasks_from
 from experiments.variant_pool.engine import (
     DEFAULT_MIN_FORK,
     DEFAULT_PATIENCE,
+    DEFAULT_SHIP_CONFIRMATION,
+    SHIP_CONFIRM_PHASE,
+    SHIP_CONFIRMATION_MODES,
     SHIP_POLICIES,
     RoundResult,
     VariantPoolEngine,
@@ -275,6 +278,23 @@ DEFAULT_L2_CERT = "auto"
 #: engine; ``bucket_disjoint`` is the App B.1 (p.34) ranked multi-ship arm. The
 #: allowed set is owned by :data:`experiments.variant_pool.engine.SHIP_POLICIES`.
 DEFAULT_SHIP_POLICY = "first_wins"
+
+#: --ship-confirmation — pre-ship full-bed gate (the routed-window blindness fix).
+#: Candidates are gated on their routed window ``T_k`` (~12 of 103 tasks in
+#: e_pervar3), so a window APPLY/FORK cannot see what the edit does to the ~90
+#: tasks routed elsewhere. ``off`` (default) is byte-identical — the window
+#: seesaw ships directly, nothing new is written. ``full_bed`` re-evaluates every
+#: candidate about to APPLY/FORK on the whole task bed (same pass-k structure and
+#: the same candidate-evaluation path, only parameterised by task list),
+#: re-classifies + re-decides, and lets that verdict REPLACE the window decision;
+#: a full-bed REJECT archives the candidate under GateStage.SHIP_CONFIRM. Window
+#: REJECTs are never confirmed (no extra cost). The allowed set is owned by
+#: :data:`experiments.variant_pool.engine.SHIP_CONFIRMATION_MODES`; a non-default
+#: mode is recorded in the experiment lock provenance. Modes ``next_round`` and
+#: ``eprocess`` are RESERVED by STATPOOL-DESIGN.md §6.2/§8 for a *post*-ship
+#: probation mechanism (provisional ship -> next round's fresh measurement ->
+#: rollback) and are NOT implemented here; ``full_bed`` is the pre-ship,
+#: candidate-scope confirmation.
 
 #: The pass-marker replay.py writes as the first line of ``REPLAY.md`` on a
 #: passing smoke (``harnessx/meta_harness/replay.py`` ``render_report_md`` ->
@@ -4059,6 +4079,18 @@ class VariantPoolRecipe:
             raise ValueError(
                 f"ship_policy must be one of {SHIP_POLICIES}, got {self.ship_policy!r}"
             )
+        # --ship-confirmation: pre-ship full-bed gate. ``off`` (default) keeps the
+        # window seesaw's ship byte-identical; ``full_bed`` re-classifies every
+        # window APPLY/FORK on the whole task bed before it is enacted (engine
+        # SHIP_CONFIRMATION_MODES). Window REJECTs are never confirmed.
+        self.ship_confirmation = str(
+            getattr(args, "ship_confirmation", DEFAULT_SHIP_CONFIRMATION)
+        )
+        if self.ship_confirmation not in SHIP_CONFIRMATION_MODES:
+            raise ValueError(
+                f"ship_confirmation must be one of {SHIP_CONFIRMATION_MODES}, "
+                f"got {self.ship_confirmation!r}"
+            )
         # --aegis-digester: Phase A1. ``deterministic`` (default) keeps the
         # byte-identical _EvidenceDigester; ``llm`` model-backs the Digester role.
         self.aegis_digester = str(getattr(args, "aegis_digester", DEFAULT_AEGIS_DIGESTER))
@@ -4234,6 +4266,7 @@ class VariantPoolRecipe:
             record_selected_results=self.candidate_mode != "paper",
             ship_policy=self.ship_policy,
             regression_baseline=self.regression_baseline,
+            ship_confirmation=self.ship_confirmation,
         )
 
     # ------------------------------------------------------------------
@@ -4255,6 +4288,12 @@ class VariantPoolRecipe:
             self._round_candidates = {}
             self._round_traj_dir = {}
             self._round_records = {}
+            # --ship-confirmation full_bed: full-bed confirmation rollouts, kept in
+            # dedicated buckets so they never mix into the window gate accounting
+            # (_round_records) or the settled active pool. Empty under ``off``.
+            self._round_confirm_traj_dir = {}
+            self._round_confirm_records = {}
+            self._round_confirm_outcomes = {}
             self._round_candidate_memos = {}
             self._round_revision_requests = {}
             self._pipeline_results = {}
@@ -5098,34 +5137,59 @@ class VariantPoolRecipe:
     # callback: evaluate
     # ------------------------------------------------------------------
 
-    def _evaluate(self, candidate: Any, t_k: set[str], round_idx: int) -> dict[str, tuple[int, int]]:
-        """Evaluate a pre-settlement candidate on ``T_k`` for the gate."""
-        return self._await(self._run_evaluation(candidate, set(t_k), round_idx))
+    def _evaluate(
+        self,
+        candidate: Any,
+        t_k: set[str],
+        round_idx: int,
+        phase: str = "window",
+    ) -> dict[str, tuple[int, int]]:
+        """Evaluate a pre-settlement candidate for the gate.
 
-    async def _run_evaluation(self, candidate: Any, t_k: set[str], round_idx: int) -> dict[str, tuple[int, int]]:
+        ``phase`` is ``"window"`` for the routed-window gate eval (the default the
+        engine passes on every window call, so an ``off`` run is byte-identical)
+        and :data:`SHIP_CONFIRM_PHASE` when the engine re-evaluates the same
+        candidate on the whole task bed under ``--ship-confirmation full_bed``.
+        The confirmation reuses this exact evaluator (only ``t_k`` widens to the
+        full bed); the phase only routes accounting into the ``ship_confirm``
+        scope so its rollouts never mix into the window gate counters.
+        """
+        return self._await(self._run_evaluation(candidate, set(t_k), round_idx, phase=phase))
+
+    async def _run_evaluation(
+        self,
+        candidate: Any,
+        t_k: set[str],
+        round_idx: int,
+        phase: str = "window",
+    ) -> dict[str, tuple[int, int]]:
         vid = candidate.target_variant
         candidate_id = str(candidate.candidate_id)
-        vround_dir = (
-            self.run_dir
-            / f"R{round_idx}"
-            / vid
-            / "candidate_gate"
-            / candidate_id
-        )
+        # A confirmation eval carries the same pass-k structure as the window gate
+        # eval; only the scope tag, output dir and accounting bucket differ.
+        confirm = phase == SHIP_CONFIRM_PHASE
+        scope = "ship_confirm" if confirm else "candidate_gate"
+        vround_dir = self.run_dir / f"R{round_idx}" / vid / scope / candidate_id
         outcomes, cleaned, traj_dir = await self._run_config_evaluation(
             config_path=Path(candidate.config_path),
             variant_id=vid,
             task_ids=set(t_k),
             round_idx=round_idx,
             vround_dir=vround_dir,
-            label=f"R{round_idx}-{vid}-{candidate_id}",
-            trajectory_rel_dir=(
-                f"R{round_idx}/{vid}/candidate_gate/{candidate_id}/trajectories"
-            ),
-            measurement_scope="candidate_gate",
+            label=f"R{round_idx}-{vid}-{candidate_id}"
+            + ("-confirm" if confirm else ""),
+            trajectory_rel_dir=f"R{round_idx}/{vid}/{scope}/{candidate_id}/trajectories",
+            measurement_scope=scope,
         )
-        self._round_traj_dir[candidate_id] = traj_dir
-        self._round_records[candidate_id] = cleaned
+        if confirm:
+            # Kept in dedicated buckets: never folded into the window gate's
+            # _round_records / candidate_gate accounting or the settled active pool.
+            self._round_confirm_traj_dir[candidate_id] = traj_dir
+            self._round_confirm_records[candidate_id] = cleaned
+            self._round_confirm_outcomes[candidate_id] = dict(outcomes)
+        else:
+            self._round_traj_dir[candidate_id] = traj_dir
+            self._round_records[candidate_id] = cleaned
         return outcomes
 
     def _evaluate_active_variant(
@@ -5653,6 +5717,13 @@ class VariantPoolRecipe:
                 if diagnostic.failed_stage is not None
                 else None
             )
+            # --ship-confirmation full_bed: the candidate's full-bed confirmation
+            # rollout count (sum of attempts over the whole bed) and the window-vs-
+            # full verdict meta. Both stay 0 / None under ``off`` (no confirmation
+            # ran), so CandidateTaskResult omits them and the stream is byte-identical.
+            confirm_outcomes = self._round_confirm_outcomes.get(candidate_id, {})
+            confirm_attempts = sum(int(n_att) for (_n_pass, n_att) in confirm_outcomes.values())
+            ship_confirm = diagnostic.ship_confirm
             if not diagnostic.evaluation:
                 self.report.add_candidate(
                     CandidateTaskResult(
@@ -5667,6 +5738,8 @@ class VariantPoolRecipe:
                         archive_reason=diagnostic.archive_reason,
                         skipped_reason=diagnostic.skipped_reason,
                         evaluated=False,
+                        confirm_attempts=confirm_attempts,
+                        ship_confirm=ship_confirm,
                     )
                 )
                 continue
@@ -5687,6 +5760,8 @@ class VariantPoolRecipe:
                         evaluated=True,
                         infra_failures=infra,
                         budget_exhaustions=budget,
+                        confirm_attempts=confirm_attempts,
+                        ship_confirm=ship_confirm,
                     )
                 )
 
@@ -5881,6 +5956,46 @@ class VariantPoolRecipe:
         budget = min(budget, failures - infra)
         return infra, budget
 
+    def _candidate_diagnostic_state(self, candidate_id: str, diagnostic: Any) -> dict[str, Any]:
+        """One candidate's pool_state diagnostic block.
+
+        The base block is unchanged. ``--ship-confirmation full_bed`` adds two
+        keys — ``ship_confirm`` (window-vs-full verdict meta) and
+        ``confirm_attempts`` (the full-bed confirmation rollout count, a separate
+        bucket, never mixed into the window ``evaluation`` counts) — but ONLY when
+        confirmation actually ran for this candidate. Under ``off`` no candidate
+        carries ``ship_confirm``, so no key is added and the snapshot is
+        byte-identical.
+        """
+        block: dict[str, Any] = {
+            "variant_id": diagnostic.variant_id,
+            "decision": (
+                diagnostic.decision.value
+                if diagnostic.decision is not None
+                else None
+            ),
+            "failed_stage": (
+                diagnostic.failed_stage.name
+                if diagnostic.failed_stage is not None
+                else None
+            ),
+            "archive_reason": diagnostic.archive_reason,
+            "skipped_reason": diagnostic.skipped_reason,
+            "evaluated": bool(diagnostic.evaluation),
+            "evaluation": {
+                task_id: [outcome[0], outcome[1]]
+                for task_id, outcome in sorted(diagnostic.evaluation.items())
+            },
+        }
+        ship_confirm = getattr(diagnostic, "ship_confirm", None)
+        if ship_confirm is not None:
+            confirm_outcomes = self._round_confirm_outcomes.get(candidate_id, {})
+            block["ship_confirm"] = ship_confirm
+            block["confirm_attempts"] = sum(
+                int(n_att) for (_n_pass, n_att) in confirm_outcomes.values()
+            )
+        return block
+
     def _dump_round(self, result: RoundResult, round_idx: int) -> None:
         """Per-round variant-pool snapshot (routing partition + events)."""
         candidate_accounting = self._candidate_accounting(result)
@@ -5898,26 +6013,7 @@ class VariantPoolRecipe:
             "no_candidate": candidate_accounting["actual_candidates"] == 0,
             "selected_candidate_ids": dict(sorted(result.selected_candidate_ids.items())),
             "candidate_diagnostics": {
-                candidate_id: {
-                    "variant_id": diagnostic.variant_id,
-                    "decision": (
-                        diagnostic.decision.value
-                        if diagnostic.decision is not None
-                        else None
-                    ),
-                    "failed_stage": (
-                        diagnostic.failed_stage.name
-                        if diagnostic.failed_stage is not None
-                        else None
-                    ),
-                    "archive_reason": diagnostic.archive_reason,
-                    "skipped_reason": diagnostic.skipped_reason,
-                    "evaluated": bool(diagnostic.evaluation),
-                    "evaluation": {
-                        task_id: [outcome[0], outcome[1]]
-                        for task_id, outcome in sorted(diagnostic.evaluation.items())
-                    },
-                }
+                candidate_id: self._candidate_diagnostic_state(candidate_id, diagnostic)
                 for candidate_id, diagnostic in sorted(
                     result.candidate_diagnostics.items()
                 )
@@ -6422,6 +6518,29 @@ def _regression_baseline_provenance(mode: str) -> "str | None":
     )
 
 
+def _ship_confirmation_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--ship-confirmation`` (routed-window fix, W1-style).
+
+    Returns ``None`` for the default ``off`` (the lock stays byte-identical); a
+    provenance warning otherwise. ``full_bed`` is not a taint — it is a stricter,
+    more honest ship rule — but it changes which candidates apply/fork/reject and
+    adds full-bed rollouts, so it must be recorded and is not comparable
+    byte-for-byte with an ``off`` run.
+    """
+    if mode == DEFAULT_SHIP_CONFIRMATION:
+        return None
+    return (
+        f"ship_confirmation={mode} ENABLED (routed-window fix): before a window "
+        "APPLY/FORK is enacted, the candidate is re-evaluated on the WHOLE task bed "
+        "(not just its routed window) and re-classified; the full-bed verdict "
+        "REPLACES the window decision, and a full-bed REJECT archives the candidate "
+        "under GateStage.SHIP_CONFIRM. Window REJECTs are never confirmed. This adds "
+        "full-bed confirmation rollouts (accounted separately as confirm_attempts, "
+        "outside the window gate and settled-active-pool scopes) and changes which "
+        "candidates ship, so it is not comparable byte-for-byte with an 'off' run"
+    )
+
+
 def _task_reasoning_effort(args: Any) -> str | None:
     """Effective reasoning effort for the task (inner) agent, or ``None`` to omit.
 
@@ -6554,6 +6673,9 @@ def _build_experiment_lock(
         ),
         _regression_baseline_provenance(
             str(getattr(args, "regression_baseline", DEFAULT_REGRESSION_BASELINE))
+        ),
+        _ship_confirmation_provenance(
+            str(getattr(args, "ship_confirmation", DEFAULT_SHIP_CONFIRMATION))
         ),
         _cluster_source_provenance(args),
         _epsilon_provenance(float(getattr(args, "epsilon", 0.0))),
@@ -6968,6 +7090,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "config.yaml files, not diffs) and that skip is recorded in the audit "
             "— the honest reconstruction of the paper's Alg.1-vs-App-B.1 double "
             "semantics. Non-default is noted in experiment.lock provenance."
+        ),
+    )
+    parser.add_argument(
+        "--ship-confirmation",
+        choices=SHIP_CONFIRMATION_MODES,
+        default=DEFAULT_SHIP_CONFIRMATION,
+        help=(
+            "Pre-ship full-bed gate (routed-window blindness fix). off (default) is "
+            "byte-identical. full_bed: any candidate about to apply/fork must first "
+            "pass a full-task-bed re-classification; rejects stay window-only. "
+            "(Modes next_round/eprocess are reserved by STATPOOL-DESIGN.md for a "
+            "post-ship probation mechanism and are not implemented here.)"
         ),
     )
     parser.add_argument(

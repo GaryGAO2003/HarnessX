@@ -46,6 +46,10 @@ _REAL_INTERCEPTORS = {
     GateStage.ROUNDTRIP_L2,
     GateStage.SEESAW_REGRESSION,
 }
+# GateStage.SHIP_CONFIRM is the engine-level pre-ship full-bed confirmation
+# (--ship-confirmation full_bed), not one of run_gate's ordered checks, so it is
+# deliberately outside both the no-op/interceptor partition and GATE_SEQUENCE.
+_RUN_GATE_STAGES = set(GateStage) - {GateStage.SHIP_CONFIRM}
 
 
 # ---------------------------------------------------------------------------
@@ -270,8 +274,8 @@ def test_gate_sequence_still_has_all_five_stages_in_paper_order() -> None:
 def test_the_two_no_op_stages_and_three_interceptors_partition_the_gate() -> None:
     """The no-op set and the real-interceptor set together are exactly the gate."""
     assert _NOOP_STAGES.isdisjoint(_REAL_INTERCEPTORS)
-    assert _NOOP_STAGES | _REAL_INTERCEPTORS == set(GateStage)
-    assert set(GATE_SEQUENCE) == set(GateStage)
+    assert _NOOP_STAGES | _REAL_INTERCEPTORS == _RUN_GATE_STAGES
+    assert set(GATE_SEQUENCE) == _RUN_GATE_STAGES
 
 
 def test_gate_result_shape_is_unchanged() -> None:
