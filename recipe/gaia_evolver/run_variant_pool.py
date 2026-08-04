@@ -234,8 +234,10 @@ DEFAULT_EVOLVE_RETRY = 1
 
 #: --search-backend (W1). ``chain`` (default) keeps the built-in ``WebSearch``
 #: fallback chain byte-identical; ``serper`` swaps a Serper-first drop-in
-#: (``harnessx.tools.contrib.serper_search``) into the deployed H0 registry.
-SEARCH_BACKENDS = ("chain", "serper")
+#: (``harnessx.tools.contrib.serper_search``) into the deployed H0 registry;
+#: ``serper_only`` swaps the fallback-free Serper drop-in (no native chain, ever)
+#: and fails fast at launch when ``SERPER_API_KEY`` is missing.
+SEARCH_BACKENDS = ("chain", "serper", "serper_only")
 DEFAULT_SEARCH_BACKEND = "chain"
 
 #: --evolve-commit-bounce (W1/F-A). ``off`` (default) is byte-identical; ``on``
@@ -6216,7 +6218,10 @@ def _maybe_use_serper_backend(config: Any, backend: str) -> Any:
     every candidate derived from it stay byte-identical and ``harnessx/tools/contrib``
     is never even imported. ``serper`` replaces the live H0 tool_registry's
     ``WebSearch`` entry in place with ``serper_web_search_tool`` (identical
-    name/description/schema, Serper-first fn). Because the swapped-in tool carries
+    name/description/schema, Serper-first fn). ``serper_only`` does the same swap
+    with ``serper_only_web_search_tool`` (Serper with NO native fallback) and
+    fails fast with ``SystemExit`` when ``SERPER_API_KEY`` is missing, so a run
+    cannot start without the key. Because the swapped-in tool carries
     ``__hx_target__``, when the H0 config is serialised to ``V0/config.yaml`` the
     entry round-trips as a ``tool_registry.custom`` import path, so every candidate
     authored FROM H0 resolves ``WebSearch`` to the same Serper backend. Only the
@@ -6224,20 +6229,38 @@ def _maybe_use_serper_backend(config: Any, backend: str) -> Any:
     """
     if backend == "chain":
         return config
-    if backend != "serper":
+    if backend not in ("serper", "serper_only"):
         raise ValueError(f"--search-backend must be one of {SEARCH_BACKENDS}, got {backend!r}")
-    from harnessx.tools.contrib.serper_search import serper_web_search_tool
+
+    if backend == "serper_only":
+        # Fail fast at launch: serper_only has no native fallback, so without the
+        # key EVERY query would return the 'unavailable' tool result. A run must
+        # not start in that state.
+        if not os.environ.get("SERPER_API_KEY"):
+            raise SystemExit(
+                "--search-backend serper_only requires SERPER_API_KEY to be set: the "
+                "serper_only backend has NO native fallback, so a run must not start "
+                "without the key (every WebSearch would return 'unavailable')."
+            )
+        from harnessx.tools.contrib.serper_search import (
+            serper_only_web_search_tool as swap_tool,
+        )
+    else:
+        from harnessx.tools.contrib.serper_search import (
+            serper_web_search_tool as swap_tool,
+        )
 
     registry = getattr(config, "tool_registry", None)
     tools = getattr(registry, "_tools", None)
     if isinstance(tools, dict) and "WebSearch" in tools:
         # In-place, replace=True: keeps the tool name "WebSearch" so the worker is
         # unaware and the lock's tool_registry name list is unchanged.
-        registry.register(serper_web_search_tool, replace=True)
+        registry.register(swap_tool, replace=True)
     else:
         logger.warning(
-            "--search-backend serper: no 'WebSearch' tool in the H0 registry to swap; "
-            "leaving the tool set unchanged"
+            "--search-backend %s: no 'WebSearch' tool in the H0 registry to swap; "
+            "leaving the tool set unchanged",
+            backend,
         )
     return config
 
@@ -6250,6 +6273,18 @@ def _search_backend_provenance(mode: str) -> "str | None":
     """
     if mode == DEFAULT_SEARCH_BACKEND:
         return None
+    if mode == "serper_only":
+        return (
+            f"search_backend={mode} ENABLED (W1): the deployed H0 WebSearch tool was "
+            "replaced by the Serper-ONLY drop-in "
+            "(harnessx.tools.contrib.serper_search.serper_only_web_search_tool) with NO "
+            "native fallback — the built-in SerpAPI->Tavily->Wikipedia+Bing->DuckDuckGo "
+            "chain never serves a query. Empty Serper results are returned honestly (the "
+            "built-in's own empty-result wording) and Serper errors surface as failed "
+            "tool results. The frozen h0.config_sha256 reflects WebSearch moving from "
+            "tool_registry.builtin to tool_registry.custom. The tool name/description/"
+            "schema are unchanged and a 'chain' run's config + lock stay byte-identical"
+        )
     return (
         f"search_backend={mode} ENABLED (W1): the deployed H0 WebSearch tool was "
         "replaced by the Serper-first drop-in (harnessx.tools.contrib.serper_search), "
@@ -7089,7 +7124,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "authored from it (W1). 'chain' (default) is byte-identical to the "
             "built-in SerpAPI->Tavily->Wikipedia+Bing->DuckDuckGo chain. 'serper' "
             "swaps in a Serper-first (serper.dev, SERPER_API_KEY) drop-in that "
-            "falls back to that same chain on a missing key / empty result / error."
+            "falls back to that same chain on a missing key / empty result / error. "
+            "'serper_only' is Serper with no native fallback — requires "
+            "SERPER_API_KEY, never uses the built-in chain."
         ),
     )
     parser.add_argument(

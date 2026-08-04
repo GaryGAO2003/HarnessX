@@ -25,6 +25,19 @@ the deployed H0 registry, so every candidate config authored from H0 inherits it
 Serper (serper.dev) is a *different* provider from SerpAPI (serpapi.com); the
 repo has no native Serper support, which is why this backend exists.
 
+``serper_only_web_search_tool`` is the same drop-in with the fallback removed
+entirely: per a project ruling the native chain is unusable and must NEVER serve
+a query. It is boundary-identical to the built-in ``WebSearch`` (same
+name/description/schema/tags/execution_target) but tries Serper *only*, retrying
+up to 3 total attempts with a short backoff on transport errors. A missing
+``SERPER_API_KEY`` at call time logs an ERROR and returns an explicit
+"unavailable" tool result (the recipe additionally fails fast at launch when the
+key is absent); an empty Serper result returns the built-in ``web_search``
+empty-result wording verbatim — an honest empty answer, NOT a fallback; an
+exhausted retry budget returns a ``"Web search failed (Serper): ..."`` tool
+result. It never imports or calls the built-in chain's ``fn`` on any path (the
+``_builtin_web_search`` reference is reused only for name/schema parity).
+
 On "subclassing": the built-in ``WebSearch`` is a ``Tool`` *dataclass instance*
 produced by the ``@tool`` decorator, not a class, so there is nothing to
 subclass. Copying its schema verbatim and delegating its fallback to the
@@ -34,6 +47,7 @@ that prefers Serper".
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -58,6 +72,19 @@ _SERPER_TIMEOUT = 20
 #: name — otherwise the deployed config would silently revert to the built-in
 #: backend on the next YAML load.
 _SERPER_TOOL_TARGET = "harnessx.tools.contrib.serper_search.serper_web_search_tool"
+
+#: Same round-trip contract for the fallback-free variant: the recipe swaps this
+#: in under ``--search-backend serper_only`` and it must serialise under
+#: ``tool_registry.custom`` (its import path), not the built-in ``WebSearch`` name.
+_SERPER_ONLY_TOOL_TARGET = (
+    "harnessx.tools.contrib.serper_search.serper_only_web_search_tool"
+)
+
+#: serper_only retry budget: 3 total Serper attempts (no native fallback exists),
+#: with a short backoff BETWEEN attempts (2s then 5s). Any transport/HTTP error
+#: is retried; there is no path into the built-in chain on exhaustion.
+_SERPER_ONLY_MAX_ATTEMPTS = 3
+_SERPER_ONLY_BACKOFF_S = (2, 5)
 
 
 async def _search_serper(query: str, max_results: int, api_key: str) -> list[dict]:
@@ -124,3 +151,99 @@ serper_web_search_tool = Tool(
     execution_target=_builtin_web_search.execution_target,
 )
 serper_web_search_tool.__hx_target__ = _SERPER_TOOL_TARGET
+
+
+def _builtin_empty_result_message(query: str) -> str:
+    """The built-in ``web_search`` message for an empty result set, verbatim.
+
+    ``web_search_tool`` builds this string (its local ``_unavailable_msg``) and
+    returns it whenever the merged result set is empty. We reproduce the exact
+    wording here so a ``serper_only`` empty answer is indistinguishable from the
+    built-in's own empty answer — reusing the *wording*, NOT the fallback chain
+    (the built-in ``fn`` is never called on this path). Kept byte-for-byte in sync
+    with ``harnessx/tools/builtin/web_search.py``'s ``_unavailable_msg``.
+    """
+    return (
+        f"[SEARCH UNAVAILABLE] All search providers failed for query: {query}\n"
+        "Web search is temporarily not accessible. You MUST still provide a concrete "
+        "answer based on your training knowledge. Do NOT answer with 'unavailable', "
+        "'unknown', or 'unable to determine' — give your best factual answer. "
+        "Try WebFetch to access specific URLs directly if you know the relevant page."
+    )
+
+
+async def _serper_only_web_search(query: str, max_results: int = 5) -> str:
+    """Serper-only ``WebSearch``. NEVER falls back to the built-in chain.
+
+    Project ruling: the native fallback chain is unusable and must never serve a
+    query, so this backend has no path into ``_builtin_web_search.fn``. Behaviour:
+
+    * Missing ``SERPER_API_KEY`` at call time -> log an ERROR and return an
+      explicit unavailable tool result. The built-in chain is not touched.
+    * Serper transport/HTTP error -> retry up to ``_SERPER_ONLY_MAX_ATTEMPTS``
+      total attempts, sleeping ``_SERPER_ONLY_BACKOFF_S`` seconds BETWEEN attempts;
+      each failed attempt logs a WARNING that names the backend.
+    * Successful call with empty ``organic`` results -> return the built-in
+      ``web_search`` empty-result wording verbatim. This is an honest empty
+      answer, NOT a fallback (the built-in ``fn`` is never called).
+    * All attempts failed -> log a WARNING and return
+      ``"Web search failed (Serper): <last error>."``. Never raises.
+    """
+    query = str(query)  # guard against non-string (mirrors the built-in)
+    try:
+        max_results = int(max_results)
+    except (TypeError, ValueError):
+        max_results = 5
+
+    api_key = os.environ.get("SERPER_API_KEY", "")
+    if not api_key:
+        logger.error(
+            "serper_only WebSearch: SERPER_API_KEY is not set; returning an "
+            "unavailable tool result (no native fallback)."
+        )
+        return (
+            "Web search unavailable: SERPER_API_KEY is not set "
+            "(serper_only backend, no fallback)."
+        )
+
+    last_error: Exception | None = None
+    for attempt in range(1, _SERPER_ONLY_MAX_ATTEMPTS + 1):
+        try:
+            results = await _search_serper(query, max_results, api_key)
+        except Exception as e:  # noqa: BLE001 - retried; NEVER falls back to built-in
+            last_error = e
+            logger.warning(
+                "Serper (serper_only) attempt %d/%d failed: %s",
+                attempt,
+                _SERPER_ONLY_MAX_ATTEMPTS,
+                e,
+            )
+            if attempt < _SERPER_ONLY_MAX_ATTEMPTS:
+                await asyncio.sleep(_SERPER_ONLY_BACKOFF_S[attempt - 1])
+            continue
+        # Successful call. Empty organic -> honest empty answer reusing the
+        # built-in's own empty-result wording (NOT a fallback into its chain).
+        if not results:
+            return _builtin_empty_result_message(query)
+        return _format_results(results)
+
+    logger.warning(
+        "Serper (serper_only) failed after %d attempts, no native fallback: %s",
+        _SERPER_ONLY_MAX_ATTEMPTS,
+        last_error,
+    )
+    return f"Web search failed (Serper): {last_error}."
+
+
+#: A ``Tool`` boundary-identical to the built-in ``WebSearch`` (same name /
+#: description / input_schema / tags / execution_target) with a Serper-ONLY
+#: ``fn`` that never falls back to the built-in chain.
+serper_only_web_search_tool = Tool(
+    name=_builtin_web_search.name,
+    description=_builtin_web_search.description,
+    input_schema=_builtin_web_search.input_schema,
+    fn=_serper_only_web_search,
+    tags=list(_builtin_web_search.tags),
+    execution_target=_builtin_web_search.execution_target,
+)
+serper_only_web_search_tool.__hx_target__ = _SERPER_ONLY_TOOL_TARGET

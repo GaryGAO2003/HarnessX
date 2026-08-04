@@ -2735,3 +2735,45 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 未核对该轮目录内实际执行了什么,曾把 R8 并入第二组。
 **判断同池须同时满足:该轮 shipped=False、forked=[]、routing 逐题相同、
 且 active_pool 下存在全部变体目录。**
+
+---
+
+## Aug-04 · e_pervar3 收官审计三连 + serper_only 落地(SPEC §7.30)
+
+### 🏁 收官核验一:error/warning 全量清点(M-37 遗留的"收官须按作用域重新计数"完成)
+
+三段控制台日志(seg1–3 02:41–12:51 / seg4+err 13:05–00:45)405,927 行,
+反向筛法(白名单良性家族+其余全打印,不做 top-N 截断)得 **29 家族,零测量有效性问题**:
+
+- 429 限流 10,937 条,重试深度 1/5→9368、2/5→1552、3/5→16、4/5→1、**5/5→0**,全吸收;
+- `run_loop error` 117 条(InternalServerError 62 / Timeout 54 / PermissionError 1),
+  与 pool_report 记账吻合(测量域 `infra_failures_run_total=30`,末轮 2/206=0.97%,
+  其余在候选自测与被 resume 取代的废弃段);
+- **M-37 作用域复点:`active_pool/`=0、`candidate_gate/`=0、`pipeline/candidates/`=50**
+  (37 no-config 重试 + 11 bounce 空手 + C-R8-04 工具加载失败 + R7 候选 SystemPromptProcessor
+  FileNotFoundError),测量作用域干净,M-37 裁定(两臂同缺陷=常量)维持;
+- 孤例:R13 V1 active 一次 `PermissionError WinError 5`(step_state.json.tmp 改名,
+  文件锁竞争),按 A.3 计失败入 infra 记账;
+- `contract_check.py:115` 一次 RuntimeWarning = 闸门真实例化探针逮住某 R2 候选携带
+  旧签名 CommitNudgeProcessor(M-32 类漂移),**V0/V1 active 配置均无此 processor**;
+- 06:58 resume 时 V1 快照缺失警告,校验通过自愈(V1 R3–R15 config/prompt 逐轮正确)。
+- 空 prompt 硬否决:`pool_differentiation` 三跑全清
+  (e_pervar3 0/4254、e_pervar 0/1180、e_pervar2 0/701,"fix holding")。
+
+### 🔴 收官核验二:serper 静默降级 → 用户裁「一定要 serper only,原生的没法用」
+
+`serper` 后端缺 key / 空 organic 两条路径**静默**走原生链,仅异常打 WARNING(全跑仅 1 条)。
+判别:seg4(key 确证在场)从 R6(零候选轮)恢复,13:13:59 即出 Bing 降级警告
+⇒ key 在场时测量域内也在静默降级。原生链使用下界:Bing 失败 996 / DDG-HTML 675 /
+DDG-Lite 690 / 熔断 22;成功的原生链调用无日志,真实次数不可恢复。
+**处置**:`--search-backend serper_only` 已实现并测试(SPEC §7.30,+10 测试,全量 1035 绿);
+跨纪元可比性威胁入 Ch7,发臂前重冒烟。
+
+### 📒 收官核验三:evolver 空手台账(修复方案已列,未实施,待用户裁)
+
+25 候选 → 1 apply(R8 `StepCountdownProcessor.escalate_within: 3`)+ R2 fork(V1),24 拒:
+空手 end_turn 11(R4 4/4 团灭、R7 4/4 死;bounce 已开仍死)、seesaw 9、critic 5、
+byte-identical no-op 5(4 次在 R8 后,枯竭信号)、no-flip 3、bucket-missing 2、
+evidence-gate 1、ROUNDTRIP_L2 1(=C-R8-04:三斜杠 file:/// → 加载 Errno 22 →
+工具未注册 → 无能力证据;M-38 brief 探针有效但未兜住实跑,加载端无 URI 正规化是根)。
+DECISION_REQUIRED 逐字根因:"ended with analysis but did not commit to a final decision"。

@@ -983,3 +983,35 @@ B2 读信用表决定分工;表分不出能力,headline 就没有机制。
 **兜底不分割**。分解失败退化的整任务 rollout 保持全额(它就是 A1 的等价物)。
 
 **测试**。`tests/test_decomp_budget.py` 25 项。全量 **1043 绿**。
+
+## 7.30 `serper_only` 搜索后端(Aug-04,用户裁「一定要 serper only,原生的没法用」;1025→1035)
+
+**起因**。e_pervar3 收官审计发现 `serper` 后端有两条**静默**回退路径(缺 `SERPER_API_KEY` /
+Serper 返回空 organic),仅异常路径打 WARNING。判别证据:seg4(key 确证在场,resume 脚本注入)
+13:05 从 R6 恢复,13:57 前无任何候选工作,**13:13:59 即出现 Bing 降级警告**
+⇒ key 在场时测量域内也在静默走原生链(空结果路径)。全跑原生链使用**下界**:
+Bing 失败 996 / DDG-HTML 675 / DDG-Lite 690 / 熔断 22;原生链成功不留日志,真实次数不可恢复。
+
+**接口**。
+
+```
+--search-backend {chain, serper, serper_only}   前两档行为与序列化字节等同不变
+```
+
+`serper_only`:①缺 key **启动即 `SystemExit`**(fail-fast);②Serper 异常重试 3 次
+(2s/5s 退避,逐次 WARNING 具名 `serper_only`);③空 organic **如实返回** builtin 的
+空结果措辞(诚实空答,非回退);④穷尽后返回 `Web search failed (Serper): …` 工具结果;
+⑤**任何路径不触碰原生链**。swap 机制与 `serper` 同:`__hx_target__` 序列化为
+`tool_registry.custom`,随 config 传给全部变体与候选。
+
+**边界**。resume 段不经 `_maybe_use_serper_backend`,fail-fast 不覆盖;缺 key 的 resume
+会以每查询 ERROR + unavailable 工具结果**显性**失败,不会静默降级。
+
+**可比性(入威胁章)**。e_pervar3 及此前 `serper` 档运行含静默原生回退;后续臂改
+`serper_only` 属搜索语义变更,跨纪元不可直接比,发臂前须重冒烟。
+
+**配套**。`experiments/analysis/deep_metrics.py` 的 serper 失败计数器扩展匹配
+`serper_only` 告警形态(原匹配串只认 `serper search failed`)。
+
+**测试**。`tests/test_serper_backend.py` +10 项。全量 **1035 绿**
+(本分支改前实测 1025;§7.29 尾注 1043 与本分支现量不一致,疑测试集随分支漂移,按实测记账)。
