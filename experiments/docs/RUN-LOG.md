@@ -2863,3 +2863,13 @@ P3 提案出口 schema 修复重试。三旗标默认字节等同;+50 测试,全
 **判断点**:①任务给的 PART 1 行号(:2528-2620 / 无 config 分支 :2570-2592 / evolve 返回 ~:2593)实指 `_evolve_candidate_with_continuity`(非标题写的 `_evolve_candidate_with_retry` 基础环——基础环无终局弃权/步数账机制),按行号与账本变量(`attempts_made`/`steps_used`/`prev_attempt_dir`)裁定实现在连续性环;②P3 提案修复(`--proposal-repair-retry`)刻意不接本旗,其坏配置由 PART 2 兜底(与「PART 1 开时 PART 2 近乎不可达」的纵深防御框架一致)。
 
 +13 测试(`tests/test_candidate_load_feedback.py`),**全量 1125 绿**(1112→1125)。本地 only:无 push、无 API、无跑,仅单测。
+
+---
+
+## Aug-05 晚 · channel 二次合流(ab6eb27 @12c444e)+ 官方代码情报 + 发射解冻
+
+**官方 AEGIS 代码现世**(channel 线审计,主循环对本地仓三点核验;详 `novelty/11-OFFICIAL-AEGIS-DIFF.md` 与 LAUNCH-CONFIG §6.4-pre):AEGIS 三分支 **2026 年 5–6 月起公开**(Jul-21「未开源」判词=漏查分支,跨 session 记忆已更正);**十分支全树零变体池/Ensemble ⇒ 我方 `variant_pool/` = 论文 §4.5 唯一存世实现**;GAIA 官方零成规模实验(`MAX_TASKS_DEFAULT=1`);五处论文↔代码分歧写作必并报;官方 counterfactual 门=潜在空转(12c444e)。
+
+**二次合流零冲突**(merge-tree 干跑先证):upstream 代码(91466f0:spawn 强引用 / to_markdown / ruff,+107 测试行)+ 官方情报三 docs + **web_fetch 挂死加固 +55 行**——b65ca01 以 docs 标签**夹带**的代码,主循环亲验=静态 25s/浏览器 30s/总 60s 三层显式超时 + `page.inner_text` 套 `asyncio.wait_for`(PDF 页无 `<body>` 永久挂死之病灶)+ 短响应不回退 Playwright。**批 1 拦路半边已在车**。全量 **1152 绿**(1125 + 27 upstream 测试)。
+
+**发射冻结解除**:三前置达成(web_fetch 落 / 合流毕 / 归一不阻塞——T1 配置不变,默认按剂量-响应臂 1 双重记账);`--ship-efficacy-gate`(批 1 剩余半边)后落默认关,不破纪元。**状态=待发车令**(题集 11/15/4 已抽定、Serper 22k 已确认、旗标表见 LAUNCH-CONFIG §3)。
