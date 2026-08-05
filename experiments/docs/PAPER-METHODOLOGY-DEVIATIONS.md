@@ -553,3 +553,15 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | 来源 | 官方 structure 门 IV-1:digest 引用锚必须真实存在于盘、`#step_N` 定位不越界——机械反幻觉 |
 | 语义 | 命中无效锚 ⇒ 该题 LLM digest 弃用、回退确定性 digest,计数入既有轮 rationale(零新产物);**零锚=通过**(与 fail_only 提示词不要求锚的诚实耦合,官方 IV-1 零锚=失败,此为有意分歧并注明) |
 | 裁决层 | 同上 |
+
+## M-50..M-53 全抄批 2b:隔离/refuted/attribution/counterfactual 接线(Aug-05,d7d0f8b,全部默认关)
+
+| 项 | 内容 |
+|---|---|
+| **M-50 `--meta-read-scope-gate`** | 我方原有 read_scope_gate **存在但从未接线**(dormant);Windows 化移植:Bash 拦截 + 有序路径令牌交替(file: URI 走 `_resolve_target_path`/UNC/盘符/POSIX,官方"丢盘符 `/x`"bug 已死)+ `normcase` 大小写折叠 + `allowed_roots` 子树白名单(本 run 目录可读、runs/ 档案封禁)。**三种 Windows 路径形态的真实拦截均有测试**(官方 POSIX 正则在本机静默拦不住任何东西——用户指出的 file:// 同族坑,此为治法)。仅 Evolver 接(Digester/Planner/Critic 无工具,无处可接) |
+| **M-51 `--refuted-signature-gate`** | sha256(sorted (basename, content-sha) of file_changes);被门拒过的签名重提 ⇒ 评测前掉队(`novelty:` AuditRecord→PIPELINE_NOVELTY 既有账面)。分歧:我方 manifest 无 `diff_sha_after` ⇒ 用落盘内容 sha;路径取 basename(候选目录逐轮不同,绝对路径会废掉跨轮去重)。**scope-out:`--resume` 后集合从空起**(不改 resume 机器,已注明) |
+| **M-52 `--attribution-check`** | 结算后只读:`tool_call` 签名对 settled frontmatter `tool_call_counts` 核点火(direct/orphan/joint);`processor_invocation` 降级 joint(我方 schema 无 class_name);无可读轨迹=orphan。语义澄清:结算与测量同轮 ⇒ 检查为**轮内**(本轮 ship 对本轮 settled)。入 pool_state.json,零新文件 |
+| **M-53 `--counterfactual-gate` 接线** | M-45 门接入预 ship 链(效力→novelty→counterfactual);passing 集=该变体 settled 已解 digest,sessions_root=run 目录,k=3,seed=run seed。**接线级 pass-through**:无 passing 任务或 sessions 不存在时放行(早轮/离线评测器不写 session,不可假拒)——零覆盖拒绝仍留在门内部对付真重放失败 |
+| 工具不对称核实 | **已满足,无代码**:Digester/Planner/Critic 均为 `provider.complete(...,[])` 裸补全(零工具),仅 Evolver 持工具(含 web)——与官方不对称一致且更严 |
+| 测试 | 四组新 24 项;全套件 **1132 绿**;tests/unit 与基线逐项一致 |
+| 裁决层 | 用户令「全抄官方的」(Aug-05) |

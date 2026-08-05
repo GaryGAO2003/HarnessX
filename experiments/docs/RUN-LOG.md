@@ -2767,6 +2767,7 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 - **批 1(已落地)**:web_fetch 挂死加固逐字节移植(M-44,⚠️改动物理落在 b65ca01 文档提交内——`git apply --3way` 暂存 + 定向提交连带,内容已验、历史不改,**新纪律=提交前必查 `git diff --cached`**)+ `--ship-efficacy-gate` 效力预检门(M-43,15fee8e)。变体池 1032 绿。
 - **批 2a(已落地,ab9f38f,M-46..M-49)**:窗口回退(⚠️before 捷径证伪,走 ledger 逐轮桶;变体不可知已钉)/机械 actionability(e_pervar3 旱灾场景入测试)/ALL_PASS+九类词表(官方模板带 PROVENANCE 头)/IV-1 锚核验(零锚=过,有意分歧注明)。全套件 1108 绿,四旗标默认逐字节等同。
 - **批 3(已落地,f15a2f8,M-45)**:counterfactual 门修复版=`event_replay.py` 适配器+`counterfactual_gate.py`(零覆盖 fail-closed/异常记账/strict)+阳性对照与真实落盘夹具测试(27/27 绿)+`journal.py` 1 行 episode_end 补 final_output;CLI 接线待批 2a 落地。
-- 批 2b 排队:隔离门 Windows 版(官方正则 POSIX-only,Windows 上静默失效——用户指出)/refuted 账本/attribution 点火/digester 工具不对称。
+- **批 2b(已落地,d7d0f8b,M-50..M-53)**:隔离门 Windows 版(dormant 门激活+Bash 拦截+三形态真实拦截测试)/refuted 账本(basename+内容 sha,resume 后空起已注明)/attribution 轮内点火核验/counterfactual 预 ship 接线(无 session 放行守卫)。工具不对称=已满足零代码。全套件 1132 绿。**全抄 11 项完毕。**
+- **可行性跑序列(用户明令,Aug-05)**:腿 A `chsmoke_off`(6×3 全关,快照 worktree HarnessX-smoke @ b8de67e,venv=主仓 .venv312,密钥运行时取自 t1 发射器)已点火 → 完成后直接 `chval30`(30×10,T1 同床 t1_30.json,全旗标开,新快照)。6 题 smoke 床=gaia_smoke6.json(seed0,3/2/1)。读数=机制体检表,**禁止从这些 run 报任何分数增减**。
 
 **跨会话状态页**:https://claude.ai/code/artifact/49b484c6-2897-48c0-8d65-813e71bae8a1(地址稳定,随批次更新)。付费跑零启动。
