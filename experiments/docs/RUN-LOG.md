@@ -2790,3 +2790,5 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 
 - **批 4b 落地**(7bf0948,M-58..M-61):bucket-reputation/critic-ask-more/auto-revert/meta-compaction,+31 测试,全套件 1204 绿。
 - **批 4c 施工中**(主循环自查抓到清点缺口):IV-3~12 清单核对移植 + Critic Part-2 组合审计(strategy_concern:Critic 产出→pool_state 持久→下轮 Planner/Evolver 转达→IV-11 消费)。流程教训:按批派工必须回头对总清单。
+
+- **批 4c 落地**(M-62..M-63):IV-3~12 核对移植(只port缺项,IV-4/6 如实 N/A)+ Critic Part-2 组合审计(strategy_concern 全环:Critic→持久→转达→IV-11)。+43 测试,全套件 **1247 绿**。**官方启用面 100%(M-41..M-63 计 21 项)。** 下一步:新快照 + 发射器 20 旗标全开 + chval30 重点火。

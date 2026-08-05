@@ -590,3 +590,13 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | **M-61 `--meta-compaction`** | 核心自带 `CompactionProcessor` 三旋钮参数化(vendored 默认 200000/4/0.95 不变),旗标开时经 M-50 的 extra_harness_kws seam 覆写为官方 Evolver 值 300000/4/0.90;Critic 无 harness ⇒ 仅 Evolver(已注明) |
 | 测试 | +31 项;全套件 **1204 绿**,零新增失败;四旗标默认逐字节等同逐一钉死;`agent.py` 参数化经 tests/unit/test_meta_harness_fixes.py 16 绿佐证 |
 | 裁决层 | 用户令「官方启用的全放进来然后test」(Aug-05) |
+
+## M-62..M-63 全抄批 4c:清点缺口两件(Aug-05,全部默认关)——官方启用面至此 100%
+
+| 项 | 内容 |
+|---|---|
+| **M-62 `--structure-invariants`** | IV-3~12 清单核对式移植:**只port我方缺的**(IV-3 正文证据节[复用 M-49 锚语法]/IV-8 slot_type 分派含 explorer 旁路/IV-9 桶↔扩展名一致[列表桶取并集]/IV-11 被点名方向须响应或书面申辩 ≥50 字/IV-12 iterates_from 校验);已有的(必填键/capability_evidence)不重复;IV-4/IV-6 **如实 N/A**(我方无 verdict/decision-chain 载体,不造载体)。接为预检链**第一关**(cheap-first,效力门之前),同账面 |
+| **M-63 `--critic-portfolio-audit`** | 官方 Critic Part-2 编排级移植:审计指令覆盖 M-58 记分板与 M-56 监视单(缺依赖时提示词如实声明);`strategy_concern` 经 concern sink 解析(critic.py 零改动)→ pool_state 旗标化持久 → 下轮 Planner 提示词与 Evolver TASK.md 顶部逐字转达 → IV-11 消费;`decision_type: no_op` 复用既有 no-op 态整轮不 ship 且照常转达 concern。信用反馈环第四环闭合 |
+| 边界(须并报) | 正文依赖检查在候选无 `_meta_scratch/manifest.yaml` 正文时 N/A 而非误杀;IV-12 生产态走官方 back-compat(非空字符串校验,账本逻辑已全测);resume 后 concern 接力不恢复(默认关跑不受影响,已注明) |
+| 测试 | +43 项;全套件 **1247 绿**,零新增失败 |
+| 裁决层 | 用户令「官方启用的全放进来然后test」(Aug-05);清点缺口由主循环自查抓获补齐 |
