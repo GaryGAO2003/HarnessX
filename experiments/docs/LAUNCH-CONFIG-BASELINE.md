@@ -39,7 +39,8 @@
 | `--ship-confirmation` | `full_bed` | §7.32,用户裁「变体没好好测过」 |
 | `--evolve-continuity` / `--evolve-abstain` / `--proposal-repair-retry` | 全开 | §7.33(P1–P3) |
 | `--target-strategy` | `failure_density` | 本文件 §1 |
-| `--planner-retry` | `2`(建议;空白率 2/34≈6% → ~0.02%) | F4(在途,落地后定) |
+| `--planner-retry` | `2`(空白率 2/34≈6% → ~0.02%) | F4,§7.36 已落地(f9bc724) |
+| `--candidate-load-feedback` | **开**(槽内 fail-closed 验证+失败反馈;**主修路径依赖 `--evolve-continuity`=开**,本表已开;continuity 关则仅评测期托底生效) | §7.37 已落地(9fae30a),观测审计 Q1 修复 |
 | `--traj-failure-signals` | **开**(Aug-05 用户裁「这些肯定需要给」;观测通道完整性属基座,见 §3.5) | channel f8271dd |
 | 并发 | 6(60 req/min 上限) | Aug-04 裁定 |
 | `--pool-k` | 1(默认) | retire 换尺前不动 |
@@ -60,11 +61,31 @@
   eval 基建噪声。机制层的病在机制层修(目标池烧干 → failure_density 自动绕开 / B 臂判定量修根),
   不喂给 LLM——兼防"评测机制泄漏"效度威胁(meta agent 若可见门内部,存在演化出 gaming 行为的通道)。
 
-**合流后审计改为双向**:
-1. **边界内完整性**:harness 内失败是否全部到达 evolver 视野(重点核验:候选组件加载失败的
-   报错是否进入下一次尝试的上下文,还是只进运行日志);
-2. **边界外零泄漏**:evolver/planner 上下文不得含门/池/基建内部信息(审计通过即可作为论文
-   效度声明:演化侧对评测机制盲)。
+**双向审计结果(Aug-05,researcher 全查 + 主循环抽验三处承重代码)**:
+
+1. **边界内完整性 = GAP(修复已派)**:fail-closed 加载失败只对操作者响亮(raise + ERROR 日志),
+   不进任何 meta-agent 通道——continuity 循环只包 `slot_agent.evolve()`(:2566),评测期
+   `_prepare_round_config` 的 raise 在圈外,永远到不了 NOTES/DECISION_REQUIRED;
+   `_instantiate_proc` ERROR 仅日志;M-42 只数四个正文标记。
+   **修复方案(遵 §3.5 既裁「必须到达下一次尝试」,不需新裁决)**:①主修——候选配置在
+   **槽内提案时**即跑同一套 fail-closed 验证,失败文本走既有 DECISION_REQUIRED/NOTES 通道
+   喂下一次尝试,重试耗尽转显式 abstain(理由=加载失败);②托底——评测期 raise 从「整跑硬崩」
+   改判候选 infra-fail(**活动变体配置失败仍硬崩**,那是跑完整性事件)。旗标默认关字节等同,发射开。
+   (审计建议之「DROPPED 计入 frontmatter」不做:fail-closed 网保证计分 rollout 零 drop,计数恒 0;
+   vendored 内部 smoke 盲区由①的槽内验证顺带覆盖,不碰 vendored。)
+
+2. **边界外零泄漏 = GAP(待用户裁,§5 按钮)**:always-on 一处——`_planner_brief_with_regressions`
+   (:1833,无条件布线 :5560)把回退题单 + **Critic 否决规则逐字引文**("the Critic rejects the
+   whole round otherwise…")并进 evolver brief;另 `critic_revision_request.reason`(Critic 判决理由)。
+   分层:①机制引文与判决理由 = 按 Aug-05 边界明确越界;②回退题单 + tasks_at_risk 要求 =
+   论文 App-B manifest 契约(全剥则 Critic 整轮否决回归,forceprobe1 R2 实证)→ **建议:留题单
+   与中性要求措辞,削机制引文**;③llm-planner 侧泄漏点仅 `--aegis-planner llm` 模式活,默认
+   deterministic 下休眠。serper/429/基建噪声全域零泄漏(干净)。
+
+3. **S1 旁路 = PASS**:全部评测构造点(主评 / 门窗 / ship-confirm 全床 / active-pool / decomp
+   :8674 / resume)均先过 fail-closed 网(:6007/:8674 唯二布线,亲验);唯一网外构造 =
+   vendored meta_harness 内部 replay smoke(非计分路径)。**过审即效度声明素材:计分路径
+   「演化侧对评测机制盲」在 2 的裁决落地后成立。**
 
 ## 4. 已知保留机制(故意不修,SPEC/发射记录标注义务)
 
@@ -75,7 +96,9 @@
 ## 5. 发射前置检查清单
 
 - [x] channel 合流 + F4 落地,全量 1112 绿(edde4fc / f9bc724,Aug-05 亲测复核)
-- [ ] 合流后观测审计:S1 旁路 + §3.5 双向审计(边界内完整 / 边界外零泄漏)→ 缺口小批补齐
+- [x] 合流后观测审计完成(Aug-05):Q3 S1 旁路 PASS / Q1 边界内 GAP(修复在途)/ Q2 边界外 GAP(待裁)
+- [x] Q1 修复落地(9fae30a,SPEC §7.37,全量 **1125 绿**主循环亲测):槽内验证走 DECISION_REQUIRED/NOTES 既有通道、验证失败不扣步数预算、耗尽转显式弃权;评测期候选降级 infra-fail、active-pool 仍硬崩
+- [ ] **边界裁决(§3.5-2)**:回退题单保留、Critic 机制引文削不削——待用户一句话
 - [ ] Serper 配额确认(BENCH2 自记「配额不够做演化跑」,先查余量/加购)
 - [x] 脏树处置:l_rank +56 用户裁「需要的」已入库;m_cluster_validation.py / BENCH2 / 本文件同批入库
 - [ ] **T1 最小机制双跑(§6)——K=8 机制跑兼任冒烟**,通过 → 本文件转「冻结」
