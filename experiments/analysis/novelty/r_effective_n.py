@@ -26,6 +26,34 @@ Three things are computed here:
 The within-task component is estimated only from cells where the SAME variant
 attempted the SAME task in the SAME round, so nothing about configuration
 difference can leak into it. That makes it a clean floor on irreducible noise.
+
+PROVENANCE -- what here is borrowed and what is not.
+
+The MDE arithmetic is NOT ours. `(z_alpha/2 + z_beta) * SE` on a benchmark pass
+rate is Miller, "Adding Error Bars to Evals" (arXiv:2411.00640) Eq. 9, worked
+there to the conclusion that a 3pp effect needs "at least n=969 independent
+questions". Cite it as the method source; never present the formula as a
+derivation of ours. What Miller does not do is discount the bed for tasks that
+cannot swing -- the paper is explicit that it does not treat item removal or
+effective sample size -- so specialising the formula to a swing set under
+clustering is the only part that is ours.
+
+The nearest prior claim about agent-evaluation noise is arXiv:2602.07150, which
+states verbatim that "reported improvements of 2-3 percentage points may reflect
+evaluation noise rather than genuine algorithmic progress" and recommends
+"use statistical power analysis to determine the number of runs needed". It
+recommends; it does not compute. Four differences have to be stated positively
+wherever this analysis is written up: its bed is SWE-bench and ours is GAIA; it
+measures noise where we partition the bed to get an effective n and drive an MDE
+from it; it advises a power analysis where we run one; and it does not derive a
+floor and check it against an A/A measurement. Asserting novelty without naming
+that paper first is not defensible.
+
+Restricting an eval to mid-difficulty items is itself standard -- the IRT line
+(tinyBenchmarks arXiv:2402.14992, metabench arXiv:2407.12844) and the agent-side
+arXiv:2603.23749 all do it. Every one of them does it to cut cost or stabilise a
+ranking. Feeding the surviving item count into a power calculation is the use
+that is new, not the mechanism.
 """
 from __future__ import annotations
 
@@ -70,6 +98,10 @@ def power(n_swing, sd_per_task, attempts=2, alpha=0.05, target=0.80):
     rather than fitting it is the point: if the number that falls out matches the
     noise floor measured empirically from A/A rounds, then the floor is not a
     property of this experiment's setup, it is arithmetic.
+
+    The estimator `(z_alpha/2 + z_beta) * SE` is Miller arXiv:2411.00640 Eq. 9,
+    used here unmodified. The only local move is what goes into `n_swing` -- see
+    the module docstring.
     """
     if n_swing <= 1:
         return float("nan"), float("nan")
@@ -152,6 +184,16 @@ def main(runs):
     print("  the MDE above. Harness edits plausibly move 1-3pp. An instrument")
     print("  whose minimum detectable effect exceeds the effects on offer is not")
     print("  a noisy instrument -- it is the wrong instrument.")
+    print("\n  SOURCES (do not report the arithmetic above as our derivation):")
+    print("    MDE estimator  (z_a/2 + z_b) * SE   Miller arXiv:2411.00640 Eq.9")
+    print("    nearest prior claim on agent-eval noise  arXiv:2602.07150 -- it")
+    print("      recommends a power analysis on SWE-bench; it does not run one,")
+    print("      does not compute an effective n, and does not check a derived")
+    print("      floor against an A/A measurement. Distinguish it explicitly.")
+    print("    mid-difficulty item selection is standard (IRT: 2402.14992,")
+    print("      2407.12844; agent-side: 2603.23749) -- all for cost or ranking.")
+    print("      Feeding the surviving count into a power calculation is the")
+    print("      new USE; the mechanism is borrowed.")
 
     print("\n" + "=" * 76)
     print("THE NEVER-SOLVED CORE")

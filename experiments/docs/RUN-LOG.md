@@ -2897,3 +2897,69 @@ P3 提案出口 schema 修复重试。三旗标默认字节等同;+50 测试,全
 **勘误(append-only 违规修复)**:Aug-05 15:04 工作树曾物理删除上方「Aug-05 夜 · overnight 离线分析批」整节 16 行(违反本文件头 append-only;未入 committed 历史),现原样恢复并以本条记录。口径钉死:**撤框架 ≠ 撤数据**——测量批框架(门-噪声/多样性)因 PACE 2606.08106 / 2607.13683 占位撤下,但五数字(swing=77 / MDE 9.03pp / 推导地板 3.22 ≈ A/A 实测 3.18pp / N_eff=1.31 / 交付缺口 10.82pp)存活承重(CH7 threats + racing 门立项证据);**幸存两缝 = 截断×门接合(doc-12 §6/§13)+ Type II 功效(doc-12 §8/§12)。读 AUDIT 文档 §1「整体撤下」时以本条为准。**
 
 **本批入库**:①`experiments/docs/AUDIT-IDEAS-7-12-VS-UPSTREAM-AUG05.md`(⑦–⑫ 六轴 vs 官方 upstream 审计;§2 六轴已由 Aug-05 晚亲验 + 深夜二次独立测绘确认;**§4.2 拟议 counterfactual「窄域真门」改写经生产 schema 三点直验裁定勿执行**——门只认 kind 行 / 全 upstream 零 kind 生产者 / preprocess 不改名,判词以 doc-11 ⭐「潜伏 no-op」为准);②替代批五脚本 `analysis/novelty/`:`o_decorrelation_headroom` / `p_prefix_vote` / `q_cache_design` / `r_marginal_retention` / `s_budget_reallocation`(「pool 输出当选票」线;与首批 n–s 字母区间重叠系两批历史命名,引用时写文件全名勿混)。
+
+---
+
+## Aug-05 深夜 · P1 零成本离线批(roadmap P1 三项;零 API、零跑、36-run 重放)
+
+护栏 `research-guardrails` enforce。主循环派三路 coder 并行,**每条结论主循环从原始 JSON 独立复核过**。
+全录 `novelty/13-P1-OFFLINE-BATCH.md`。**SPEC 无裁决**(纯分析,零配置变更)——
+但 §6 提出的 fork 判据修改**将来动手时需要一条 SPEC 裁决**,现记为待办。
+
+**三脚本**(`analysis/novelty/`):`v_cap_regime`(regime 修正 + §5-A 结案 + 残余概率 r)·
+`t_censored_gate`(Schmee-Hahn 截断插补进门,M=2000 多重插补 + r 敏感性)·
+`u_racing_gate`(F-race 门离线重放,确定性支配停 + 分块符号检验 + MDE 投影)。
+
+**语料硬上限(此前从未写下分母)**:全库 **38 个 seesaw 决策**,可用 **37**
+(排 1 个 `FORCED_GATE` 探针),**FORK 只有 10 个**。⇒ 门相关结论一律是机理演示,非统计主张。
+
+**① regime 修正(⛔ 勘误)**:`q_budget_censoring.caps_per_run` 把上限当 run 的属性,
+但它是 `(run, round)` 的属性。`s1k8b103` 只有 R1 跑 cap-40,R2–R15 全是 cap-20
+⇒ **2884 次 attempt 被误归档**,cap-40 regime 被吹大 15 倍(3090 vs 真实 206)。
+修正后:孪生 **194 → 415 对**,"最后 5 步内到达" **47.4% → 47.2%**,`≥cap-2` 成功 **253 → 424**。
+**证据量 ×2.14,结论一字未改** —— 边界咬合的直接计数证据承重更强。
+
+**② §5-A 结案(⛔ 撤回升级)**:不是"z 会缩"。cap-40 处理臂 = **1 个 (run,round) cluster**,
+簇 bootstrap 区间宽度 **0.0000**(构造使然);题配对 bootstrap 在那一个 cell 内部重抽,
+恰好把问题所在的簇间方差假设掉了。**cap 对照不可识别**。cap-20 臂 ICC=0.0225 /
+design effect 2.93 / 有效 n 2225(名义 6524)—— 连多簇那臂朴素 SE 都小 1.71×。
+残余概率 r̂ = 25/49 = **0.5102** Wilson [0.3747, 0.6442],**单簇识别,只能当敏感性参数**;
+分步带衰减 0.778 → 0.714 → 0.250。
+
+**③ 截断到达决策层,但到达的是 scope 不是 throughput**:观测层偏差真实且大
+——门旗 `regressed` 的题在同轮 settled rollout 里带撞顶 **77.8%** [69.8,84.2] vs 基率 **22.6%** [19.8,25.6],
+**差 +55.2pp,Wilson 区间不重叠**(主循环独立复核逐位吻合);代理效度过关(Pearson r=0.957,MAD=0.076)。
+但保守修法每次插补只翻 **1.26** 个决策且**全部 FORK→APPLY**,丢弃 improvement **0 个**,
+前向吞吐损失界 **0.00pp**(远低于 9.03pp MDE)。REJECT 只在**激进变体**(给 never-solved 题插补通过)下被救回
+(~10.9/次,最大单 run 界 12.62pp),而它几乎完全由单簇识别的 r 撑着。
+⇒ **doc 12 §6 第 4 条「回答 so what」现已回答,吞吐维度上基本是负的。**
+scope 效应在本语料同样惰性(池从未满,K=8 而最多在册 4,多余 fork 不触发退役)。
+
+**④ racing 省 31% 但买不到功效**:确定性支配停省 **773/2475 rollout(31.2%,≈$540)**,
+最优题序上界 41.9%;但 **APPLY/REJECT 一次也省不了**(任何未看的题都可能翻转它们),
+**31% 全部来自 FORK**。省下的预算重分配后每题 attempt 1.99 → 2.89,MDE **9.03 → 7.51pp**
+—— 编辑量级 1–3pp,**仍差一个数量级**。AUDIT 对 ⑧ 的预判(「racing 不造功效只重分配」)命中。
+
+**⑤ ⭐ 合流结论:病灶是 fork 判据**。A 与 B 两条互不相干的路走到同一处 ——
+主循环独立复核 10 个 FORK:**5 个净劣势**(regressed > improved),最极端 **2 improved / 14 regressed**;
+3 个显著净劣势(p=0.001/0.004/0.008)。`SPEC-E01` 逐字:**「论文未给计数阈值」**,
+`min_fork=(1,1)` 是我方工程默认,论文 §4.5 只说 "forks a new variant rather than rejecting the edit outright"。
+⇒ **可落地机制改动**:fork 条件从「improved 非空且 regressed 非空」改为
+「improved 非空**且未被 regressed 净支配**」,改动在 `gate.py::_decide` 内几行,36-run 可离线重放验证。
+⚠️ 动手前必须先答两问:(i) 拦下这 5 个 fork 分数会更好吗(需前向重放:被拦编辑的 improvement 后续是否被别的变体拿到);(ii) **n=10**,分母必须随句子走。
+
+**⑥ 顺带清掉的写作卫生债**:`r_effective_n.py` 补出处 —— MDE 估计量 `(z_a/2+z_b)·SE` =
+**Miller 2411.00640 Eq.9**(非我方推导),2602.07150 四条正面区分,IRT 选题机制是借的、
+新的只是**用途**。写入 docstring 与打印输出两处。
+
+**⑦ 两条工程勘误**:(i) `i_gate_noise_replay.seesaw_decisions` 的正则会把
+`FORCED_GATE` 探针的 `synthesized_improved=` 当真 improved,**任何基于它的分析必须先排**;
+(ii) `T_k` 曾是字符串 `set`,**逐进程字符串哈希随机化**让加了 seed 的 shuffle 跨进程不一致
+—— 凡随机流程中间经过 set 迭代,必须先 `sorted()`。
+
+**P0 治理(干跑,未执行)**:`git merge-tree` 证 audit→s4 冲突面 =
+`RUN-LOG.md` / `SPEC.md` / `run_variant_pool.py` **三个,与六步预案预判一字不差**;
+`gate.py` 与 `PAPER-METHODOLOGY-DEVIATIONS.md` 自动合并成功。
+规模 59 文件 / +14,606 / −384(`run_variant_pool.py` 单文件 +4,766)——
+audit 侧携带 M-43..M-67 全部 copy-all 实现,s4 侧 SPEC 只到 **M-42**。
+**两分支互补而非重复;合流仍等三项裁决。**
