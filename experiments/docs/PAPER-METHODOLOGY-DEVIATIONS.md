@@ -518,3 +518,38 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | 接线(延后) | 旗标 `--counterfactual-gate`(默认关)+ `_counterfactual_gate_provenance`,调用点=预 ship 与 seesaw 并列;待批 2a 落地后接(`run_variant_pool.py` 施工权归其) |
 | 测试 | 新三组 **27/27 绿**(阳性×2/中性/零覆盖/官方格式兼容/异常记账/strict/就地改写安全/journal);全量套件待批 2a 落地统跑 |
 | 裁决层 | 用户令「修复一下,告诉我你的方法」(Aug-05) |
+
+## M-46 `--regression-baseline windowed` 相邻轮回退基线(Aug-05,ab9f38f,默认 global 不变)
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 官方 `regressions.py` 相邻轮无累积语义(`novelty/11` §3);P7 棘轮病理的官方式修法 |
+| 实现要点 | ⚠️ "用 `TaskEval.before` 即窗口"的捷径**经查为假**——`before` 是变体单元的**累积**通过位(`engine._task_eval`/`ledger.record`),等价于 per_variant;真实现走 ledger 逐轮桶(`aggregate_counts(before_round=prev+1, window=1)`) |
+| 已钉边界 | windowed 对上一轮**变体不可知**(`run_gate` 拿不到 variant_id):任一变体上轮解过即挡。变体维介于 global 与 per_variant 之间、累积维三者最紧;专项测试 `test_windowed_is_variant_agnostic_on_the_previous_round` 如实钉死 |
+| 裁决层 | 用户令「全抄官方的」(Aug-05) |
+
+## M-47 `--actionability mechanical` 机械可修性判分(Aug-05,ab9f38f,默认 llm 不变)
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 官方 `preprocess._compute_actionability`:任一 ALL_FAIL→1.0 / PARTIAL→0.8 / 全过带脆弱性→0.3 / 纯全过→0.0;在 α 比较**之前**取代 LLM 自评 |
+| 动机钉死 | e_pervar3 旱灾场景入测试:39 题含 3 题 ALL_FAIL ⇒ 机械 1.0 继续干活(实录 LLM 打 0.2 关停) |
+| 惰性档 | 0.3 档依赖 M-48 `all` 模式产出的 ALL_PASS 脆弱性 digest;`fail_only` 下该档惰性→0.0(已注明并测) |
+| 裁决层 | 同上 |
+
+## M-48 `--digest-patterns all` + 九类词表(Aug-05,ab9f38f,默认 fail_only 不变)
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 官方三模板(all_fail/all_pass/partial_pass,逐份带 PROVENANCE 头,载入时剥离)+ Layer-B 九类受控词表 |
+| 映射决定 | 词表只入 `all` 模式模板(默认逐字节不变的硬约束禁止改默认提示词);官方五字段 Layer-B 压进我方 4 键 `TaskDigest` 契约(type→failure_category / anchor→evidence_anchors / snippet+observation→notes),解析层零改动 |
+| 成本注记 | `all` 模式多花 digester LLM 调用(过题也消化),旗标 help 已注明 |
+| 裁决层 | 同上 |
+
+## M-49 `--digest-anchor-check` IV-1 锚核验(Aug-05,ab9f38f,默认关)
+
+| 项 | 内容 |
+|---|---|
+| 来源 | 官方 structure 门 IV-1:digest 引用锚必须真实存在于盘、`#step_N` 定位不越界——机械反幻觉 |
+| 语义 | 命中无效锚 ⇒ 该题 LLM digest 弃用、回退确定性 digest,计数入既有轮 rationale(零新产物);**零锚=通过**(与 fail_only 提示词不要求锚的诚实耦合,官方 IV-1 零锚=失败,此为有意分歧并注明) |
+| 裁决层 | 同上 |

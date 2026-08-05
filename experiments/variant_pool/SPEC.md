@@ -1004,4 +1004,4 @@ B2 读信用表决定分工;表分不出能力,headline 就没有机制。
 
 **测试**。变体池 **1032 绿**(+6);`tests/unit` **872 绿**(+8 通过,失败集与基线逐项一致)。
 
-**批次台账**:批 1 = 本节(落地);批 2a(窗口回退/机械 actionability/ALL_PASS+九类词表/IV-1 锚核验)与批 3(counterfactual 门修复版移植:门+适配器+阳性对照,详 `novelty/11` §7.5)并行施工中;批 2b(隔离门 Windows 版/refuted 账本/attribution 点火/digester 工具不对称)排队。**任何臂对比跑须用户明令。**
+**批次台账**:批 1 = 本节(落地);批 3 = M-45(f15a2f8,落地,CLI 接线在批 2b);批 2a = M-46..M-49(ab9f38f,落地,全套件 1108 绿);批 2b(隔离门 Windows 版/refuted 账本/attribution 点火/digester 工具不对称/counterfactual 接线)施工中。**任何臂对比跑须用户明令。**
