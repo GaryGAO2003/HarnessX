@@ -37,6 +37,8 @@
 
 **终裁**:「已接线、有真实拒绝路径的窄域真门」(结构层,本节四点)与「对官方自产轨迹行为等价 no-op」(行为层,doc-11 L122)**同时成立**——no-op 的成因是**数据契约断裂(schema 失配)**,不是未接线。原审计 §4.2 拟改判词只在结构层成立;doc-11 L122 在行为层存活。我方移植件 docstring 早已记录并修复此病("matched zero events and returned ok=True unconditionally"→零覆盖检测),为独立佐证。教训:结构层验证(接线+拒绝路径)不能替代数据契约层验证(生产者 schema)。
 
+**加强(同夜另一 session 独立复核合流,结论一致且更强)**:YAML-无效拒绝路径在门链中**不可达**(canonicalize 前置已保证可解析,与之重复);processor 实例化失败被 `continue` 吞(代码自注 "canonicalize's job")⇒ **行为层可达拒绝路径为零**;"能拒终态改变"仅在单测夹具 schema 下为真。
+
 ## 3. 我方 origin/main 侧前提核验(a533b07)
 
 - `experiments/variant_pool/` 全套在 main ✅(pool/router/target/gate/counterfactual_gate/reputation/manifest/ledger…24 文件);
