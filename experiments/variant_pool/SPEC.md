@@ -993,3 +993,15 @@ B2 读信用表决定分工;表分不出能力,headline 就没有机制。
 **② M-42 通道拓宽旗标(实验自变量,默认关)**。`--traj-failure-signals` 开时把正文专属失败信号计数入 frontmatter 四平铺键(`search_unavailable_count / fetch_error_count / fetch_empty_count / loop_warning_count`),落在扫描器已读的 `Read limit=30` 窗口;**默认关=字节等同**(测试钉死)。provenance 走 `_epsilon_provenance` 模式,零 `Hyperparams` 新字段。臂 0/臂 1 对比跑**须另行用户明令**。
 
 **测试**。变体池套件 **1026 绿**;`tests/unit` **864 绿**(8 项既有 gbk/沙箱环境失败与 HEAD 基线逐项一致,`git stash` 法证)。新增:`test_builder.py` 拼写参数化、`test_trajectory_frontmatter_v2.py` 双态字节等同;`test_processor_targets.py` 由断言缺陷改为断言修复(史料注释保留)。
+
+## 7.31 全抄官方批 1:`--ship-efficacy-gate` + upstream 同步(Aug-05,用户令「把能抄的抄了」「全抄官方的」;详 M-43 / M-44)
+
+**背景**:官方 AEGIS 三分支现世(对比全文 `novelty/11-OFFICIAL-AEGIS-DIFF.md`);官方无变体池 ⇒ 我方 `experiments/variant_pool/` 为论文 §4.5 唯一存世实现;官方 counterfactual 门本体被我方查出为**潜伏 no-op**(schema 无生产者,`novelty/11` §5/§7.5)。
+
+**① M-43 效力预检门**(默认关)。四项只读检查在候选评测 rollout 之前拦截运行时 no-op 候选;`efficacy:` 拒绝走既有 `RejectedCandidate`/`producer_or_pipeline_rejected` 账面。s1k8b103 的 5/7 蒸发若有此门,五个候选零 rollout 即被拦。
+
+**② M-44 upstream 同步**(默认开,地基)。main 三提交合并 + web_fetch 挂死加固逐字节移植;`[fetch failed` 前缀保持 M-42 计数器兼容。⚠️ 事故:web_fetch 改动物理落在 b65ca01 文档提交内(并行 coder 暂存 + 主循环定向提交连带),内容已验、历史不改;**新纪律:共享 worktree 提交前必查 `git diff --cached`**。
+
+**测试**。变体池 **1032 绿**(+6);`tests/unit` **872 绿**(+8 通过,失败集与基线逐项一致)。
+
+**批次台账**:批 1 = 本节(落地);批 2a(窗口回退/机械 actionability/ALL_PASS+九类词表/IV-1 锚核验)与批 3(counterfactual 门修复版移植:门+适配器+阳性对照,详 `novelty/11` §7.5)并行施工中;批 2b(隔离门 Windows 版/refuted 账本/attribution 点火/digester 工具不对称)排队。**任何臂对比跑须用户明令。**

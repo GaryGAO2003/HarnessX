@@ -2756,3 +2756,17 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 **方法学警告(跨 session 必读)**:① `ripgrep` 对轨迹 `.md` 假零(NUL 字节判 binary),一切轨迹计数必须 `grep -a`;② `[SEARCH UNAVAILABLE]` 全树计数口径敏感(908/703 vs 1327/946,范围不同),可靠口径=settled 逐尝试受影响数;③ e_pervar3 `comparison.json` 仅覆盖 R6-R15。
 
 **未做**:臂 0/臂 1 对比跑(待用户明令);`run_meta.py` 未接旗标(独立渲染器,非变体池路径,刻意不接)。
+
+---
+
+## Aug-05 官方 AEGIS 现世 + 全抄批次(分支 `feat/observation-channel` 续)
+
+**发现**(全文=`novelty/11-OFFICIAL-AEGIS-DIFF.md`,commit 5931eec/b65ca01/12c444e):upstream 三条 AEGIS 分支自 5-6 月公开(**Jul-21"未开源"判词=我方漏查分支的审计失误,已撤回**);官方**零变体池** ⇒ 我方 variant_pool=论文 §4.5 唯一存世实现;GAIA 无官方成规模实验;论文↔代码五分歧;gh-pages 主页挂着无实现支撑的 Table-5 数字;**官方 counterfactual 门本体=潜伏 no-op**(`kind`/`final_output` schema 全管线零生产者,只存在于其测试夹具;真实数据喂入恒 ok=True)——静默失效清单第六条,我方发现、官方未修。阵亡审计:我方贡献级想法零阵亡,三条旧判词更正(F3 信用分配/失败零词汇全称版/未开源)。
+
+**用户令**:「把能抄的抄了」「全抄官方的」→ 三批施工:
+- **批 1(已落地)**:web_fetch 挂死加固逐字节移植(M-44,⚠️改动物理落在 b65ca01 文档提交内——`git apply --3way` 暂存 + 定向提交连带,内容已验、历史不改,**新纪律=提交前必查 `git diff --cached`**)+ `--ship-efficacy-gate` 效力预检门(M-43,15fee8e)。变体池 1032 绿。
+- **批 2a(施工中)**:窗口回退旗标/机械 actionability/ALL_PASS+九类词表/IV-1 锚核验。
+- **批 3(施工中)**:counterfactual 门**修复版**移植=门+适配器(~60-120 行,落盘 session jsonl 判定 REPLAYABLE NOW)+零覆盖 fail-closed+阳性对照测试;前向 1 行修 `journal.py` episode_end 补 `final_output`。
+- 批 2b 排队:隔离门 Windows 版(官方正则 POSIX-only,Windows 上静默失效——用户指出)/refuted 账本/attribution 点火/digester 工具不对称。
+
+**跨会话状态页**:https://claude.ai/code/artifact/49b484c6-2897-48c0-8d65-813e71bae8a1(地址稳定,随批次更新)。付费跑零启动。

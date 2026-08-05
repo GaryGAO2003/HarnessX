@@ -482,3 +482,27 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | 已知边界 | 计数按渲染正文做,模型若在自述中逐字回显标记串会被计入——按"该失败模式是否出现"的粗信号使用,不作供源精确计量(docstring 已注明) |
 | 测试 | `tests/unit/test_trajectory_frontmatter_v2.py`:开=计数正确(2/1/0/1 用例),关=键不存在、输出与 HEAD 逐字节一致;端到端过 `_write_task_trajectory` 双态 |
 | 裁决层 | 用户令「可以把这份也改进,放进新的 branch 里」(Aug-04);**跑臂对比须另行明令** |
+
+## M-43 `--ship-efficacy-gate` 候选评测前效力预检(Aug-05 新增,默认关)
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | §4.3 门序 "build or smoke tests (when applicable)"——无任何语义效力检查 |
+| 起因 | s1k8b103 七条上线编辑五条运行时 no-op,却**逐关全过**且各花掉整批候选评测 rollout(`novelty/10`/`11`)。官方同思路防线:`apply.py` 校验 + `ShipNotLandedError`(`novelty/11` §5) |
+| 我方做法 | Evolver 写完 config 后、任何候选评测 rollout 之前,只读预检四项:①加载+canonicalize;②声明的 processor/自定义工具全部可实例化(**复用真实 prep 路径** `_resolve_artefact_paths`/`_resolve_tool_targets`,即评测前本来就会跑的 fail-closed 检查,提前到花钱之前);③提示词模板解析非空;④声明了桶但 `compute_changeset(parent, candidate)` 为空 ⇒ `efficacy: declared <buckets> but runtime surface identical to parent`。失败候选从 `ranked_for_gate` 掉队,记 `efficacy:` AuditRecord → 走既有账面(`RejectedCandidate` 证据、`producer_or_pipeline_rejected` 计数),**零新产物文件** |
+| 边界(须并报) | stock 点分模块 processor 不做实例化断言(与真实 prep 一致);legacy 消融臂未接;仅标量 config 改动的边角以"父比对不可得则跳过"守护,不误杀 |
+| 锁与 resume | 旗标默认关=队列/账面/产物/lock 逐字节等同;`_ship_efficacy_provenance` 默认返 None;零 `Hyperparams` 字段 |
+| 测试 | `test_ship_efficacy_gate.py` 6 项;变体池 **1032 绿**;`tests/unit` 872 绿(8 项既有环境失败与基线逐项一致) |
+| 裁决层 | 用户令「把能抄的抄了」「全抄官方的」(Aug-05) |
+
+## M-44 upstream 同步:main 合并 + web_fetch 挂死加固移植(Aug-05)
+
+| 项 | 内容 |
+|---|---|
+| 内容 | ①merge `upstream/main`(91466f0):spawn 任务强引用防 GC、`to_markdown` 处理 list 形 processors、ruff 锁版;我方未触这三个文件,零冲突。②`web_fetch.py` 移植官方 feat/aegis 的 +55 行挂死加固:25/30/60s 三层超时、`page.inner_text` 单独 wait_for(官方注释:PDF 页无 `<body>` 永挂,"the observed cause of worker hangs"于其 2026-05-13 GAIA 跑)、二进制/错误响应不再落 Playwright、结构化失败标记。**逐字节等同上游已验证**(`git diff upstream/feat/aegis -- web_fetch.py` 为空) |
+| 动机 | fetch 失败是我方实测头号失败模式(29.1–42.4% 尝试受累,`novelty/10` §5);此为地基修复,默认开、两臂共用 |
+| M-42 兼容 | 新失败拼写均以 `[fetch failed` 开头 ⇒ `fetch_error_count` 计数器仍命中;每次失败恰发一个标记串,无双计 |
+| ⚠️ 事故记录 | web_fetch 的 +55 行**物理落在 `b65ca01`(一个文档提交)里**:并行 coder 的 `git apply --3way` 把改动写进了暂存区,主循环随后 `git add <doc> && git commit` 时将暂存区一并带走。内容已验证无误;分支未推送且树内有活跃 agent,**不重写历史**。教训:**共享 worktree 内每次提交前必查 `git diff --cached`**(已入操作纪律) |
+| 政策 | 修改 vendored 面,依据同 M-41(用户「robust 框架」令;独立分支隔离) |
+| 测试 | `test_web_fetch_browser_retry.py` 4 项(二进制/错误标记不落浏览器重试) |
+| 裁决层 | 用户令「全抄官方的」(Aug-05) |
