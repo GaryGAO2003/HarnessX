@@ -2,8 +2,11 @@
 
 > 2026-08-05。三路 researcher 并行读 upstream（Darwin-Agent/HarnessX）三条分支的 git 对象，零 checkout、零 API。
 > 分支：`feat/aegis`（核心，tip 5-21）、`feat/aegis-experiment`（tau2 实验层，tip 6-02）、`feat/he-tb2-add-aegis`（TB2，5-26）。
-> 三条 tip 均 author-date == committer-date（未 rebase），但 **git 不记 push 时间**；Jul-21 审计时同一 upstream 无 AEGIS ⇒ 推断为**七月下旬后补推的旧分支**（推断，非实证）。
+> 三条 tip 均 author-date == committer-date（未 rebase）。
+> 🔴 **推送时间已定（2026-08-05 用户提供 GitHub 分支页 UI）**：`feat/aegis-experiment` "2 months ago"、`feat/he-tb2-add-aegis` "3 months ago" ⇒ **AEGIS 分支自 2026 年 5–6 月起就公开存在**。本文初版"七月下旬后补推"的推断**错误，撤回**——真相是**我方 Jul-21 审计漏查了分支列表**（只看了 main/落地页），"Darwin-Agent repo 内容≠论文 / AEGIS 未开源"的旧判词自 5–6 月起即不成立。审计教训：查开源状态必须 `git fetch --all` + 枚举全部分支。
 > 作者：tenghl、zhao9797；`1a62993` 作者 Tingyang Chen (chentingyang@xiaomi.com)。
+>
+> **分支全覆盖（10 条）**：4 条代码分支（main + 三 AEGIS）见本文；另 6 条 = 网站线（shuolucs/Codex，Jul-20~23：homepage-site / homepage-accessible-link / deploy-pages-workflow / pages-enable-config / remove-pages-workflow / gh-pages），为 GitHub Pages 主页工程，无代码价值——但 **gh-pages 的 index.html 公开展示论文 Table 5 全部数字（87.4 / 73.8 / +13.6 / 49.5 / "Variant isolation"）**，即主页宣传的头条机制在其发布代码中不存在（见 §0-①）。站内另有论文 PDF 与图表资产（`assets/paper/`）。
 
 ---
 
@@ -132,7 +135,7 @@ P.1 Cleaner：工具输出 sha 去重 + >2048B 外置为 `content_ref`。
 3. M-42 立论升级（§4）；M-41 获官方同类病防线佐证（§5）。
 4. 论文↔代码分歧清单（§0-③）进 threats/related；"seeds=3 vs k=1-2"、"±5% 未实现"两条须并报。
 5. 官方 Layer-B 九类词表可作我方失败分类的**对照词表**（我方 `failure_category` 79.5% null 的修复参照）。
-6. 日期问题：分支 push 时间不可考，写作引用官方代码须注"branches pushed to public remote after 2026-07-21 audit; commit dates May–June 2026"。
+6. 日期口径（已修正）：写作引用官方代码注 "publicly available since May–June 2026 (GitHub branches UI, verified 2026-08-05)"；我方 Jul-21 审计的"未开源"判断为**漏查分支所致的审计失误**，如需引用当时判断须连同此勘误。
 
 ## 8. 未闭项
 
@@ -140,4 +143,4 @@ P.1 Cleaner：工具输出 sha 去重 + >2048B 外置为 `content_ref`。
 - 官方 Stage-5 在 GAIA pilot driver 里是否接线未读（`run_meta_aegis.py` 1031 行只读了默认段）。
 - 官方模板引用的测试名与实际文件名不一致（`test_custom_processor_registry.py::test_harness_config_supports_file_target_without_init_py` vs 另有 `test_custom_processor_registry_file_uri.py` 在盘）——两者都存在，引用未核对到函数级。
 - `aegis_story.md`（GAIA-64 十四轮叙事）未逐字读，只确认了无 ensemble/pool 词汇。
-- upstream/main 三个提交（spawn 强引用 / to_markdown list-form / ruff）尚未合入我方任何分支——待用户令。
+- ~~upstream/main 三个提交尚未合入~~ **已合**：merge commit `91466f0`（Aug-05，用户令"把能抄的抄了"），零冲突（我方未触 spawn_subagent/trajectory）。
