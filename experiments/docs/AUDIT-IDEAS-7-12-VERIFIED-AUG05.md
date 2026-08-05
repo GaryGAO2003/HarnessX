@@ -20,16 +20,22 @@
 
 **Evolver 靶选补验** ✅:`worst_first|failure_density|target_select` 全分支零命中;`templates/evolver.md` 证实靶由 LLM 按提示语义选(digester pattern label + "Failure Evidence" 硬要求)。我方 `experiments/variant_pool/target.py`(worst_first 默认 + round_robin/failure_density 消融)无官方对应物 → CH3 保真度素材成立。
 
-## 2. doc-11 判词坐实(counterfactual gate)
+## 2. counterfactual gate:两层裁决(⚠️ 本节 Aug-05 深夜修正,见节末 ERRATUM)
 
-原审计 §4.2 拟改判词「已接线、能拒、仅查改写输出的 processor 链的窄域真门,非 latent no-op」四点全部直验成立:
+原审计 §4.2 拟改判词「已接线、能拒、仅查改写输出的 processor 链的窄域真门」四点在**结构层**全部直验成立:
 
 1. **已接线**:`orchestrator.py:517-525` 在 run_round 内无条件 `set_counterfactual_context({passing_task_ids, trajectories_dir, k_samples: 3})`;`stages/commit.py:19` import `check_counterfactual_replay`,gate 链第 4 道(structure→novelty→canonicalize→**counterfactual**→replay)。
 2. **能拒**:两条真实 fail 路径——候选 YAML 解析失败 → `ok=False`;重放后任一采样任务的 `final_output` 或 `exit_reason` 相对原 passing 轨迹改变 → `ok=False`("counterfactual replay flagged regressions")。
 3. **仅查 processor 链**:只实例化配置 `processors` 段(`_instantiate_processors`),只重放 `after_model/after_tool/task_end` 三种 hook;docstring 自供 "No LLM calls, no tool execution — replay works only on recorded events."
 4. **对 prompt/工具/预算类编辑恒过**(结构性):此类编辑不改 processor 对录制事件的改写行为 → 重放终态恒等 → pass。另三条静默恒过路径:ctx 未接(`GateVerdict(True, "skipped: no counterfactual context wired")`)/无候选文本/无先前 passing 任务。
 
-→ doc-11 的「官方 counterfactual gate = latent no-op」旧判词应废,替换为上述窄域真门表述。
+**ERRATUM(Aug-05 深夜,主循环补验生产者侧后修正)**:本文档首版据上述结构层证据写下「doc-11 旧判词应废」——**过头了,撤回**。补验数据契约层后,裁决为**两层并立**:
+
+- 门按 `row.get("kind")` 分发(`_HOOK_KINDS = {after_model, after_tool, task_end}`),而官方管线轨迹由 journal 写出、全部 **`type`-tagged**(`harnessx/tracing/journal.py`;`harnessx/aegis/__init__.py:119` `raw_sessions_dir=raw_sessions_dir or trajectories_dir` 证实 trajectories 目录即原始 session JSONL);
+- **全分支唯一 `kind`-tagged 事件生产者是门自己的单测**(`tests/aegis/unit/test_gate_counterfactual.py:18,24`),无任何 type→kind 适配层;
+- ⇒ 官方自产数据喂入 → 零事件命中 `_HOOK_KINDS` → 无比较发生 → 恒 `ok=True`。
+
+**终裁**:「已接线、有真实拒绝路径的窄域真门」(结构层,本节四点)与「对官方自产轨迹行为等价 no-op」(行为层,doc-11 L122)**同时成立**——no-op 的成因是**数据契约断裂(schema 失配)**,不是未接线。原审计 §4.2 拟改判词只在结构层成立;doc-11 L122 在行为层存活。我方移植件 docstring 早已记录并修复此病("matched zero events and returned ok=True unconditionally"→零覆盖检测),为独立佐证。教训:结构层验证(接线+拒绝路径)不能替代数据契约层验证(生产者 schema)。
 
 ## 3. 我方 origin/main 侧前提核验(a533b07)
 
@@ -41,12 +47,13 @@
 
 1. **「五个二值门」有例外路径**:structure/novelty 便宜门先挂时,E6 短路只返回 4 个 verdict(counterfactual 缺席),官方注释 "audit.jsonl still shows all four entries" 自身已过时。全量路径确为 5 门;ship 判据 `all(v.ok)` 不受影响。引用「五门」时加短路脚注。
 2. **ab6eb27 不在 origin/main**:它是 `fix/novelty-s4` 上的 merge 提交(Aug-05 03:46,merge feat/observation-channel@12c444e),未合入 main;b65ca01 已在 main。原审计 §1 解冻三条件若按「落在 gh main」口径读则第二条未达;T1 从 fix/novelty-s4 发车则无碍——口径须写明。
-3. **RUN-LOG 删 16 行实锤,但未污染远端**:working tree 的 `experiments/docs/RUN-LOG.md` 恰为 0 增 16 删(未提交);origin/main 历史全纯增(近 4 提交 numstat 7/0、2/0、3/0、8/0)。修复动作(恢复条目+撤稿标注,原审计 §4.3)应由持有该工作树的 session 在提交前完成——**本分支不碰该文件**。
+3. **RUN-LOG 删 16 行实锤,但未污染远端**:working tree 的 `experiments/docs/RUN-LOG.md` 恰为 0 增 16 删(未提交);origin/main 历史全纯增(近 4 提交 numstat 7/0、2/0、3/0、8/0)。修复动作(恢复条目+撤稿标注,原审计 §4.3)应由持有该工作树的 session 在提交前完成——**本分支不碰该文件**。**(Aug-05 深夜更新:已闭——s4 在 `d440e8b` "RUN-LOG append-only restore" 恢复该 16 行并提交,RUN-LOG:2897 记录自愈,porcelain 已净。)**
 
 ## 5. 遗留待办(归属)
 
-- [ ] `fix/novelty-s4` session:提交前恢复 RUN-LOG 16 行 + 撤稿标注(原审计 §4.3);
+- [x] ~~`fix/novelty-s4` session:提交前恢复 RUN-LOG 16 行 + 撤稿标注~~(已闭:`d440e8b`,Aug-05 深夜核实);
 - [ ] 原审计 §1 解冻条件补一句口径(ab6eb27 所在分支);
+- [ ] **双落治理**:原审计文档现同时提交于 fix/novelty-s4(`d440e8b`)与本分支,当前逐字节一致(`git diff` 空,合并无冲突);须指定 canonical 侧防双主进化(待用户裁,详 BRANCH-OVERLAP 文档);
 - [ ] ⑧⑩(T1)进 CH4 臂/flag 实现时,以本记录为占位与证据基线(全部走默认关 flag,不动基线,兼容 routing-freeze 只读不变量——原审计 §4.1)。
 
 ---
