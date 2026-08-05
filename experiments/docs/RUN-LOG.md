@@ -2771,3 +2771,11 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 - **可行性跑序列(用户明令,Aug-05)**:腿 A `chsmoke_off`(6×3 全关,快照 worktree HarnessX-smoke @ b8de67e,venv=主仓 .venv312,密钥运行时取自 t1 发射器)已点火 → 完成后直接 `chval30`(30×10,T1 同床 t1_30.json,全旗标开,新快照)。6 题 smoke 床=gaia_smoke6.json(seed0,3/2/1)。读数=机制体检表,**禁止从这些 run 报任何分数增减**。
 
 **跨会话状态页**:https://claude.ai/code/artifact/49b484c6-2897-48c0-8d65-813e71bae8a1(地址稳定,随批次更新)。付费跑零启动。
+
+
+## Aug-05 chval30 事故:发射器漏传 --search-backend serper(用户以"Serper 余额没掉"抓获)
+
+- **事实**:chval30 首次点火整床跑在死掉的免费兜底梯上(Wikipedia 403×980/Bing 墙×706/DDG×~978,全链耗尽~489 次),Serper 零调用。lock 的 `h0.tool_registry` 全程写着真相(builtin WebSearch,custom 空)。腿 A 同病。429×199 全部 ≤2 次重试内恢复,非死因;进程死于外部 kill,日志零内因。
+- **根因**:主循环攒发射器 BASE 参数时漏了 `--search-backend serper`(默认=chain;历史跑 s1k8b103 lock 有 W1 记录=显式传过;T1 用 s4 的 serper_only)。**"key 注入了"≠"工具注册了"**——efficacy 纪律又一实例,记入静默失效清单第七条(自伤型)。
+- **修复**:①发射器 BASE 补旗标;②发射器新增**强制预检**:点火前 live Serper 探针(1 credit)+ BASE 旗标断言,任一失败拒绝点火;③仓库测试 `test_search_backend_forced.py` 钉死 W1 seam 契约(swap 真发生/chain 逐字节无操作/无 WebSearch 时软路径至少响亮 warning——软点如实记录,硬强制在发射器探针)。
+- **处置**:chval30 R0-R2(瘸腿搜索段)作废不混用,`--clean` 重点火;腿 A 结论(默认路径纯净/机制管线)与搜索供给无关,保留。意外收获:M-42 计数器在实战里如实录下退化(118 轨迹 92 条非零,search_unavailable 326/fetch_error 277/loop 96)。
