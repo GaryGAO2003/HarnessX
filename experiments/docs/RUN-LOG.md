@@ -2873,3 +2873,19 @@ P3 提案出口 schema 修复重试。三旗标默认字节等同;+50 测试,全
 **二次合流零冲突**(merge-tree 干跑先证):upstream 代码(91466f0:spawn 强引用 / to_markdown / ruff,+107 测试行)+ 官方情报三 docs + **web_fetch 挂死加固 +55 行**——b65ca01 以 docs 标签**夹带**的代码,主循环亲验=静态 25s/浏览器 30s/总 60s 三层显式超时 + `page.inner_text` 套 `asyncio.wait_for`(PDF 页无 `<body>` 永久挂死之病灶)+ 短响应不回退 Playwright。**批 1 拦路半边已在车**。全量 **1152 绿**(1125 + 27 upstream 测试)。
 
 **发射冻结解除**:三前置达成(web_fetch 落 / 合流毕 / 归一不阻塞——T1 配置不变,默认按剂量-响应臂 1 双重记账);`--ship-efficacy-gate`(批 1 剩余半边)后落默认关,不破纪元。**状态=待发车令**(题集 11/15/4 已抽定、Serper 22k 已确认、旗标表见 LAUNCH-CONFIG §3)。
+
+---
+
+## Aug-05 夜 · overnight 离线分析批(零 API、零跑、36 run 重放)
+
+护栏 `research-guardrails` enforce(A5 变异/选择分调用 · A3 猎黑天鹅 · C2 负结果如实 · C5 代码必须真跑 · E2 基线+CI)。九路 researcher(R1–R9,含两路对抗)+ 六个新分析脚本。**全录 `novelty/12-CENSORING-AND-GATE.md`**。
+
+**六个脚本**(`analysis/novelty/`):`n_answer_selection`(masking gap 分解+选择规则+对照)· `o_prefix_voting`(前缀协议+G1 判分一致性门+G2 打乱历史对照)· `p_ratchet_violation`(棘轮 vs 采样零假设+参数化零带)· `q_budget_censoring`(风险函数+孪生;**cap 按 run 解析,KM 段已改为代码内撤回**)· `r_effective_n`(床成分+方差分解+功效)· `s_effective_votes`(有效投票数+池比信用)。
+
+**站得住的五条**:①**功效**——swing=77 非 103;`0.400/√(77×2)=3.22pp` 推导值命中独立实测 A/A 地板 **3.18pp**(差 0.04pp);MDE **9.03pp** vs 编辑量级 1–3pp;ICC **0.491**;同变体同轮同题两次 attempt 矛盾 **21.0%**。②**棘轮**——2536 合格轮 480 违反(18.93%),零假设期望 461.4,零带 [395,487],**obs/exp=1.04**;更严零假设只加宽零带 ⇒ 攻击反噬。③**截断**——违反的 **61.9%** 是全撞顶轮;账本做的正是 Hutter 1310.1947 命名并证伪的 "treat-as-uncensored";孪生 194 对中 **47.4% 在上限前 5 步内到达**。④**有效票**——6 变体 ρ=0.717 ⇒ **N_eff=1.31**(与 2605.29800 的 9 判官≈2 票同为 0.22 比)。⑤**交付缺口**——pass@2 高估可交付 **10.82pp**,`exit=done` 一行规则收回 **+6.66pp** [+5.60,+7.77],对照 +0.68pp。
+
+**占位裁定(R6/R7/R9 三路)**:门-噪声框架被 **PACE 2606.08106** 与 **2607.13683** 抢跑(均 Type I);修法双 port(F-race 2002 / adaptive capping 1401.3492);多样性线被 Tumer-Ghosh 1996 + Brown-Kuncheva 2010 + AIMO3 2603.27844 + 2510.21513 覆盖。**幸存两缝**:(a) 截断 × ship/regression 决策——R6 逐字 *"the join is empty"*;(b) **Type II / 功效**——R9 逐字 *"I found this stated nowhere with a calculation"*。**MDE 公式必须引 Miller 2411.00640;必须正面区分 2602.07150(它建议功效分析但没做)。**
+
+**⛔ 九条自我撤回**(全录 doc 12 §2/§11/§12.3):簇 +3.12pp = 最大 seed · 前缀投票 +19pp 中 8.92pp 是纯缓存 · KM 在信息性截断下无效 · fork obs/exp 被事件条件化 · 「循环看不见撞顶」(2069 份 meta 文档中 952 份在讲它)· 首版 MDE 漏算 2 次 attempt · 池比信用 86% 用了未来轮 · cap 对照 +24.6pp / z=4.7 不支持任何推断(符号检验 p=0.43)· 2607.13683 的 z≥1.96 摘要层不可证实。
+
+**未办**:SPEC 无裁决(纯分析,零配置变更);`o_prefix_voting` 的缓存成分不可作 per-config 指标;池比信用需按前缀覆盖重算;功效论点动笔前须取 2607.13683 方法节原文。
