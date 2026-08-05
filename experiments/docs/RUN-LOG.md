@@ -2792,3 +2792,10 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 - **批 4c 施工中**(主循环自查抓到清点缺口):IV-3~12 清单核对移植 + Critic Part-2 组合审计(strategy_concern:Critic 产出→pool_state 持久→下轮 Planner/Evolver 转达→IV-11 消费)。流程教训:按批派工必须回头对总清单。
 
 - **批 4c 落地**(M-62..M-63):IV-3~12 核对移植(只port缺项,IV-4/6 如实 N/A)+ Critic Part-2 组合审计(strategy_concern 全环:Critic→持久→转达→IV-11)。+43 测试,全套件 **1247 绿**。**官方启用面 100%(M-41..M-63 计 21 项)。** 下一步:新快照 + 发射器 20 旗标全开 + chval30 重点火。
+
+
+## Aug-05 晚:chval30(val2) 五轮全零评测 → 杀跑换装重点火
+
+- 每轮审计台账:R1-R4 ERROR 仅 1 条良性 asyncio、WARNING 全为已知三族(429/搜索兜底残余/compaction INFO);**candidate evaluated=0 五轮连零**(饥饿三层:提案畸形→Critic 实质拒→Critic 整轮 no_op)。机制活性已验:机械 actionability(a_t=1)、audit 流、M-56 监视单驱动 Critic 拒因、**M-63 整轮否决权+strategy_concern 首次实战开火**(R4,pipeline_audit 全录)。观测缺口记档:candidate_accounting 无 no_op 计数器。截断读数:失败中撞顶 56-67%(与 doc 12 截断图景一致)。
+- **批 5 落地**(5dc7e24,M-64..M-67):隔壁线五件语义移植,+84 测试,全套件 1331 绿。
+- 岔路规则触发(批 5 就绪 ∧ evaluated 连零)→ 杀 val2 跑,新快照 val3 重点火:BASE 换 `serper_only`,ALL_FLAGS 增五件(continuity on/abstain outcome/repair-retry 1/load-feedback/full_bed),**共 25 项机制全开**。

@@ -600,3 +600,17 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | 边界(须并报) | 正文依赖检查在候选无 `_meta_scratch/manifest.yaml` 正文时 N/A 而非误杀;IV-12 生产态走官方 back-compat(非空字符串校验,账本逻辑已全测);resume 后 concern 接力不恢复(默认关跑不受影响,已注明) |
 | 测试 | +43 项;全套件 **1247 绿**,零新增失败 |
 | 裁决层 | 用户令「官方启用的全放进来然后test」(Aug-05);清点缺口由主循环自查抓获补齐 |
+
+## M-64..M-67 批 5:隔壁线五件语义移植(Aug-05,5dc7e24,全部默认关/现状)
+
+> 动机:chval30 R1-R4 门链全饿——0 候选到达评测(R1-2 提案畸形 4/4;R3 Critic 实质拒;R4 Critic 整轮 no_op)。隔壁线(fix/novelty-s4)恰有对症四组件;跨线树已重度分叉,故为**语义移植**非 cherry-pick,其测试随迁。
+
+| 项 | 内容 |
+|---|---|
+| **M-64 `--search-backend serper_only`**(their 2d14b6e) | 第三档:缺 key 响亮 SystemExit;Serper 空/耗尽 → 诚实 `[SEARCH UNAVAILABLE]`,**永不落兜底链**(旧 `serper` 档的两条静默回退在此档不存在)。执行其"后续臂一律 serper_only"硬裁 |
+| **M-65 evolve 三修**(their 30321c0) | `--evolve-continuity`(新线程+NOTES 记忆+步数一本账+耗尽自动弃权)/`--evolve-abstain outcome`(白卷升一等 ABSTAIN,理由回流 Planner PRIOR ABSTAINS)/`--proposal-repair-retry N`(出口 schema 校验+定向重修);互斥/依赖硬校验随迁 |
+| **M-66 `--candidate-load-feedback`**(their 9fae30a) | 槽内装载验证经 DECISION_REQUIRED/NOTES 通道喂回下次尝试、不扣步数;耗尽转弃权;评测期装载失败降级 infra-fail,active-pool 仍硬崩 |
+| **M-67 `--ship-confirmation full_bed`**(their 9315e3e) | 窗口=预筛、全床=判决、reject 不确认;engine 级 SHIP_CONFIRM 阶段,构造上位于我方预检链与 seesaw 之后 |
+| 适配要点 | 零 file_uri 引入(装载验证走我方 `_resolve_artefact_paths`/`_resolve_tool_targets`);planner-brief 链按我方五层包裹捕获;abstain 记录置于预检链 replace 之后;serper_only 计数器接入 deep_metrics |
+| 测试 | +84(9+50+13+12);全套件 **1331 绿**,零新增失败;默认逐字节等同逐一钉死 |
+| 裁决层 | 跨线合流的机制部分;serper_only 为隔壁线用户硬裁的执行 |
