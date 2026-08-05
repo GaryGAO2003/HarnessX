@@ -1142,6 +1142,7 @@ class HarnessJournal:
                     "timestamp": ts,
                     "message": None,
                     "exit_reason": event.exit_reason,
+                    "final_output": event.final_output,
                     "total_steps": event.total_steps,
                     "reward": event.eval_result.reward if event.eval_result else None,
                     "passed": event.eval_result.passed if event.eval_result else None,
