@@ -2889,3 +2889,11 @@ P3 提案出口 schema 修复重试。三旗标默认字节等同;+50 测试,全
 **⛔ 九条自我撤回**(全录 doc 12 §2/§11/§12.3):簇 +3.12pp = 最大 seed · 前缀投票 +19pp 中 8.92pp 是纯缓存 · KM 在信息性截断下无效 · fork obs/exp 被事件条件化 · 「循环看不见撞顶」(2069 份 meta 文档中 952 份在讲它)· 首版 MDE 漏算 2 次 attempt · 池比信用 86% 用了未来轮 · cap 对照 +24.6pp / z=4.7 不支持任何推断(符号检验 p=0.43)· 2607.13683 的 z≥1.96 摘要层不可证实。
 
 **未办**:SPEC 无裁决(纯分析,零配置变更);`o_prefix_voting` 的缓存成分不可作 per-config 指标;池比信用需按前缀覆盖重算;功效论点动笔前须取 2607.13683 方法节原文。
+
+---
+
+## Aug-05 深夜 · novelty 批次落库 + 台账修复(git/勘误两表面;SPEC 无裁决,零配置变更)
+
+**勘误(append-only 违规修复)**:Aug-05 15:04 工作树曾物理删除上方「Aug-05 夜 · overnight 离线分析批」整节 16 行(违反本文件头 append-only;未入 committed 历史),现原样恢复并以本条记录。口径钉死:**撤框架 ≠ 撤数据**——测量批框架(门-噪声/多样性)因 PACE 2606.08106 / 2607.13683 占位撤下,但五数字(swing=77 / MDE 9.03pp / 推导地板 3.22 ≈ A/A 实测 3.18pp / N_eff=1.31 / 交付缺口 10.82pp)存活承重(CH7 threats + racing 门立项证据);**幸存两缝 = 截断×门接合(doc-12 §6/§13)+ Type II 功效(doc-12 §8/§12)。读 AUDIT 文档 §1「整体撤下」时以本条为准。**
+
+**本批入库**:①`experiments/docs/AUDIT-IDEAS-7-12-VS-UPSTREAM-AUG05.md`(⑦–⑫ 六轴 vs 官方 upstream 审计;§2 六轴已由 Aug-05 晚亲验 + 深夜二次独立测绘确认;**§4.2 拟议 counterfactual「窄域真门」改写经生产 schema 三点直验裁定勿执行**——门只认 kind 行 / 全 upstream 零 kind 生产者 / preprocess 不改名,判词以 doc-11 ⭐「潜伏 no-op」为准);②替代批五脚本 `analysis/novelty/`:`o_decorrelation_headroom` / `p_prefix_vote` / `q_cache_design` / `r_marginal_retention` / `s_budget_reallocation`(「pool 输出当选票」线;与首批 n–s 字母区间重叠系两批历史命名,引用时写文件全名勿混)。
