@@ -2839,3 +2839,15 @@ P3 提案出口 schema 修复重试。三旗标默认字节等同;+50 测试,全
 ## Aug-05 · F4 落地:`--planner-retry N` 空 landscape 重试(SPEC §7.36)
 
 用户裁「1、2 都可以」。LLM Planner 空手 landscape(`briefs=0`)时,`N>0` 打响亮 WARNING(`planner returned empty landscape, retry i/N`)并重发 meta call 至多 N 次,全空才落原 `empty_landscape` 短路;`N=0` 默认字节等同(单调用、无重试、无 WARNING、结果不变)。parse 失败 / provider error 仍首次即整轮回退确定性臂。名取 STATPOOL §8 预留;`_planner_retry_provenance` 走 `_epsilon_provenance` 模式,`_LLMPlanner` 加 `planner_retry` 字段,`_make_planner` 经 `getattr` 注入,零 `Hyperparams` 新字段。+3 测试(空→有效 / 全空 / 默认 0),全量 **1112 绿**(1109→1112)。
+
+---
+
+## Aug-05 · baseline 发射前三裁决(正文=`LAUNCH-CONFIG-BASELINE.md`,本条为指针)
+
+用户三连裁,依据与细节全录 `experiments/docs/LAUNCH-CONFIG-BASELINE.md`(冻结草案,冒烟后定稿):
+
+1. **目标选取** `--target-strategy failure_density`:#28(target 选法)论文未定义=OURS 自由度;worst_first 键含冻结格 → 锁死 12/12(e_pervar3)/ 15/15(s1k8b103);failure_density 仅遍历 routed 活题、untried 计 unsolved、fork 后燃料跟随子代,0 行实现。round_robin 降备用;STATPOOL 矩阵目标键=B 臂精化。
+2. **路由粒度不改**(按簇分):论文机制本体(#11 之前提);by-level 虽 OURS(#20)但无干净替代+无死锁级病因;分区升级唯一路径=`m_cluster_validation.py` 赢同尺寸随机 null,赢了升臂,不进 base。
+3. **观测通道原则+边界**(两连裁):`--traj-failure-signals`=**开**;喂 meta agent 以 **harness 为界**——进:轨迹失败形态 / agent 工具失败 / evolver 自身工作记录 / 自己编辑未加载的 fail-closed 报错;不进:门判决及理由、池/路由/账本内部、serper/429 基建噪声(机制层病在机制层修,failure_density/B 臂判定量;零泄漏过审=效度声明「演化侧对评测机制盲」)。REJECT 侧机制不动(=B 臂靶,已知机制故意保留)。
+
+新文件入库:`LAUNCH-CONFIG-BASELINE.md` / `BENCH2-SELECTION-AUG03.md`(Aug-03 第二床选型=BrowseComp,补入库)/ `analysis/novelty/m_cluster_validation.py`(分区检验仪:failure-mode 分区 vs 同尺寸随机 null)。`l_rank_ablation.py` +56(E1-power:注入已知大小的合成特化,标定 E1 检出下限)用户裁「需要的」,随本批入库。后续:双向观测审计(边界内完整 / 边界外零泄漏)+ S1 旁路审计 → 缺口小批 → 最小量级双跑(设计=LAUNCH-CONFIG §6)。
