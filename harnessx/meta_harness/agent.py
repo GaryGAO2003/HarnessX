@@ -120,6 +120,7 @@ def build_meta_agent_harness_config(
     tool_result_noise_filter: bool = False,
     read_scope_blocked_roots: "tuple[str | Path, ...] | None" = None,
     read_scope_allowed_files: "tuple[str | Path, ...] | None" = None,
+    read_scope_allowed_roots: "tuple[str | Path, ...] | None" = None,
 ) -> "HarnessConfig":
     """Assemble the meta-agent's HarnessConfig.
 
@@ -239,6 +240,7 @@ def build_meta_agent_harness_config(
             ReadScopeGateProcessor(
                 blocked_roots=tuple(str(r) for r in read_scope_blocked_roots),
                 allowed_files=tuple(str(f) for f in (read_scope_allowed_files or ())),
+                allowed_roots=tuple(str(r) for r in (read_scope_allowed_roots or ())),
                 hint_message=(
                     "harnessx source is gated. "
                     "Consult the SKILL.md files in your workspace/skills/ for the "

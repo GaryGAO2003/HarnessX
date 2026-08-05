@@ -1792,6 +1792,240 @@ def _apply_ship_efficacy_gate(
     return tuple(kept), tuple(audit) + tuple(rejections)
 
 
+# ---------------------------------------------------------------------------
+# Batch 2b Item 2 — refuted-signature ledger (--refuted-signature-gate)
+# ---------------------------------------------------------------------------
+# Port of upstream/feat/aegis:harnessx/aegis/{gates/novelty.py,data/signatures.py}.
+# A candidate whose file_changes signature was REFUTED (rejected by the gate
+# stack) in a prior round is dropped before evaluation, so the meta-agent cannot
+# re-spend a batch re-proposing a dead edit (s1k8b103 R4 shipped a no-op
+# budget_floor=30; R6 doubled down with budget_floor=55). Two documented
+# divergences from the official signature:
+#   1. official hashes (path, diff_sha_after) from the manifest; our manifest
+#      carries no diff_sha_after (manifest.py file_changes entries are {path,
+#      action, diff_summary}), so we hash the POST-WRITE CONTENT of each declared
+#      file, falling back to the canonical file_change dict when unreadable.
+#   2. candidate output dirs are per-round, so a raw absolute path would make the
+#      signature round-specific and defeat cross-round dedup; the path component
+#      is therefore normalized to its basename before hashing.
+
+
+def _file_change_content_sha(change: "dict[str, Any]", base_dir: "Path | None") -> str:
+    """Per-file content sha for one file_changes entry (Item 2 divergence 1).
+
+    Reads the declared file's post-write bytes (resolved against ``base_dir``
+    when the declared path is relative, and through ``_resolve_target_path`` for
+    the ``file://`` spellings the Evolver emits). Falls back to a hash of the
+    canonical ``{path, action, diff_summary}`` dict when the file cannot be read,
+    so the signature is always defined.
+    """
+    raw = str(change.get("path", "") or "").strip()
+    norm = _resolve_target_path(raw) if raw.startswith("file:") else raw
+    if norm:
+        p = Path(norm)
+        target = p if p.is_absolute() else ((base_dir / p) if base_dir is not None else p)
+        try:
+            return hashlib.sha256(Path(target).read_bytes()).hexdigest()
+        except OSError:
+            pass
+    canon = json.dumps(
+        {k: change.get(k) for k in ("path", "action", "diff_summary")},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return "dict:" + hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def compute_candidate_signature(
+    manifest: "ChangeManifest", *, base_dir: "Path | None" = None
+) -> str:
+    """sha256 over sorted ``(basename, content_sha)`` from ``manifest.file_changes``.
+
+    Mirrors upstream ``data/signatures.py::compute_signature`` (sorted pairs,
+    ``\\t``-joined, sha256) with the two divergences documented above the
+    module block: post-write content sha in place of the absent
+    ``diff_sha_after``, and basename in place of the raw path (cross-round
+    stability). An empty ``file_changes`` yields the sha of the empty string;
+    such a candidate never reaches the gate stack (the manifest completeness
+    check requires a non-empty file_changes).
+    """
+    pairs: list[tuple[str, str]] = []
+    for change in manifest.file_changes:
+        if not isinstance(change, dict):
+            continue
+        raw = str(change.get("path", "") or "").strip()
+        norm = _resolve_target_path(raw) if raw.startswith("file:") else raw
+        key = Path(norm).name if norm else ""
+        pairs.append((key, _file_change_content_sha(change, base_dir)))
+    pairs.sort()
+    joined = "\n".join(f"{k}\t{s}" for k, s in pairs)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def _apply_refuted_signature_gate(
+    ranked_for_gate: "Sequence[CandidateArtifact]",
+    audit: "Sequence[AuditRecord]",
+    *,
+    refuted: "set[str]",
+    enabled: bool,
+) -> "tuple[tuple[CandidateArtifact, ...], tuple[AuditRecord, ...]]":
+    """Drop candidates whose signature is in the refuted ledger (Item 2 step 3).
+
+    When ``enabled`` is ``False`` the inputs are returned unchanged
+    (byte-identical). When enabled, a candidate whose
+    :func:`compute_candidate_signature` is in ``refuted`` is dropped before
+    evaluation and recorded as a ``novelty`` :class:`AuditRecord` with
+    ``disposition="rejected"`` -- the same accounting path as the efficacy gate
+    (:meth:`VariantPoolRecipe._persist_pipeline_audit` mirrors it to a
+    ``PIPELINE_NOVELTY`` RejectedCandidate in the evidence store).
+    """
+    if not enabled:
+        return tuple(ranked_for_gate), tuple(audit)
+    kept: list[CandidateArtifact] = []
+    rejections: list[AuditRecord] = []
+    for candidate in ranked_for_gate:
+        sig = compute_candidate_signature(
+            candidate.manifest, base_dir=Path(candidate.config_path).parent
+        )
+        if sig in refuted:
+            rejections.append(
+                AuditRecord(
+                    phase="novelty",
+                    disposition="rejected",
+                    reason=f"novelty: signature previously refuted ({sig[:8]})",
+                    candidate_id=candidate.candidate_id,
+                )
+            )
+        else:
+            kept.append(candidate)
+    return tuple(kept), tuple(audit) + tuple(rejections)
+
+
+# ---------------------------------------------------------------------------
+# Batch 2b Item 3 — attribution firing check (--attribution-check, report-only)
+# ---------------------------------------------------------------------------
+# Port of upstream/feat/aegis:harnessx/aegis/data/attribution.py. Read-only,
+# post-settlement: classify each (ship, predicted task) direct/orphan/joint by
+# whether the ship's mechanical attribution_signature actually fired in the
+# settled trajectory's tool_call_counts frontmatter.
+
+_TOOL_COUNT_TOKEN_RE = re.compile(r'"([^"]+)"\s*:\s*(\d+)')
+
+
+def _parse_tool_call_counts(md_text: str) -> "dict[str, int]":
+    """Read the ``tool_call_counts`` dict from a trajectory's YAML frontmatter.
+
+    Mirrors the official parser: a single ``^tool_call_counts: {…}`` line whose
+    flat ``"name": N`` tokens are pulled out. Robust to a NUL-bearing body
+    (callers pass ``read_text(..., errors="replace")``); the frontmatter itself
+    is clean JSON-in-YAML.
+    """
+    m = re.search(r"^tool_call_counts:\s*(\{[^}]*\})", md_text, re.M)
+    if not m:
+        return {}
+    out: dict[str, int] = {}
+    for tm in _TOOL_COUNT_TOKEN_RE.finditer(m.group(1)):
+        try:
+            out[tm.group(1)] = int(tm.group(2))
+        except ValueError:
+            continue
+    return out
+
+
+def _classify_attribution_firing(signature: Any, tool_call_counts: "dict[str, int]") -> str:
+    """``direct`` / ``orphan`` / ``joint`` for one (ship, task).
+
+    ``joint`` when there is no mechanical ``tool_call`` signature to check
+    (prompt/config edits, or -- a documented divergence -- a
+    ``processor_invocation`` signature, since our AttributionSignature schema
+    carries no ``class_name`` the way the official body-substring check needs).
+    Otherwise ``direct`` iff the tool fired at least ``expected_min_calls`` times
+    on this task, else ``orphan``.
+    """
+    if signature is None or getattr(signature, "type", None) != "tool_call":
+        return "joint"
+    tool = getattr(signature, "tool_name", None)
+    if not tool:
+        return "joint"
+    floor = int(getattr(signature, "expected_min_calls", 1) or 1)
+    return "direct" if int(tool_call_counts.get(tool, 0)) >= floor else "orphan"
+
+
+# ---------------------------------------------------------------------------
+# Batch 2b Item 5 — counterfactual gate wiring (--counterfactual-gate)
+# ---------------------------------------------------------------------------
+
+
+async def _apply_counterfactual_gate(
+    ranked_for_gate: "Sequence[CandidateArtifact]",
+    audit: "Sequence[AuditRecord]",
+    *,
+    passing_task_ids: "Sequence[str]",
+    sessions_root: "Path | None",
+    rng_seed: int,
+    enabled: bool,
+    k_samples: int = 3,
+    rows_for_task: "Callable[[str], list[dict]] | None" = None,
+) -> "tuple[tuple[CandidateArtifact, ...], tuple[AuditRecord, ...]]":
+    """Replay each candidate's processor chain pre-ship (Item 5, M-45 wiring).
+
+    When ``enabled`` is ``False`` the inputs are returned unchanged
+    (byte-identical). Also a pass-through -- never a false reject -- when there
+    is nothing to replay against (no previously-passing tasks, or no settled
+    ``sessions/`` dir yet, as on early rounds or with an injected offline
+    evaluator that writes no session artefacts). A candidate whose replay is
+    NOT-ok is dropped before evaluation with a ``counterfactual`` AuditRecord,
+    flowing through the same accounting as the efficacy gate. ``rows_for_task``
+    mirrors the gate's own seam: production leaves it ``None`` (the loader is
+    built from ``sessions_root``); tests inject hand-built rows.
+    """
+    if not enabled:
+        return tuple(ranked_for_gate), tuple(audit)
+    if not passing_task_ids:
+        return tuple(ranked_for_gate), tuple(audit)
+
+    from experiments.variant_pool import event_replay
+    from experiments.variant_pool.counterfactual_gate import check_counterfactual_replay
+
+    if rows_for_task is None:
+        if sessions_root is None or not Path(sessions_root).is_dir():
+            return tuple(ranked_for_gate), tuple(audit)
+        rows_for_task = event_replay.make_session_rows_loader(Path(sessions_root))
+    kept: list[CandidateArtifact] = []
+    rejections: list[AuditRecord] = []
+    for candidate in ranked_for_gate:
+        try:
+            cfg_text = Path(candidate.config_path).read_text(encoding="utf-8")
+        except OSError:
+            kept.append(candidate)  # unreadable config is the efficacy gate's concern
+            continue
+        result = await check_counterfactual_replay(
+            new_config_yaml_text=cfg_text,
+            passing_task_ids=list(passing_task_ids),
+            rows_for_task=rows_for_task,
+            k_samples=k_samples,
+            rng_seed=rng_seed,
+        )
+        if result.ok:
+            kept.append(candidate)
+            continue
+        reason = (
+            result.reason
+            if result.reason.startswith("counterfactual")
+            else f"counterfactual: {result.reason}"
+        )
+        rejections.append(
+            AuditRecord(
+                phase="counterfactual",
+                disposition="rejected",
+                reason=reason,
+                candidate_id=candidate.candidate_id,
+            )
+        )
+    return tuple(kept), tuple(audit) + tuple(rejections)
+
+
 def _make_variant_meta_agent(template: Any, journal_path: Path) -> Any:
     """W9 — a per-variant meta-agent bound to that variant's own journal.
 
@@ -4653,6 +4887,12 @@ class VariantPoolRecipe:
         # overwriting another candidate for the same target variant.
         self._round_candidates: dict[str, PoolCandidate | CandidateArtifact] = {}
         self._round_traj_dir: dict[str, Path] = {}
+        # Item 2 (--refuted-signature-gate): signatures of gate-stack-rejected
+        # candidates, accumulated ACROSS rounds (never per-round reset).
+        self._refuted_signatures: set[str] = set()
+        # Item 3 (--attribution-check): per-round ship firing classification,
+        # overwritten each settled round and folded into pool_state.json.
+        self._ship_attribution: dict[str, Any] = {}
         # Candidate-gate records and settled active-pool records are physically
         # separate. Only the latter are admitted to RunReport.results.
         self._round_records: dict[str, dict[str, dict]] = {}
@@ -4765,6 +5005,9 @@ class VariantPoolRecipe:
             self._active_round_traj_dir = {}
             self._active_score_source = {}
             self._reconcile_status = {}
+            # Item 3: per-round ship attribution (recomputed post-settlement when
+            # --attribution-check is on; _refuted_signatures is NOT reset here).
+            self._ship_attribution = {}
 
             if self.candidate_mode == "paper" and round_idx == 0:
                 # R0 is the settled H0 measurement. It is neither a proposal nor
@@ -4796,6 +5039,11 @@ class VariantPoolRecipe:
                 # keys the settled pass never touches, so it stays outside that
                 # method's double-record guard.
                 self._record_gate_complement(result, round_idx)
+                # --attribution-check (Item 3, default OFF, report-only): classify
+                # this round's ships' predicted tasks direct/orphan/joint from the
+                # settled trajectories. Off, the checker never runs (byte-identical).
+                if bool(getattr(self.args, "attribution_check", False)):
+                    self._ship_attribution = self._check_ship_attribution(result, round_idx)
             self._ingest_report(result, round_idx)
             self._dump_round(result, round_idx)
             results.append(result)
@@ -5245,6 +5493,28 @@ class VariantPoolRecipe:
             Path(variant.config_path),
             enabled=bool(getattr(self.args, "ship_efficacy_gate", False)),
         )
+        # --refuted-signature-gate (Item 2, default OFF): drop a candidate whose
+        # file_changes signature was refuted by the gate stack in a prior round,
+        # before evaluation. Off, the pair passes through unchanged.
+        _eff_ranked, _eff_audit = _apply_refuted_signature_gate(
+            _eff_ranked,
+            _eff_audit,
+            refuted=self._refuted_signatures,
+            enabled=bool(getattr(self.args, "refuted_signature_gate", False)),
+        )
+        # --counterfactual-gate (Item 5, default OFF): replay each candidate's
+        # processor chain over sampled previously-passing settled tasks and drop
+        # one that rewrites a settled task's terminal output. Gated so the passing
+        # -task query and replay only run when enabled; off is byte-identical.
+        if bool(getattr(self.args, "counterfactual_gate", False)):
+            _eff_ranked, _eff_audit = await _apply_counterfactual_gate(
+                _eff_ranked,
+                _eff_audit,
+                passing_task_ids=self._settled_passing_tasks(variant),
+                sessions_root=Path(trajectories_dir).parent / "sessions",
+                rng_seed=int(getattr(self.args, "seed", 0)),
+                enabled=True,
+            )
         if _eff_audit != pipeline_result.audit:
             pipeline_result = replace(
                 pipeline_result, ranked_for_gate=_eff_ranked, audit=_eff_audit
@@ -6409,9 +6679,126 @@ class VariantPoolRecipe:
         budget = min(budget, failures - infra)
         return infra, budget
 
+    def _settled_passing_tasks(self, variant: Any) -> "list[str]":
+        """Item 5: previously-passing routed task ids for the counterfactual gate.
+
+        The latest settled per-task digest that ``solved`` (pass@k >= 1), scoped
+        to the variant's routed subset (the settled sessions under the gate's
+        ``sessions_root`` contain only that variant's routed tasks). At the
+        pre-ship seam the digests on disk cover only rounds < the current one, so
+        "latest settled" is the previous settled round.
+        """
+        routed = set(getattr(variant, "routed_tasks", ()) or ())
+        if not routed:
+            return []
+        latest: dict[str, Any] = {}
+        for digest in self.evidence.iter_digests():
+            if digest.task_id not in routed:
+                continue
+            prev = latest.get(digest.task_id)
+            if prev is None or (digest.round_idx, digest.variant_id) > (
+                prev.round_idx,
+                prev.variant_id,
+            ):
+                latest[digest.task_id] = digest
+        return sorted(tid for tid, d in latest.items() if d.solved)
+
+    def _check_ship_attribution(self, result: RoundResult, round_idx: int) -> "dict[str, Any]":
+        """Item 3 (report-only): per (ship, predicted task) firing classification.
+
+        Read-only. For each candidate that shipped this round (APPLY/FORK) and
+        carries a manifest, classify each predicted-flip task direct/orphan/joint
+        by reading the settled trajectory's tool_call_counts frontmatter. A
+        prompt/config candidate (no attribution_signature) or -- a documented
+        schema divergence -- a processor_invocation signature classifies as joint
+        (our AttributionSignature has no class_name for the official body check).
+        A predicted task with no readable settled trajectory classifies as orphan
+        (the signature could not be observed to fire), matching the official
+        "no trajectories -> orphan".
+        """
+        # task_id -> resolved settled trajectory .md (whichever carrier ran it).
+        traj_by_task: dict[str, Path] = {}
+        for _vid, records in self._active_round_records.items():
+            for task_id, record in records.items():
+                rel = str(record.get("trajectory_file") or "").strip()
+                if rel:
+                    traj_by_task[task_id] = self.run_dir / rel
+
+        counts_cache: dict[str, dict[str, int]] = {}
+
+        def _counts_for(task_id: str) -> "dict[str, int]":
+            if task_id in counts_cache:
+                return counts_cache[task_id]
+            path = traj_by_task.get(task_id)
+            counts: dict[str, int] = {}
+            if path is not None:
+                try:
+                    # trajectory bodies can carry NUL bytes -> errors="replace",
+                    # plain file read (never ripgrep). Frontmatter itself is clean.
+                    counts = _parse_tool_call_counts(
+                        path.read_text(encoding="utf-8", errors="replace")
+                    )
+                except OSError:
+                    counts = {}
+            counts_cache[task_id] = counts
+            return counts
+
+        out: dict[str, Any] = {}
+        for vid, candidate_id in sorted(result.selected_candidate_ids.items()):
+            if result.decisions.get(vid) not in (Decision.APPLY, Decision.FORK):
+                continue
+            candidate = self._round_candidates.get(candidate_id)
+            manifest = getattr(candidate, "manifest", None)
+            if manifest is None:
+                continue  # baseline / non-manifest candidate: nothing to attribute
+            signature = manifest.attribution_signature
+            mechanical = signature is not None and getattr(signature, "type", None) == "tool_call"
+            per_task: dict[str, str] = {}
+            for task_id in manifest.predicted_impact.predicted_flips():
+                per_task[task_id] = (
+                    _classify_attribution_firing(signature, _counts_for(task_id))
+                    if mechanical
+                    else "joint"
+                )
+            summary = {"direct": 0, "orphan": 0, "joint": 0}
+            for disp in per_task.values():
+                summary[disp] = summary.get(disp, 0) + 1
+            out[candidate_id] = {
+                "variant_id": vid,
+                "bucket": list(manifest.bucket),
+                "signature": (
+                    {
+                        "type": signature.type,
+                        "tool_name": signature.tool_name,
+                        "expected_min_calls": signature.expected_min_calls,
+                    }
+                    if signature is not None
+                    else None
+                ),
+                "predicted_tasks": list(manifest.predicted_impact.predicted_flips()),
+                "tasks": per_task,
+                "summary": summary,
+            }
+        return out
+
     def _dump_round(self, result: RoundResult, round_idx: int) -> None:
         """Per-round variant-pool snapshot (routing partition + events)."""
         candidate_accounting = self._candidate_accounting(result)
+        # Item 2 (--refuted-signature-gate): record the signature of every
+        # candidate the gate stack REJECTED this round, so a future round's
+        # pre-flight can drop a re-proposal of the same dead edit. Flag-gated so
+        # the default run never populates the ledger and stays byte-identical.
+        if bool(getattr(self.args, "refuted_signature_gate", False)):
+            for _cid, diagnostic in result.candidate_diagnostics.items():
+                if diagnostic.decision is Decision.REJECT:
+                    cand = self._round_candidates.get(_cid)
+                    manifest = getattr(cand, "manifest", None)
+                    if manifest is not None:
+                        self._refuted_signatures.add(
+                            compute_candidate_signature(
+                                manifest, base_dir=Path(cand.config_path).parent
+                            )
+                        )
         state = {
             "round": round_idx,
             "variant_count": result.variant_count,
@@ -6471,6 +6858,12 @@ class VariantPoolRecipe:
                 for vid, outcomes in self._active_round_pass.items()
             },
         }
+        # Item 2 / Item 3: append the flag-gated observational fields only when
+        # their flag is on, so a default run's pool_state.json is byte-identical.
+        if bool(getattr(self.args, "refuted_signature_gate", False)):
+            state["refuted_signatures"] = sorted(self._refuted_signatures)
+        if bool(getattr(self.args, "attribution_check", False)):
+            state["ship_attribution"] = self._ship_attribution
         self.pool_states.append(state)
         round_dir = self.run_dir / f"R{round_idx}"
         round_dir.mkdir(parents=True, exist_ok=True)
@@ -6995,6 +7388,100 @@ def _digest_anchor_check_provenance(enabled: bool) -> "str | None":
     )
 
 
+def _meta_read_scope_gate_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--meta-read-scope-gate``; ``None`` when off."""
+    if not enabled:
+        return None
+    return (
+        "meta_read_scope_gate=on ENABLED (OURS, Windows-adapted port of "
+        "upstream/feat/aegis:harnessx/meta_harness/processors/read_scope_gate.py): "
+        "the Evolver meta-agent's harness carries a ReadScopeGateProcessor that "
+        "blocks Read/Grep/Glob/Bash access to the harnessx package source and the "
+        "shared runs/ archive, with harnessx/core/processor.py and the current run's "
+        "own directory tree allowlisted. This changes which files the meta-agent can "
+        "read while evolving a candidate, so its evolution decisions are not "
+        "comparable byte-for-byte with an 'off' run; the deterministic gate and "
+        "rollouts are unaffected"
+    )
+
+
+def _meta_read_scope_roots(args: Any, run_dir: Path) -> "dict[str, tuple[str, ...]] | None":
+    """``extra_harness_kws`` fragment for ``--meta-read-scope-gate``; ``None`` off.
+
+    Blocked: the ``harnessx/`` package dir + this recipe's ``runs/`` archive.
+    Allowlisted: ``harnessx/core/processor.py`` (the API reference the gate's
+    hint promises) and the current run's own directory tree, so the meta-agent
+    keeps reading its round dirs/trajectories while its siblings under
+    ``runs/`` stay blocked. ``None`` when the flag is off, so the caller wires
+    nothing and the Evolver harness is byte-identical to today (no processor
+    added).
+    """
+    if not bool(getattr(args, "meta_read_scope_gate", False)):
+        return None
+    import harnessx as _harnessx_pkg
+
+    harnessx_dir = Path(_harnessx_pkg.__file__).resolve().parent
+    runs_dir = Path(__file__).resolve().parent / "runs"
+    return {
+        "read_scope_blocked_roots": (str(harnessx_dir), str(runs_dir)),
+        "read_scope_allowed_files": (str(harnessx_dir / "core" / "processor.py"),),
+        "read_scope_allowed_roots": (str(Path(run_dir).resolve()),),
+    }
+
+
+def _refuted_signature_gate_provenance(args: Any) -> "str | None":
+    """Byte-safe lock record for ``--refuted-signature-gate``; ``None`` when off."""
+    if not bool(getattr(args, "refuted_signature_gate", False)):
+        return None
+    return (
+        "refuted_signature_gate=on ENABLED (OURS, port of upstream/feat/aegis:"
+        "harnessx/aegis/gates/novelty.py + data/signatures.py): a candidate whose "
+        "file_changes content signature was rejected by the gate stack in a prior "
+        "round is dropped from the gate queue before evaluation with a 'novelty:' "
+        "reason instead of being re-evaluated (s1k8b103 re-proposed a refuted "
+        "budget_floor edit two rounds running). Divergence: our manifest carries no "
+        "diff_sha_after, so the signature hashes each declared file's post-write "
+        "content, basename-keyed for cross-round stability. This changes which "
+        "candidates apply/fork/reject and which evaluation batches are spent, and "
+        "adds a refuted_signatures field to pool_state.json, so it is not comparable "
+        "byte-for-byte with an 'off' run"
+    )
+
+
+def _attribution_check_provenance(args: Any) -> "str | None":
+    """Byte-safe lock record for ``--attribution-check``; ``None`` when off."""
+    if not bool(getattr(args, "attribution_check", False)):
+        return None
+    return (
+        "attribution_check=on ENABLED (OURS, report-only port of upstream/feat/aegis:"
+        "harnessx/aegis/data/attribution.py): after each settled round every shipped "
+        "candidate carrying a mechanical tool_call attribution_signature is classified "
+        "direct/orphan/joint per predicted task by reading the settled trajectory's "
+        "tool_call_counts frontmatter, and the result is added under 'ship_attribution' "
+        "in that round's pool_state.json. No rollouts, no LLM calls, and NO decision "
+        "changes -- ship/apply/fork/reject are byte-identical to an 'off' run except "
+        "for the added observational field"
+    )
+
+
+def _counterfactual_gate_provenance(args: Any) -> "str | None":
+    """Byte-safe lock record for ``--counterfactual-gate``; ``None`` when off."""
+    if not bool(getattr(args, "counterfactual_gate", False)):
+        return None
+    return (
+        "counterfactual_gate=on ENABLED (OURS, wiring of the fixed counterfactual "
+        "replay gate experiments/variant_pool/counterfactual_gate.py, M-45): before a "
+        "candidate-evaluation batch is spent, each candidate's processor chain is "
+        "replayed over k=3 sampled previously-passing routed tasks drawn from the "
+        "settled sessions; a candidate that rewrites a sampled task's final_output or "
+        "exit_reason is rejected pre-evaluation with a 'counterfactual:' reason. Pure "
+        "replay -- no LLM, no network. This changes which candidates apply/fork/reject, "
+        "so it is not comparable byte-for-byte with an 'off' run; when there are no "
+        "settled sessions yet (early rounds / injected offline evaluators) the gate "
+        "skips without rejecting"
+    )
+
+
 def _traj_failure_signals_provenance(args: Any) -> "str | None":
     """Byte-safe lock record for ``--traj-failure-signals``; ``None`` when off.
 
@@ -7164,6 +7651,10 @@ def _build_experiment_lock(
         _record_gate_complement_provenance(bool(getattr(args, "record_gate_complement", False))),
         _traj_failure_signals_provenance(args),
         _ship_efficacy_provenance(args),
+        _meta_read_scope_gate_provenance(bool(getattr(args, "meta_read_scope_gate", False))),
+        _refuted_signature_gate_provenance(args),
+        _attribution_check_provenance(args),
+        _counterfactual_gate_provenance(args),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -7709,6 +8200,68 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--meta-read-scope-gate",
+        action="store_true",
+        help=(
+            "Gate the Evolver meta-agent's Read/Grep/Glob/Bash tool calls so it "
+            "cannot read the harnessx package source or sibling archived runs "
+            "under runs/ (its own current run dir is allowlisted so it keeps "
+            "reading its round dirs/trajectories). Default off, byte-identical: no "
+            "processor is wired into the Evolver harness. On, a Windows-adapted "
+            "port of upstream/feat/aegis's read_scope_gate is added (the upstream "
+            "POSIX path regex blocks nothing on Windows; this port extracts "
+            "Windows-drive / UNC / file:// / POSIX path tokens and compares "
+            "case-insensitively). Blocking a source read changes the meta-agent's "
+            "context and therefore which candidate it writes, so an 'on' run is not "
+            "comparable byte-for-byte with an 'off' one; rollouts and the "
+            "deterministic gate are unaffected."
+        ),
+    )
+    parser.add_argument(
+        "--refuted-signature-gate",
+        action="store_true",
+        help=(
+            "Drop a candidate whose file_changes signature was rejected by the gate "
+            "stack in a prior round, before evaluation, with a 'novelty:' reason "
+            "(port of upstream/feat/aegis novelty.py + signatures.py). Default off, "
+            "byte-identical. On, the signature (sha256 over sorted (basename, "
+            "post-write content sha) -- our manifest has no diff_sha_after) of each "
+            "gate-stack REJECT is remembered across rounds in pool_state.json's "
+            "refuted_signatures, and a re-proposed dead edit is rejected "
+            "pre-evaluation instead of burning another batch (s1k8b103 re-shipped a "
+            "refuted budget_floor edit two rounds running)."
+        ),
+    )
+    parser.add_argument(
+        "--attribution-check",
+        action="store_true",
+        help=(
+            "Report-only. After each settled round, classify each shipped "
+            "candidate's predicted tasks direct/orphan/joint by whether its "
+            "mechanical tool_call attribution_signature actually fired in the "
+            "settled trajectory's tool_call_counts frontmatter (port of "
+            "upstream/feat/aegis attribution.py), and record it under "
+            "'ship_attribution' in pool_state.json. Default off, byte-identical. On, "
+            "changes NO decision -- it only adds the observational field. No rollouts, "
+            "no LLM calls. prompt/config (and, by our schema, processor_invocation) "
+            "signatures classify as joint."
+        ),
+    )
+    parser.add_argument(
+        "--counterfactual-gate",
+        action="store_true",
+        help=(
+            "Pre-ship, replay each candidate's processor chain over k=3 sampled "
+            "previously-passing routed tasks from the settled sessions and reject a "
+            "candidate that rewrites a sampled task's final_output/exit_reason "
+            "(wiring of experiments/variant_pool/counterfactual_gate.py, M-45). "
+            "Default off, byte-identical. On, a NOT-ok replay rejects the candidate "
+            "before evaluation with a 'counterfactual:' reason; pure replay (no LLM, "
+            "no network). Skips without rejecting when there are no settled sessions "
+            "yet (early rounds / injected offline evaluators)."
+        ),
+    )
+    parser.add_argument(
         "--actionability-threshold",
         type=float,
         default=None,
@@ -8101,6 +8654,14 @@ def setup(args: Any, run_dir: Path) -> dict[str, Any]:
         wall_clock_s=float(args.evolve_wall_clock),
         max_steps=args.evolve_steps,
     )
+
+    # --meta-read-scope-gate (default OFF): wire the Evolver's read-scope gate.
+    # Off, ``_meta_read_scope_roots`` returns None, extra_harness_kws is left
+    # untouched, and build_meta_agent_harness_config adds no processor -- the
+    # Evolver harness is byte-identical to today.
+    _read_scope_kws = _meta_read_scope_roots(args, run_dir)
+    if _read_scope_kws is not None:
+        meta_agent.extra_harness_kws.update(_read_scope_kws)
 
     return {
         "model_config": model_config,
