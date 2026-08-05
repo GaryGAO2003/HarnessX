@@ -100,6 +100,11 @@
 
 ## 5. 发射前置检查清单
 
+> **🔴 发射冻结(Aug-05 用户令「先别急」)**:官方 AEGIS 代码现世(§7)+ channel 线批 1 在途。
+> 解冻前置:①批 1 落地(web_fetch 挂死加固 + `--ship-efficacy-gate`,正打 fetch 29.1% 头号失败质量);
+> ②channel 第二次合流(至 b65ca01,含 upstream 代码合并 91466f0:trajectory.py / spawn_subagent.py
+> + 107 测试行);③两线实验计划归一(§7.3)。题集/配额/旗标结论不受影响,继续有效。
+
 - [x] channel 合流 + F4 落地,全量 1112 绿(edde4fc / f9bc724,Aug-05 亲测复核)
 - [x] 合流后观测审计完成(Aug-05):Q3 S1 旁路 PASS / Q1 边界内 GAP(修复在途)/ Q2 边界外 GAP(待裁)
 - [x] Q1 修复落地(9fae30a,SPEC §7.37,全量 **1125 绿**主循环亲测):槽内验证走 DECISION_REQUIRED/NOTES 既有通道、验证失败不扣步数预算、耗尽转显式弃权;评测期候选降级 infra-fail、active-pool 仍硬崩
@@ -148,6 +153,27 @@
 - **failure_density vs worst_first 不开双跑**:T1 用 failure_density 正跑,worst_first 用同账本**离线反事实重放**($0)证明其锁死——同一笔数据出两个结论。
 - **E1 预登记**:发车前先用 `power_curve()`(本批入库的 +56)按 30 题的真实测量结构算检出下限,**预先声明 T1 的矩阵看不见多小的特化**;E1 正式判读留给 T2 全床矩阵。
 - **判定规则(sequential)**:T1 K=8 过机器 + 见早期分化 + 见墙 → 冻结配置 → 发 T2;T1 哪里含糊才在哪里加预算;臂一律 T3 先行,结构量赢才花全床确认。
+
+### 6.4-pre 官方 AEGIS 代码情报(Aug-05,channel 线审计;主循环已对本地仓三点核验)
+
+- **三头条**:①upstream=Darwin-Agent/HarnessX 十分支,AEGIS 三分支 **5–6 月起公开**(Jul-21
+  「未开源」判词=我方审计漏查分支列表,撤回,记忆已改);②**全树零变体池/Ensemble/fork-retire**
+  (全分支 grep 逐 hit 排除;官方=单谱系 ship/no_op)⇒ **我方 `variant_pool/` = 论文 §4.5 唯一
+  存世实现**,而 gh-pages 主页公开挂着 Table-5 数字(87.4/+13.6 "Variant isolation");③GAIA
+  零成规模官方实验(runner `MAX_TASKS_DEFAULT=1` smoke,零 `.sh` 零数字)。
+- **论文定位改写(全利好)**:CH3 从「复现」改口「**唯一实现**」;五处论文↔官方分歧并报
+  (无全局棘轮 / 无 ±5% 噪声阈 / Table-8 seeds=3 无实现 / briefs 已废 / 无 APPLY-FORK-REJECT
+  三分);官方零统计学 → STATPOOL 定位增强;decomp 官方零涉及=无人区;port 货架=官方三层
+  信用 / 九类失败词表 / counterfactual 门 / scope gate / ALL_PASS 模板(批 2/3 已按用户
+  「全抄官方」令在 channel 线排队)。证据=`HarnessX-channel/experiments/docs/novelty/11-OFFICIAL-AEGIS-DIFF.md`。
+
+### 6.4-bis 两线实验计划归一(建议,待用户点头)
+
+channel 线三臂剂量-响应(臂0 论文原样通道 / 臂1 +四失败计数器 / 臂2 官方式全通道)与本文件
+T1/T2/T3 漏斗合并:**T1 K=8(计数器开)即臂 1**,一跑两用;臂 0(计数器关)与臂 2(全通道)
+作同题集 T3 配对跑(~4h/臂)在 T1 之后按需补。channel 线预注册预言(digester 不再判死工具失败 /
+旱灾轮数下降 / 出现 fetch/搜索方向候选)全是**结构量**,10 轮可读;「18 轮/臂」功效账
+(SD 3.18pp,3pp@80%)仅在该线升分数级主张时适用。
 
 ### 6.4 供给源选项(待用户裁)
 
