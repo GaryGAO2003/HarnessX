@@ -74,13 +74,18 @@
    (审计建议之「DROPPED 计入 frontmatter」不做:fail-closed 网保证计分 rollout 零 drop,计数恒 0;
    vendored 内部 smoke 盲区由①的槽内验证顺带覆盖,不碰 vendored。)
 
-2. **边界外零泄漏 = GAP(待用户裁,§5 按钮)**:always-on 一处——`_planner_brief_with_regressions`
-   (:1833,无条件布线 :5560)把回退题单 + **Critic 否决规则逐字引文**("the Critic rejects the
-   whole round otherwise…")并进 evolver brief;另 `critic_revision_request.reason`(Critic 判决理由)。
-   分层:①机制引文与判决理由 = 按 Aug-05 边界明确越界;②回退题单 + tasks_at_risk 要求 =
-   论文 App-B manifest 契约(全剥则 Critic 整轮否决回归,forceprobe1 R2 实证)→ **建议:留题单
-   与中性要求措辞,削机制引文**;③llm-planner 侧泄漏点仅 `--aegis-planner llm` 模式活,默认
-   deterministic 下休眠。serper/429/基建噪声全域零泄漏(干净)。
+2. **边界外零泄漏 = GAP → 裁定 C:不动(Aug-05 用户裁「建议不动」)**。发现:always-on 一处——
+   `_planner_brief_with_regressions`(:1833,无条件布线 :5560)把回退题单 + **Critic 否决规则
+   逐字引文**("the Critic rejects the whole round otherwise…")并进 evolver brief;另
+   `critic_revision_request.reason`;llm-planner 侧泄漏点仅 `--aegis-planner llm` 模式活,
+   默认 deterministic 下休眠。serper/429/基建噪声全域零泄漏(干净)。
+   **不动的依据**:门的 APPLY/FORK/REJECT 来自实测 seesaw,manifest 文本不载分——该泄漏可利用面
+   仅为 Critic 的**表格形式检查**(而让格式不浪费整轮正是这句话的设计意图),测量完整性免疫;
+   全剥则整轮否决回归(forceprobe1 R2 实证);论文自身 App-B1 提示词泄漏更甚(scoreboard/
+   reputation),我方默认态已严于原设计。
+   **论文效度声明措辞(定稿)**:「演化侧对评测机制盲,除一处论文 App-B schema 强制的表格完成
+   指令(原文披露)」。**A 方案备案**:留题单+中性措辞、削机制引文,~30 分钟旗标改动,
+   导师/审稿人较真时随时可加(加后补跑一个 T1 即可)。
 
 3. **S1 旁路 = PASS**:全部评测构造点(主评 / 门窗 / ship-confirm 全床 / active-pool / decomp
    :8674 / resume)均先过 fail-closed 网(:6007/:8674 唯二布线,亲验);唯一网外构造 =
@@ -98,7 +103,7 @@
 - [x] channel 合流 + F4 落地,全量 1112 绿(edde4fc / f9bc724,Aug-05 亲测复核)
 - [x] 合流后观测审计完成(Aug-05):Q3 S1 旁路 PASS / Q1 边界内 GAP(修复在途)/ Q2 边界外 GAP(待裁)
 - [x] Q1 修复落地(9fae30a,SPEC §7.37,全量 **1125 绿**主循环亲测):槽内验证走 DECISION_REQUIRED/NOTES 既有通道、验证失败不扣步数预算、耗尽转显式弃权;评测期候选降级 infra-fail、active-pool 仍硬崩
-- [ ] **边界裁决(§3.5-2)**:回退题单保留、Critic 机制引文削不削——待用户一句话
+- [x] 边界裁决 = **C 不动**(Aug-05 用户裁;测量层免疫,效度声明 scoped+原文披露;A 备案随时可加)
 - [ ] Serper 配额确认(BENCH2 自记「配额不够做演化跑」,先查余量/加购)
 - [x] 脏树处置:l_rank +56 用户裁「需要的」已入库;m_cluster_validation.py / BENCH2 / 本文件同批入库
 - [ ] **T1 最小机制双跑(§6)——K=8 机制跑兼任冒烟**,通过 → 本文件转「冻结」
