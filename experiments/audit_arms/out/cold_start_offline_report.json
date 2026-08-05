@@ -1,0 +1,272 @@
+{
+  "meta": {
+    "runs_dir": "D:/PycharmProj/HarnessX/recipe/gaia_evolver/runs",
+    "used_runs": [
+      "s1k8b103"
+    ],
+    "skipped": [
+      [
+        "a1big4",
+        "variants<8"
+      ],
+      [
+        "a1big5",
+        "variants<8"
+      ],
+      [
+        "a1pilot2",
+        "variants<8"
+      ],
+      [
+        "a1pilot3",
+        "variants<8"
+      ],
+      [
+        "a1pilot",
+        "variants<8"
+      ],
+      [
+        "a1smoke",
+        "variants<8"
+      ],
+      [
+        "aegis1",
+        "variants<8"
+      ],
+      [
+        "calib6",
+        "variants<8"
+      ],
+      [
+        "calib6b",
+        "variants<8"
+      ],
+      [
+        "calib_p12_a",
+        "variants<8"
+      ],
+      [
+        "calib_p12_b",
+        "variants<8"
+      ],
+      [
+        "e_pervar3",
+        "variants<8"
+      ],
+      [
+        "fixsmoke1",
+        "variants<8"
+      ],
+      [
+        "forceprobe1",
+        "variants<8"
+      ],
+      [
+        "forceprobe2",
+        "variants<8"
+      ],
+      [
+        "forkprobe",
+        "variants<8"
+      ],
+      [
+        "forkprobe_11",
+        "variants<8"
+      ],
+      [
+        "forkprobe_p2",
+        "variants<8"
+      ],
+      [
+        "labsmoke1",
+        "variants<8"
+      ],
+      [
+        "organic1",
+        "variants<8"
+      ],
+      [
+        "paper1",
+        "variants<8"
+      ],
+      [
+        "paper2",
+        "variants<8"
+      ],
+      [
+        "paper3",
+        "variants<8"
+      ],
+      [
+        "paper4",
+        "variants<8"
+      ],
+      [
+        "pilot20",
+        "variants<8"
+      ],
+      [
+        "pilot30",
+        "variants<8"
+      ],
+      [
+        "resumedrill1",
+        "variants<8"
+      ],
+      [
+        "s1k8",
+        "variants<8"
+      ],
+      [
+        "smoke_calib6",
+        "variants<8"
+      ],
+      [
+        "smoke_hard2",
+        "variants<8"
+      ],
+      [
+        "smoke_hard3",
+        "variants<8"
+      ],
+      [
+        "smoke_hard",
+        "variants<8"
+      ],
+      [
+        "smoke_sub",
+        "variants<8"
+      ],
+      [
+        "smoke_vp3",
+        "variants<8"
+      ],
+      [
+        "smoke_vp",
+        "variants<8"
+      ]
+    ],
+    "files": [
+      "D:/PycharmProj/HarnessX/recipe/gaia_evolver/runs\\s1k8b103\\comparison.json"
+    ],
+    "manifest": {
+      "D:/PycharmProj/HarnessX/recipe/gaia_evolver/runs\\s1k8b103\\comparison.json": "f548ade3"
+    },
+    "m_grid": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "drop_infra": true,
+    "min_variants": 8,
+    "cluster_keys": [
+      "task",
+      "level"
+    ]
+  },
+  "by_cluster_key": {
+    "task": {
+      "cluster_key": "task",
+      "estimators": {
+        "mle@0.5": {
+          "brier": 0.15659,
+          "logloss": 0.80733,
+          "n_scored": 2836,
+          "n1_flips": 8
+        },
+        "mle@0.7": {
+          "brier": 0.17391,
+          "logloss": 0.84465,
+          "n_scored": 2836,
+          "n1_flips": 8
+        },
+        "shrink@1": {
+          "brier": 0.16832,
+          "logloss": 0.50148,
+          "n_scored": 2836,
+          "n1_flips": 8
+        },
+        "shrink@2": {
+          "brier": 0.17006,
+          "logloss": 0.5061,
+          "n_scored": 2836,
+          "n1_flips": 8
+        },
+        "shrink@4": {
+          "brier": 0.17504,
+          "logloss": 0.52033,
+          "n_scored": 2836,
+          "n1_flips": 6
+        },
+        "shrink@8": {
+          "brier": 0.18317,
+          "logloss": 0.54195,
+          "n_scored": 2836,
+          "n1_flips": 6
+        }
+      },
+      "best_shrink_by_brier": "shrink@1",
+      "n_pred_points": 1438,
+      "n_empty_history_cells": 373,
+      "n1_flip_points": 13,
+      "m_grid": [
+        1,
+        2,
+        4,
+        8
+      ]
+    },
+    "level": {
+      "cluster_key": "level",
+      "estimators": {
+        "mle@0.5": {
+          "brier": 0.21938,
+          "logloss": 0.6294,
+          "n_scored": 2836,
+          "n1_flips": 0
+        },
+        "mle@0.7": {
+          "brier": 0.22612,
+          "logloss": 0.64395,
+          "n_scored": 2836,
+          "n1_flips": 0
+        },
+        "shrink@1": {
+          "brier": 0.22116,
+          "logloss": 0.63442,
+          "n_scored": 2836,
+          "n1_flips": 0
+        },
+        "shrink@2": {
+          "brier": 0.2213,
+          "logloss": 0.63437,
+          "n_scored": 2836,
+          "n1_flips": 0
+        },
+        "shrink@4": {
+          "brier": 0.22163,
+          "logloss": 0.63474,
+          "n_scored": 2836,
+          "n1_flips": 0
+        },
+        "shrink@8": {
+          "brier": 0.22205,
+          "logloss": 0.63533,
+          "n_scored": 2836,
+          "n1_flips": 0
+        }
+      },
+      "best_shrink_by_brier": "shrink@1",
+      "n_pred_points": 1438,
+      "n_empty_history_cells": 154,
+      "n1_flip_points": 0,
+      "m_grid": [
+        1,
+        2,
+        4,
+        8
+      ]
+    }
+  }
+}
