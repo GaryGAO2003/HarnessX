@@ -128,9 +128,35 @@ DEFAULT_MIN_FORK = (1, 1)
 #: anchors instead on the candidate's *own* variant history, the same
 #: per-variant cell scope the improved side already uses — so a task only ever
 #: solved by a *different* variant is not this candidate's regression.
+#:
+#: ``windowed`` is the official adjacent-round watchlist semantics ported from
+#: ``upstream/feat/aegis:harnessx/aegis/data/regressions.py`` (L54-66, 124-126:
+#: ``detect_regressions`` compares round N-1 vs N only, keeping **no accumulated
+#: solved set**). A task counts as a regression only if it was solved in the
+#: *immediately previous settled round*; a one-off solve many rounds ago that has
+#: since gone stale is not a regression. Both ``global`` and ``per_variant``
+#: accumulate ("ever solved"); ``windowed`` deliberately does not.
+#:
+#: One documented divergence from the official ``for the same variant`` clause:
+#: the official aegis has a single config per round, so "same variant" is trivial
+#: there. In our multi-variant pool the deterministic gate is handed only the
+#: ledger and the candidate's ``tk_results`` — it never receives the target
+#: ``variant_id`` (the engine derives ``before`` from it in ``_task_eval`` and
+#: passes neither on to :func:`run_gate`). ``windowed`` therefore judges the
+#: previous round *variant-agnostically*: a prior-round solve by any variant
+#: blocks. On the variant-scoping axis this places ``windowed`` between ``global``
+#: and ``per_variant``; on the accumulation axis it is strictly the tightest of
+#: the three. Because routing keeps a task on the same variant across adjacent
+#: rounds in the common case, the two readings usually coincide; see
+#: :func:`_solved_in_previous_settled_round`.
 REGRESSION_BASELINE_GLOBAL = "global"
 REGRESSION_BASELINE_PER_VARIANT = "per_variant"
-REGRESSION_BASELINE_MODES = (REGRESSION_BASELINE_GLOBAL, REGRESSION_BASELINE_PER_VARIANT)
+REGRESSION_BASELINE_WINDOWED = "windowed"
+REGRESSION_BASELINE_MODES = (
+    REGRESSION_BASELINE_GLOBAL,
+    REGRESSION_BASELINE_PER_VARIANT,
+    REGRESSION_BASELINE_WINDOWED,
+)
 DEFAULT_REGRESSION_BASELINE = REGRESSION_BASELINE_GLOBAL
 
 
@@ -248,10 +274,54 @@ def _is_regression(
     scope the improved side uses (the engine derives ``before`` from
     ``SuccessLedger.cell(variant_id, task_id)`` in ``_task_eval``). A task solved
     only by a *different* variant therefore is not this candidate's regression.
+
+    ``windowed`` (official adjacent-round watchlist) accumulates nothing: it asks
+    only whether the task was solved in the *immediately previous settled round*.
+    ``before`` cannot answer this — the engine builds ``before`` from the variant
+    cell's **accumulated** ``cell.passes >= 1`` (any round, ever), so ``before[0]
+    >= 1`` is already exactly what ``per_variant`` reads. Windowed instead reads
+    the ledger's per-round buckets directly; see
+    :func:`_solved_in_previous_settled_round` for the variant-agnostic note.
     """
     if regression_baseline == REGRESSION_BASELINE_PER_VARIANT:
         return before_passes >= 1
+    if regression_baseline == REGRESSION_BASELINE_WINDOWED:
+        return _solved_in_previous_settled_round(outcome.task_id, ledger)
     return ledger.is_ever_solved(outcome.task_id)
+
+
+def _solved_in_previous_settled_round(task_id: str, ledger: SuccessLedger) -> bool:
+    """Was ``task_id`` solved (``n_pass >= 1``) in the immediately previous round?
+
+    The ``windowed`` baseline's per-round predicate. ``prev_round =
+    ledger.max_last_round()`` is the last round anything settled into the ledger;
+    at gate time the candidate's *current*-round rollouts are not yet recorded
+    (``before`` is "the variant's ledger view entering this round" —
+    ``engine._task_eval``), so ``max_last_round()`` is exactly round N-1, the
+    "immediately previous" round the official ``detect_regressions`` compares
+    against.
+
+    Variant-agnostic by necessity: :func:`run_gate` never receives the target
+    ``variant_id`` (see :data:`REGRESSION_BASELINE_WINDOWED`), so the previous
+    round is read across *every* variant via the public ledger API
+    (``max_last_round`` / ``variants`` / ``aggregate_counts`` with a one-round
+    window). A prior-round solve by any variant counts. Returns ``False`` on an
+    empty ledger (no previous round).
+    """
+    prev_round = ledger.max_last_round()
+    if prev_round < 0:
+        return False
+    for variant_id in ledger.variants():
+        # before_round = prev_round + 1 with window = 1 selects exactly the
+        # single round-bucket ``round_idx == prev_round`` (see
+        # ``SuccessLedger._task_counts``); passes there is the previous round's
+        # settled pass count for this variant.
+        passes, _attempts = ledger.aggregate_counts(
+            variant_id, (task_id,), before_round=prev_round + 1, window=1
+        )
+        if passes >= 1:
+            return True
+    return False
 
 
 def _decide(improved: set[str], regressed: set[str], min_fork: tuple[int, int]) -> Decision:

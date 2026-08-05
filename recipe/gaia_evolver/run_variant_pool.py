@@ -325,6 +325,35 @@ DEFAULT_AEGIS_PLANNER = "deterministic"
 AEGIS_CRITIC_MODES = ("deterministic", "llm")
 DEFAULT_AEGIS_CRITIC = "deterministic"
 
+#: --actionability {llm, mechanical} (batch-2a Item 2). Which signal produces the
+#: LLM Digester's ROUND-level actionability a_t (Algorithm 1's selective
+#: invocation). ``llm`` (default) keeps today's byte-identical behaviour: a_t
+#: comes from a meta-model call (:meth:`_LLMDigester._round_actionability`).
+#: ``mechanical`` overrides that with the official pattern-derived score ported
+#: from ``upstream/feat/aegis:harnessx/aegis/stages/preprocess.py``
+#: ``_compute_actionability`` (L110-129) — 1.0 for any ALL_FAIL routed task, 0.8
+#: for any PARTIAL, 0.3 for ALL_PASS-only that reports latent fragility (Item 3
+#: ``all`` digests only), else 0.0 — computed locally with no round-level LLM
+#: call. Only affects ``--aegis-digester llm``; the deterministic Digester already
+#: scores a_t mechanically (binary). The α threshold knob/default is untouched.
+ACTIONABILITY_MODES = ("llm", "mechanical")
+DEFAULT_ACTIONABILITY_MODE = "llm"
+
+#: --digest-patterns {fail_only, all} (batch-2a Item 3). Which settled tasks the
+#: LLM Digester spends a per-task interpretation call on. ``fail_only`` (default)
+#: is byte-identical: only FAILED (ALL_FAIL) tasks get an LLM digest, passed tasks
+#: stay deterministic. ``all`` also digests ALL_PASS tasks (hunting a reusable
+#: strategy + latent fragility) and PARTIAL_PASS tasks (citing both the passing
+#: and the failing rollout), using the pattern-conditional templates ported from
+#: ``upstream/feat/aegis:harnessx/aegis/templates/digester_{all_fail,all_pass,
+#: partial_pass}.md`` and adapted to our JSON digest contract. Both the ALL_FAIL
+#: and PARTIAL_PASS (failure-bearing) templates embed the official Layer-B 9-class
+#: controlled vocabulary so ``failure_category`` is drawn from a fixed taxonomy.
+#: ``all`` spends more digester LLM calls (one per passed task on top of the
+#: failures).
+DIGEST_PATTERNS_MODES = ("fail_only", "all")
+DEFAULT_DIGEST_PATTERNS = "fail_only"
+
 
 def _resolve_actionability_threshold(raw: float | None, aegis_digester: str) -> float:
     """Algorithm 1's alpha, defaulted per Digester mode when not given explicitly.
@@ -2538,6 +2567,187 @@ def _split_trajectory_frontmatter(text: str) -> tuple[str, str]:
     return frontmatter, body
 
 
+# ---------------------------------------------------------------------------
+# batch-2a Items 2/3/4 — pattern taxonomy, mechanical a_t, templates, anchors
+# ---------------------------------------------------------------------------
+
+#: Official Layer-B 9-class controlled failure vocabulary (batch-2a Item 3),
+#: ported from the pattern-conditional digester templates on
+#: ``upstream/feat/aegis:harnessx/aegis/templates/digester_*.md``. Embedded in the
+#: adapted ALL_FAIL / PARTIAL_PASS templates so the Digester's ``failure_category``
+#: is drawn from a fixed taxonomy instead of a free-form label.
+_LAYER_B_CLASSES = (
+    "tool_effect_missing",
+    "repeat_without_progress",
+    "error_ignored",
+    "multimodal_silent_drop",
+    "hallucinated_reference",
+    "missing_capability",
+    "budget_starvation",
+    "prompt_rule_violation",
+    "final_answer_brittle",
+)
+
+#: An ALL_PASS digest sets ``failure_category`` to this marker when it surfaces a
+#: latent fragility (else ``"none"``); the mechanical-actionability 0.3 tier keys
+#: on it (batch-2a Items 2+3 coupling).
+_FRAGILITY_CATEGORY = "latent_fragility"
+
+
+def _digest_pattern_of(digest: "TaskDigest") -> str:
+    """Classify one settled task's pass@2 outcome into ALL_FAIL/PARTIAL/ALL_PASS.
+
+    Mirrors the official three-way split (preprocess ``_classify_pattern``): under
+    pass@2 ``n_att == 2`` and ``n_pass in {0, 1, 2}``.
+    """
+    n_pass, n_att = digest.outcome
+    if n_pass <= 0:
+        return "ALL_FAIL"
+    if n_pass >= n_att:
+        return "ALL_PASS"
+    return "PARTIAL_PASS"
+
+
+def _reports_fragility(digest: "TaskDigest") -> bool:
+    """True iff an ALL_PASS digest flagged a latent fragility (Item 3 ``all`` only)."""
+    return (digest.failure_category or "").strip().lower() == _FRAGILITY_CATEGORY
+
+
+def _mechanical_actionability(
+    digests: "Sequence[TaskDigest]", *, digest_patterns: str
+) -> tuple[float, str]:
+    """Pattern-derived round actionability a_t (batch-2a Item 2).
+
+    Ported from ``upstream/feat/aegis:harnessx/aegis/stages/preprocess.py``
+    ``_compute_actionability`` (L110-129), adapted to our pass@2 ``TaskDigest``
+    outcome pair instead of the official ``pattern_counts`` dict. Tiers, strongest
+    first:
+
+      * 1.0 — any routed settled task is ALL_FAIL (``n_pass == 0``);
+      * 0.8 — any PARTIAL (``0 < n_pass < n_att``), high-signal divergence;
+      * 0.3 — ALL_PASS only, but an Item-3 ``all`` ALL_PASS digest reports latent
+              fragility; **inert unless ``--digest-patterns all`` produced such a
+              digest** (in ``fail_only`` no ALL_PASS digest is generated, so this
+              tier is unreachable and the score is 0.0 — documented);
+      * 0.0 — ALL_PASS only with no fragility surfaced (true no-op).
+    """
+    n_fail = n_partial = n_pass = 0
+    fragile = 0
+    for digest in digests:
+        pattern = _digest_pattern_of(digest)
+        if pattern == "ALL_FAIL":
+            n_fail += 1
+        elif pattern == "PARTIAL_PASS":
+            n_partial += 1
+        else:
+            n_pass += 1
+            if digest_patterns == "all" and _reports_fragility(digest):
+                fragile += 1
+    if n_fail > 0:
+        return 1.0, f"mechanical a_t: {n_fail} ALL_FAIL task(s) -> addressable failure"
+    if n_partial > 0:
+        return 0.8, f"mechanical a_t: {n_partial} PARTIAL task(s) -> high-signal divergence"
+    if fragile > 0:
+        return 0.3, (
+            f"mechanical a_t: ALL_PASS only, but {fragile} digest(s) report latent "
+            "fragility"
+        )
+    if n_pass > 0:
+        return 0.0, "mechanical a_t: ALL_PASS only, no fragility surfaced -> no-op"
+    return 0.0, "mechanical a_t: no settled digests"
+
+
+#: Item 3 pattern-conditional templates (new files beside this recipe). Loaded and
+#: used only under ``--digest-patterns all``; ``fail_only`` keeps the byte-identical
+#: :data:`_LLM_DIGESTER_TASK_PROMPT` module constant.
+_DIGESTER_TEMPLATE_FILES = {
+    "ALL_FAIL": "digester_all_fail.md",
+    "ALL_PASS": "digester_all_pass.md",
+    "PARTIAL_PASS": "digester_partial_pass.md",
+}
+_DIGESTER_TEMPLATE_CACHE: dict[str, str] = {}
+_TEMPLATE_PROVENANCE_RE = re.compile(r"^\s*<!--.*?-->\s*", re.DOTALL)
+
+
+def _strip_template_provenance(text: str) -> str:
+    """Drop a single leading ``<!-- ... -->`` provenance header from a template."""
+    return _TEMPLATE_PROVENANCE_RE.sub("", text, count=1)
+
+
+def _load_digester_template(pattern: str) -> str:
+    """The adapted ALL_FAIL/ALL_PASS/PARTIAL_PASS template body for ``all`` mode."""
+    body = _DIGESTER_TEMPLATE_CACHE.get(pattern)
+    if body is None:
+        path = Path(__file__).with_name(_DIGESTER_TEMPLATE_FILES[pattern])
+        body = _strip_template_provenance(path.read_text(encoding="utf-8")).rstrip("\n")
+        _DIGESTER_TEMPLATE_CACHE[pattern] = body
+    return body
+
+
+#: Item 4 (IV-1) citation-anchor regex, ported from
+#: ``upstream/feat/aegis:harnessx/aegis/gates/structure.py`` ``_ANCHOR_RE`` (L32-39)
+#: and adapted to our anchors, which are bare list items (``trajectories/foo.jsonl
+#: #step_5``) rather than the official bracket/backtick-wrapped inline citations —
+#: so the wrappers are optional here. Group 1 is the full round-relative path
+#: (optional ``R<N>/`` prefix kept, matching how :meth:`_LLMDigester._trajectory_text`
+#: resolves paths against ``run_dir``); group 2 is the optional ``#<locator>``.
+_DIGEST_ANCHOR_RE = re.compile(
+    r"(?:\[|`)?"
+    r"((?:R\d+/)?(?:sessions|trajectories|digests)/[^\]`#\s]+)"
+    r"(?:#([^\]`\s]+))?"
+    r"(?:\]|`)?"
+)
+
+
+def _parse_digest_anchors(text: str) -> list[tuple[str, str | None]]:
+    """``[(round_relative_path, locator_or_None), ...]`` for every citation anchor."""
+    return [(m.group(1), m.group(2)) for m in _DIGEST_ANCHOR_RE.finditer(text)]
+
+
+def _validate_digest_anchors(anchors_text: str, root: Path) -> tuple[bool, str]:
+    """IV-1 mechanical anti-hallucination check (batch-2a Item 4).
+
+    Ported from ``structure.py:validate_digest_anchors`` (L76-113). Every citation
+    anchor must resolve to an existing file under ``root`` (our run layout —
+    ``root`` is the digester's ``run_dir``, the same base
+    :meth:`_LLMDigester._trajectory_text` reads trajectories from), and a
+    ``#step_N`` / ``#msg_N`` locator must fall within that file's line count.
+
+    Divergence from the official IV-1 (documented): the official *requires* at
+    least one anchor (zero anchors fails). Our ``fail_only`` prompt does not demand
+    the strict ``trajectories/<file>#step_N`` format, so a digest may legitimately
+    carry zero matching anchors — that PASSES here (nothing to falsify). Only the
+    ``all``-mode templates instruct the strict anchor format the check validates.
+    """
+    parsed = _parse_digest_anchors(anchors_text)
+    if not parsed:
+        return True, "no citation anchors to validate"
+    line_count_cache: dict[Path, int] = {}
+    for relpath, locator in parsed:
+        target = root / relpath
+        if not target.is_file():
+            return False, f"anchor target missing: {relpath}"
+        if locator is None:
+            continue
+        if locator.startswith(("msg_", "step_")):
+            try:
+                line_no = int(locator.split("_", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            if target not in line_count_cache:
+                try:
+                    with target.open(encoding="utf-8") as handle:
+                        line_count_cache[target] = sum(1 for _ in handle)
+                except OSError:
+                    line_count_cache[target] = -1
+            total_lines = line_count_cache[target]
+            if total_lines == -1:
+                return False, f"anchor target unreadable: {relpath}"
+            if line_no >= total_lines:
+                return False, f"anchor locator out of range: {relpath}#{locator}"
+    return True, "all citation anchors resolve"
+
+
 @dataclass
 class _LLMDigester:
     """Model-backed Digester (paper §4.3), first of the three LLM-AEGIS roles.
@@ -2578,6 +2788,16 @@ class _LLMDigester:
     tasks_by_id: Mapping[str, Any]
     run_dir: Path
     fallback: _EvidenceDigester
+    #: batch-2a Item 2 — round a_t source. ``llm`` (default) = today's LLM call;
+    #: ``mechanical`` = pattern-derived score (:func:`_mechanical_actionability`).
+    actionability_mode: str = DEFAULT_ACTIONABILITY_MODE
+    #: batch-2a Item 3 — ``fail_only`` (default, byte-identical) digests only
+    #: failures; ``all`` also LLM-digests ALL_PASS / PARTIAL tasks with the adapted
+    #: pattern-conditional templates.
+    digest_patterns: str = DEFAULT_DIGEST_PATTERNS
+    #: batch-2a Item 4 — when True, a digest carrying an unresolvable citation
+    #: anchor is rejected (kept deterministic) by :func:`_validate_digest_anchors`.
+    anchor_check: bool = False
 
     async def digest(self, *, context: PipelineContext) -> DigesterRoundArtifact:
         base = _latest_settled_digests(self.evidence, self.pool, context)
@@ -2602,28 +2822,36 @@ class _LLMDigester:
         passed = [digest for digest in base if digest.solved]
         failed = [digest for digest in base if not digest.solved]
 
-        out_digests: list[TaskDigest] = list(passed)
+        out_digests: list[TaskDigest] = []
         fallback_notes: list[str] = []
+        anchor_rejections: list[str] = []
         interpreted = 0
-        for digest in failed:
-            new_digest, note = await self._interpret_failed_task(context, digest)
-            out_digests.append(new_digest)
-            if note is None:
-                interpreted += 1
-            else:
-                fallback_notes.append(note)
 
-        if not failed:
-            actionability = 0.0
-            core = (
-                "llm_digester: no settled routed task is unsolved; no addressable "
-                "failure this round, so a_t=0.0 (derived locally, no LLM call)"
-            )
+        # Item 3: fail_only keeps passed tasks deterministic (no LLM call,
+        # byte-identical); ``all`` also LLM-digests them with the pattern templates
+        # (ALL_PASS hunts strategy+fragility, PARTIAL cites both rollouts).
+        if self.digest_patterns == "all":
+            for digest in passed:
+                interpreted += self._absorb_interpretation(
+                    out_digests,
+                    fallback_notes,
+                    anchor_rejections,
+                    await self._interpret_task(context, digest, _digest_pattern_of(digest)),
+                )
         else:
-            actionability, round_rationale = await self._round_actionability(
-                context, out_digests
+            out_digests.extend(passed)
+
+        for digest in failed:
+            interpreted += self._absorb_interpretation(
+                out_digests,
+                fallback_notes,
+                anchor_rejections,
+                await self._interpret_task(context, digest, "ALL_FAIL"),
             )
-            core = f"llm_digester: {round_rationale}"
+
+        actionability, core = await self._resolve_round_actionability(
+            context, out_digests, failed
+        )
 
         rationale = self._compose_rationale(
             core=core,
@@ -2631,6 +2859,8 @@ class _LLMDigester:
             n_failed=len(failed),
             interpreted=interpreted,
             fallback_notes=fallback_notes,
+            anchor_rejections=anchor_rejections,
+            digest_patterns=self.digest_patterns,
         )
         return DigesterRoundArtifact(
             digests=tuple(out_digests),
@@ -2638,22 +2868,75 @@ class _LLMDigester:
             rationale=rationale,
         )
 
-    async def _interpret_failed_task(
+    @staticmethod
+    def _absorb_interpretation(
+        out_digests: list[TaskDigest],
+        fallback_notes: list[str],
+        anchor_rejections: list[str],
+        result: tuple[TaskDigest, str | None, str | None],
+    ) -> int:
+        """Fold one :meth:`_interpret_task` result in; return 1 iff cleanly interpreted."""
+        new_digest, fb_note, anchor_note = result
+        out_digests.append(new_digest)
+        if fb_note is not None:
+            fallback_notes.append(fb_note)
+        if anchor_note is not None:
+            anchor_rejections.append(anchor_note)
+        return 1 if fb_note is None and anchor_note is None else 0
+
+    async def _resolve_round_actionability(
+        self,
+        context: PipelineContext,
+        out_digests: Sequence[TaskDigest],
+        failed: Sequence[TaskDigest],
+    ) -> tuple[float, str]:
+        """Round a_t + rationale core. Item 2: ``mechanical`` overrides the LLM call.
+
+        ``llm`` (default) is byte-identical: a_t=0.0 with no failures, else one
+        round-level meta call. ``mechanical`` derives a_t from the settled patterns
+        with no round-level call (:func:`_mechanical_actionability`), so a
+        partial-only or all-fail round no longer scores 0.0 by the "no failures"
+        shortcut.
+        """
+        if self.actionability_mode == "mechanical":
+            actionability, reason = _mechanical_actionability(
+                out_digests, digest_patterns=self.digest_patterns
+            )
+            return actionability, f"llm_digester: {reason}"
+        if not failed:
+            return 0.0, (
+                "llm_digester: no settled routed task is unsolved; no addressable "
+                "failure this round, so a_t=0.0 (derived locally, no LLM call)"
+            )
+        actionability, round_rationale = await self._round_actionability(
+            context, out_digests
+        )
+        return actionability, f"llm_digester: {round_rationale}"
+
+    async def _interpret_task(
         self,
         context: PipelineContext,
         digest: TaskDigest,
-    ) -> tuple[TaskDigest, str | None]:
-        """One failed task -> (mapped TaskDigest, None) or (deterministic, note).
+        pattern: str,
+    ) -> tuple[TaskDigest, str | None, str | None]:
+        """One task -> ``(digest, fallback_note, anchor_reject_note)``.
 
-        Provider exceptions propagate (they are wholesale). Only parse/validation
-        failures are handled here: retry once with the error appended, then fall
-        back to the deterministic digest for this task and return an audit note.
+        ``pattern`` (ALL_FAIL / ALL_PASS / PARTIAL_PASS) selects the leading
+        instruction (Item 3). A clean interpretation returns ``(mapped, None,
+        None)``. Provider exceptions propagate (they are wholesale). Parse/
+        validation failures fall back to the deterministic digest for this task with
+        a ``fallback_note``; an Item-4 anchor-check rejection falls back the same way
+        with an ``anchor_reject_note`` instead. At most one note is set.
         """
         window = self._trajectory_window(digest)
         if window is None:
-            return digest, (
-                f"{digest.task_id}: no readable trajectory to interpret; kept "
-                "deterministic digest"
+            return (
+                digest,
+                (
+                    f"{digest.task_id}: no readable trajectory to interpret; kept "
+                    "deterministic digest"
+                ),
+                None,
             )
         frontmatter, head, tail = window
         question = self._question_for(digest.task_id)
@@ -2667,15 +2950,54 @@ class _LLMDigester:
                 head=head,
                 tail=tail,
                 retry_error=error,
+                pattern=pattern,
             )
             text = await self._complete(prompt)
             parsed, error = self._parse_task_json(text)
             if parsed is not None:
-                return self._map_task_digest(digest, parsed), None
-        return digest, (
-            f"{digest.task_id}: LLM interpretation failed twice ({error}); kept "
-            "deterministic digest"
+                mapped = self._map_task_digest(digest, parsed)
+                if self.anchor_check:
+                    ok, reason = self._check_digest_anchors(mapped)
+                    if not ok:
+                        return (
+                            digest,
+                            None,
+                            (
+                                f"{digest.task_id}: anchor_check rejected digest "
+                                f"({reason}); kept deterministic digest"
+                            ),
+                        )
+                return mapped, None, None
+        return (
+            digest,
+            (
+                f"{digest.task_id}: LLM interpretation failed twice ({error}); kept "
+                "deterministic digest"
+            ),
+            None,
         )
+
+    def _check_digest_anchors(self, digest: TaskDigest) -> tuple[bool, str]:
+        """Item 4: validate a mapped digest's citation anchors against the run dir."""
+        anchors_text = "\n".join(str(anchor) for anchor in digest.evidence_anchors)
+        return _validate_digest_anchors(anchors_text, self.run_dir)
+
+    async def _interpret_failed_task(
+        self,
+        context: PipelineContext,
+        digest: TaskDigest,
+    ) -> tuple[TaskDigest, str | None]:
+        """Back-compat 2-tuple wrapper over :meth:`_interpret_task` (ALL_FAIL).
+
+        Pre-batch-2a call sites and tests use this name and the ``(digest, note)``
+        shape. The Item-4 anchor-check note is folded into ``note`` so the 2-tuple
+        contract is preserved (the check is off by default, so ``note`` is the
+        parse/validation fallback note as before).
+        """
+        new_digest, fb_note, anchor_note = await self._interpret_task(
+            context, digest, "ALL_FAIL"
+        )
+        return new_digest, fb_note if fb_note is not None else anchor_note
 
     async def _round_actionability(
         self,
@@ -2696,6 +3018,13 @@ class _LLMDigester:
 
     # -- prompt assembly ------------------------------------------------------
 
+    def _leading_instruction(self, pattern: str) -> str:
+        """Item 3: the adapted pattern template in ``all`` mode; today's constant
+        (byte-identical) in ``fail_only`` for every pattern."""
+        if self.digest_patterns == "all":
+            return _load_digester_template(pattern)
+        return _LLM_DIGESTER_TASK_PROMPT
+
     def _build_task_prompt(
         self,
         *,
@@ -2705,12 +3034,20 @@ class _LLMDigester:
         head: str,
         tail: str,
         retry_error: str | None,
+        pattern: str = "ALL_FAIL",
     ) -> str:
         n_pass, n_att = digest.outcome
+        # ALL_FAIL keeps the exact legacy "FAILED" label so fail_only is
+        # byte-identical; ALL_PASS/PARTIAL_PASS only occur under ``all`` mode.
+        outcome_label = {
+            "ALL_FAIL": "FAILED",
+            "ALL_PASS": "ALL_PASS",
+            "PARTIAL_PASS": "PARTIAL_PASS",
+        }[pattern]
         parts = [
-            _LLM_DIGESTER_TASK_PROMPT,
+            self._leading_instruction(pattern),
             f"\n\nTASK ID: {digest.task_id}",
-            f"\nTASK OUTCOME (harness ground truth, do not re-derive): FAILED "
+            f"\nTASK OUTCOME (harness ground truth, do not re-derive): {outcome_label} "
             f"(n_pass={n_pass} of n_att={n_att})",
             f"\n\nTASK QUESTION:\n{question}" if question else "",
             f"\n\n--- TRAJECTORY FRONTMATTER ---\n{frontmatter}" if frontmatter else "",
@@ -2887,17 +3224,33 @@ class _LLMDigester:
         n_failed: int,
         interpreted: int,
         fallback_notes: Sequence[str],
+        anchor_rejections: Sequence[str] = (),
+        digest_patterns: str = DEFAULT_DIGEST_PATTERNS,
     ) -> str:
+        # fail_only keeps the exact legacy phrasing (byte-identical); ``all`` mode
+        # LLM-digests passes too, so the prose says so truthfully.
+        passed_note = (
+            f"passed={n_passed} llm-digested"
+            if digest_patterns == "all"
+            else f"passed={n_passed} kept deterministic (no LLM)"
+        )
         parts = [
             core,
             (
-                f" [llm_digester bookkeeping: passed={n_passed} kept deterministic "
-                f"(no LLM), failed={n_failed}, llm_interpreted={interpreted}, "
+                f" [llm_digester bookkeeping: {passed_note}, "
+                f"failed={n_failed}, llm_interpreted={interpreted}, "
                 f"per_task_fallbacks={len(fallback_notes)}]"
             ),
         ]
+        # Item 4: the anchor-check summary + per-digest reasons only appear when the
+        # check is on and actually fired, so the default (off) bookkeeping line —
+        # and the whole rationale — stays byte-identical.
+        if anchor_rejections:
+            parts.append(f" [anchor_check: {len(anchor_rejections)} digest(s) rejected]")
         for note in fallback_notes:
             parts.append(f" digester_fallback(disposition=fallback): {note};")
+        for note in anchor_rejections:
+            parts.append(f" anchor_check(disposition=rejected): {note};")
         return "".join(parts)
 
     async def _wholesale_fallback(
@@ -4223,6 +4576,29 @@ class VariantPoolRecipe:
         self.actionability_threshold = _resolve_actionability_threshold(
             getattr(args, "actionability_threshold", None), self.aegis_digester
         )
+        # --actionability (batch-2a Item 2): round a_t source for the LLM Digester.
+        # ``llm`` (default) byte-identical; ``mechanical`` = pattern-derived score.
+        self.actionability_mode = str(
+            getattr(args, "actionability", DEFAULT_ACTIONABILITY_MODE)
+        )
+        if self.actionability_mode not in ACTIONABILITY_MODES:
+            raise ValueError(
+                f"actionability must be one of {ACTIONABILITY_MODES}, "
+                f"got {self.actionability_mode!r}"
+            )
+        # --digest-patterns (batch-2a Item 3): which settled tasks get an LLM digest.
+        # ``fail_only`` (default) byte-identical; ``all`` also digests passes.
+        self.digest_patterns = str(
+            getattr(args, "digest_patterns", DEFAULT_DIGEST_PATTERNS)
+        )
+        if self.digest_patterns not in DIGEST_PATTERNS_MODES:
+            raise ValueError(
+                f"digest_patterns must be one of {DIGEST_PATTERNS_MODES}, "
+                f"got {self.digest_patterns!r}"
+            )
+        # --digest-anchor-check (batch-2a Item 4): IV-1 mechanical anti-hallucination.
+        # Default off, byte-identical.
+        self.digest_anchor_check = bool(getattr(args, "digest_anchor_check", False))
         self.record_gate_complement = bool(getattr(args, "record_gate_complement", False))
         self.retarget_after_freeze = bool(getattr(args, "retarget_after_freeze", False))
         if self.retarget_after_freeze:
@@ -4673,6 +5049,9 @@ class VariantPoolRecipe:
             tasks_by_id=self.tasks_by_id,
             run_dir=self.run_dir,
             fallback=deterministic,
+            actionability_mode=self.actionability_mode,
+            digest_patterns=self.digest_patterns,
+            anchor_check=self.digest_anchor_check,
         )
 
     @property
@@ -6546,10 +6925,22 @@ def _regression_baseline_provenance(mode: str) -> "str | None":
     """Byte-safe lock record for ``--regression-baseline`` (M-23).
 
     Returns ``None`` for the default ``global`` (the lock stays byte-identical); a
-    provenance warning otherwise.
+    mode-specific provenance warning otherwise.
     """
     if mode == DEFAULT_REGRESSION_BASELINE:
         return None
+    if mode == "windowed":
+        return (
+            f"regression_baseline={mode} ENABLED (batch-2a, official adjacent-round "
+            "watchlist ported from upstream/feat/aegis:harnessx/aegis/data/"
+            "regressions.py): the gate's seesaw counts a task as regressed ONLY if it "
+            "was solved in the immediately previous settled round, keeping no "
+            "accumulated ever_solved set -- a one-off solve that has since gone stale "
+            "is not a regression. Judged variant-agnostically (the deterministic gate "
+            "is not passed the target variant_id), so a prior-round solve by any "
+            "variant blocks. This changes which candidates apply/fork/reject, so it is "
+            "not comparable byte-for-byte with a 'global' run"
+        )
     return (
         f"regression_baseline={mode} ENABLED (M-23): the gate's seesaw judges a "
         "candidate's regressions against its OWN variant's solve history instead of "
@@ -6557,6 +6948,50 @@ def _regression_baseline_provenance(mode: str) -> "str | None":
         "different variant no longer counts as a regression for this candidate. This "
         "changes which candidates apply/fork/reject, so it is not comparable "
         "byte-for-byte with a 'global' run"
+    )
+
+
+def _actionability_mode_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--actionability`` (batch-2a Item 2); ``None`` at llm."""
+    if mode == DEFAULT_ACTIONABILITY_MODE:
+        return None
+    return (
+        f"actionability={mode} ENABLED (batch-2a, official mechanical scorer ported "
+        "from harnessx/aegis/stages/preprocess.py _compute_actionability): the LLM "
+        "Digester's round-level a_t is derived from the settled pass@2 patterns (1.0 "
+        "any ALL_FAIL / 0.8 any PARTIAL / 0.3 ALL_PASS-only latent fragility / 0.0 "
+        "no-op) instead of a meta-model call, so a_t -- and which rounds clear the "
+        "alpha threshold and invoke evolution -- changes; not comparable byte-for-byte "
+        "with an 'llm' run"
+    )
+
+
+def _digest_patterns_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--digest-patterns`` (batch-2a Item 3); ``None`` at fail_only."""
+    if mode == DEFAULT_DIGEST_PATTERNS:
+        return None
+    return (
+        f"digest_patterns={mode} ENABLED (batch-2a, official pattern-conditional "
+        "templates ported from harnessx/aegis/templates/digester_*.md): the LLM "
+        "Digester also interprets ALL_PASS (reusable strategy + latent fragility) and "
+        "PARTIAL_PASS (both rollouts) tasks, not just failures, and draws "
+        "failure_category from the Layer-B 9-class taxonomy. This spends extra "
+        "digester LLM calls and changes the per-task digests handed downstream, so it "
+        "is not comparable byte-for-byte with a 'fail_only' run"
+    )
+
+
+def _digest_anchor_check_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--digest-anchor-check`` (batch-2a Item 4); ``None`` off."""
+    if not enabled:
+        return None
+    return (
+        "digest_anchor_check=on ENABLED (batch-2a, official IV-1 structure gate ported "
+        "from harnessx/aegis/gates/structure.py): a digest whose citation anchors do "
+        "not resolve to an existing file (or whose #step_N/#msg_N locator is out of "
+        "range) under the run dir is rejected and kept deterministic for that task. "
+        "This changes which per-task digests survive, so it is not comparable "
+        "byte-for-byte with an 'off' run"
     )
 
 
@@ -6716,6 +7151,13 @@ def _build_experiment_lock(
         _regression_baseline_provenance(
             str(getattr(args, "regression_baseline", DEFAULT_REGRESSION_BASELINE))
         ),
+        _actionability_mode_provenance(
+            str(getattr(args, "actionability", DEFAULT_ACTIONABILITY_MODE))
+        ),
+        _digest_patterns_provenance(
+            str(getattr(args, "digest_patterns", DEFAULT_DIGEST_PATTERNS))
+        ),
+        _digest_anchor_check_provenance(bool(getattr(args, "digest_anchor_check", False))),
         _cluster_source_provenance(args),
         _epsilon_provenance(float(getattr(args, "epsilon", 0.0))),
         _retarget_after_freeze_provenance(bool(getattr(args, "retarget_after_freeze", False))),
@@ -7280,6 +7722,52 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--actionability",
+        choices=ACTIONABILITY_MODES,
+        default=DEFAULT_ACTIONABILITY_MODE,
+        help=(
+            "batch-2a Item 2: which signal produces the LLM Digester's round-level "
+            "actionability a_t. 'llm' (default) is byte-identical: a_t comes from a "
+            "meta-model call. 'mechanical' overrides it with the official "
+            "pattern-derived score (harnessx/aegis/stages/preprocess.py "
+            "_compute_actionability): 1.0 if any routed settled task is ALL_FAIL, 0.8 "
+            "if any PARTIAL, 0.3 if ALL_PASS-only with an Item-3 'all' digest "
+            "reporting latent fragility (else that tier is inert), else 0.0 -- with no "
+            "round-level LLM call. Only affects --aegis-digester llm; the alpha "
+            "threshold knob is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--digest-patterns",
+        choices=DIGEST_PATTERNS_MODES,
+        default=DEFAULT_DIGEST_PATTERNS,
+        help=(
+            "batch-2a Item 3: which settled tasks the LLM Digester interprets. "
+            "'fail_only' (default) is byte-identical: only FAILED tasks get an LLM "
+            "digest, passes stay deterministic. 'all' also digests ALL_PASS "
+            "(reusable strategy + latent fragility) and PARTIAL_PASS (cite both the "
+            "passing and failing rollout) tasks using the pattern-conditional "
+            "templates ported from harnessx/aegis/templates/digester_*.md; both "
+            "failure-bearing templates embed the official Layer-B 9-class failure "
+            "taxonomy. COST: 'all' spends one extra digester LLM call per passed task."
+        ),
+    )
+    parser.add_argument(
+        "--digest-anchor-check",
+        action="store_true",
+        help=(
+            "batch-2a Item 4: IV-1 mechanical anti-hallucination "
+            "(harnessx/aegis/gates/structure.py). Default off, byte-identical. On, "
+            "every citation anchor of form (sessions|trajectories|digests)/<path>"
+            "[#step_N|#msg_N] in a digest must resolve to an existing file (and the "
+            "locator must be within its line count) under the run dir; a digest with "
+            "any invalid anchor is rejected (kept deterministic for that task) and "
+            "counted in the round audit. Pairs with --digest-patterns all, whose "
+            "templates instruct the strict anchor format; under fail_only a digest "
+            "carrying no strict anchors simply passes."
+        ),
+    )
+    parser.add_argument(
         "--evolve-retry",
         type=int,
         default=DEFAULT_EVOLVE_RETRY,
@@ -7358,7 +7846,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "task if ANY variant ever solved it (cross-variant ever_solved). "
             "'per_variant' judges each candidate only against its own variant's solve "
             "history, so a task solved only by a different variant is not counted as a "
-            "regression for this candidate."
+            "regression for this candidate. 'windowed' (batch-2a, official "
+            "adjacent-round watchlist ported from harnessx/aegis/data/regressions.py) "
+            "accumulates nothing: a task regresses only if it was solved in the "
+            "immediately previous settled round, so a stale one-off solve does not "
+            "block; judged variant-agnostically (the gate is not passed variant_id)."
         ),
     )
     # --- M1 task-decomposition x variant-division (evaluation-only) ---------
