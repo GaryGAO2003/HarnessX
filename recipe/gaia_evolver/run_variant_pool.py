@@ -2176,6 +2176,27 @@ def _planner_brief_with_revision(
     return merged
 
 
+def _planner_brief_with_watchlist(
+    brief: Mapping[str, Any],
+    watchlist_md: str,
+) -> dict[str, Any]:
+    """Surface the batch-4a Item 3 regressions watchlist in the Evolver brief.
+
+    The markdown is carried under key ``regressions_watchlist`` and rendered as a
+    clearly-labeled TASK.md section by
+    :meth:`~recipe.gaia_evolver.variant_pool_meta_agent.VariantPoolMetaAgent.
+    _render_candidate_contract` (which lifts it out of the JSON contract so the
+    section reads cleanly). Byte-stable when empty: with no watchlist the result
+    is exactly ``dict(brief)`` (no new key), so a default run keeps its brief
+    verbatim.
+    """
+    merged = dict(brief)
+    if not watchlist_md:
+        return merged
+    merged["regressions_watchlist"] = watchlist_md
+    return merged
+
+
 #: A revision slot id (``C-R1-01-revision-01``, allocated by
 #: :meth:`experiments.variant_pool.candidate_pipeline.IsolatedEvolverAdapter.revise`).
 #: Kept as an OWN recipe constant rather than reaching into candidate_pipeline's
@@ -2802,6 +2823,108 @@ def _split_trajectory_frontmatter(text: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# batch-4a Item 1 — trace-facts injection lead (Layer A framing)
+# ---------------------------------------------------------------------------
+
+#: [batch-4a Item 1] The instruction that precedes the injected trace-facts block
+#: when ``--trace-facts`` is on, carrying the official "treat as ground truth, do
+#: not rewrite" framing. The block itself (:meth:`TraceFacts.to_markdown`) also
+#: carries that framing; this leads it in the per-task prompt.
+_TRACE_FACTS_LEAD = (
+    "The following mechanical trace facts were extracted deterministically from "
+    "the raw session events (Layer A). Treat them as GROUND TRUTH evidence and do "
+    "NOT rewrite them; use them to ground the interpretation you produce below."
+)
+
+
+# ---------------------------------------------------------------------------
+# batch-4a Item 2 — P.1 Cleaner on the digester's windowed trajectory TEXT
+# ---------------------------------------------------------------------------
+#
+# Ported from ``upstream/feat/aegis:harnessx/aegis/stages/preprocess.py``
+# ``clean_trajectory`` (dedup repeated tool outputs + externalize large blocks),
+# adapted from the official jsonl-event input to OUR rendered ``.md`` window text.
+# OUR trajectory body renders each tool result as a line ``  -> <tool>: <result>``
+# (:func:`recipe.gaia_evolver.run` step rendering); a "tool-result block" is that
+# marker line plus any continuation lines up to the next structural boundary
+# (another ``  -> `` result, a markdown header, or a ``---`` rule). The dedup key
+# is ``sha1(tool::body)`` and the "step N" reference is the most recent
+# ``### Step N`` header -- both mirroring the official cleaner's hash and anchor.
+# Heuristic boundary (documented): a tool result whose body itself starts a line
+# with ``#`` or ``---`` could be split early; acceptable for this opt-in cleaner.
+_CLEAN_TOOL_RESULT_RE = re.compile(r"^(?P<prefix>\s*->\s)(?P<tname>[^:\n]+):[ ]?(?P<rest>.*)$")
+_CLEAN_STEP_RE = re.compile(r"^###\s+Step\s+(?P<step>\S+)")
+_CLEAN_BOUNDARY_RE = re.compile(r"^(?:\s*->\s|#{1,6}\s|-{3,}\s*$)")
+
+
+def _clean_window_text(
+    text: str,
+    *,
+    media_dir: Path,
+    externalize_threshold: int = 2048,
+) -> str:
+    """P.1 Cleaner over rendered trajectory body text (batch-4a Item 2).
+
+    Repeated tool-result blocks (identical ``tool::body``) collapse to
+    ``[deduplicated: same output as step N]``; a tool-result body over
+    ``externalize_threshold`` bytes is written to ``media/<sha16>.txt`` under
+    ``media_dir`` and replaced inline with ``[externalized: media/<sha16>.txt (N
+    bytes)]``. Non-tool-result text round-trips byte-for-byte, so a body with no
+    dedup/externalization is returned unchanged.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    seen: dict[str, str] = {}  # sha1(tool::body) -> first-seen step label
+    cur_step = "?"
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        m_step = _CLEAN_STEP_RE.match(line)
+        if m_step:
+            cur_step = m_step.group("step")
+            out.append(line)
+            i += 1
+            continue
+        m = _CLEAN_TOOL_RESULT_RE.match(line)
+        if m is None:
+            out.append(line)
+            i += 1
+            continue
+        # Gather the block body: the remainder of the marker line plus every
+        # continuation line up to (exclusive) the next structural boundary.
+        body_parts = [m.group("rest")]
+        j = i + 1
+        while j < n and _CLEAN_BOUNDARY_RE.match(lines[j]) is None:
+            body_parts.append(lines[j])
+            j += 1
+        # Right-strip the extracted body: the renderer emits a blank line before
+        # the next section header, which would otherwise be absorbed here and make
+        # an otherwise-identical output hash differently (breaking dedup). The
+        # externalized file therefore holds the right-stripped body.
+        body = "\n".join(body_parts).rstrip()
+        prefix = m.group("prefix")
+        tname = m.group("tname").strip()
+        key = hashlib.sha1(f"{tname}::{body}".encode("utf-8")).hexdigest()
+        nbytes = len(body.encode("utf-8"))
+        if key in seen:
+            out.append(f"{prefix}{tname}: [deduplicated: same output as step {seen[key]}]")
+        elif nbytes > externalize_threshold:
+            seen[key] = cur_step
+            media_dir.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
+            (media_dir / f"{digest}.txt").write_text(body, encoding="utf-8")
+            out.append(
+                f"{prefix}{tname}: [externalized: media/{digest}.txt ({nbytes} bytes)]"
+            )
+        else:
+            seen[key] = cur_step
+            out.append(line)
+            out.extend(lines[i + 1 : j])
+        i = j
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
 # batch-2a Items 2/3/4 — pattern taxonomy, mechanical a_t, templates, anchors
 # ---------------------------------------------------------------------------
 
@@ -3032,6 +3155,14 @@ class _LLMDigester:
     #: batch-2a Item 4 — when True, a digest carrying an unresolvable citation
     #: anchor is rejected (kept deterministic) by :func:`_validate_digest_anchors`.
     anchor_check: bool = False
+    #: batch-4a Item 1 — when True, the Layer-A mechanical trace facts for each
+    #: task are extracted from its session jsonl and injected verbatim into the
+    #: per-task prompt. Off (default) keeps the prompt byte-identical.
+    trace_facts: bool = False
+    #: batch-4a Item 2 — when True, the windowed trajectory text is P.1-cleaned
+    #: (dedup repeated tool outputs + externalize >2KB bodies) before the
+    #: head/tail slice. Off (default) keeps the window byte-identical.
+    digest_clean: bool = False
 
     async def digest(self, *, context: PipelineContext) -> DigesterRoundArtifact:
         base = _latest_settled_digests(self.evidence, self.pool, context)
@@ -3174,6 +3305,9 @@ class _LLMDigester:
             )
         frontmatter, head, tail = window
         question = self._question_for(digest.task_id)
+        # batch-4a Item 1: Layer-A mechanical trace facts, injected verbatim when
+        # ``--trace-facts`` is on. ``None`` (default) keeps the prompt byte-identical.
+        trace_facts_md = self._trace_facts_md(digest) if self.trace_facts else None
 
         error: str | None = None
         for _attempt in range(2):
@@ -3185,6 +3319,7 @@ class _LLMDigester:
                 tail=tail,
                 retry_error=error,
                 pattern=pattern,
+                trace_facts_md=trace_facts_md,
             )
             text = await self._complete(prompt)
             parsed, error = self._parse_task_json(text)
@@ -3269,6 +3404,7 @@ class _LLMDigester:
         tail: str,
         retry_error: str | None,
         pattern: str = "ALL_FAIL",
+        trace_facts_md: str | None = None,
     ) -> str:
         n_pass, n_att = digest.outcome
         # ALL_FAIL keeps the exact legacy "FAILED" label so fail_only is
@@ -3284,6 +3420,8 @@ class _LLMDigester:
             f"\nTASK OUTCOME (harness ground truth, do not re-derive): {outcome_label} "
             f"(n_pass={n_pass} of n_att={n_att})",
             f"\n\nTASK QUESTION:\n{question}" if question else "",
+            # batch-4a Item 1: verbatim Layer-A trace facts (byte-identical "" when off).
+            f"\n\n{_TRACE_FACTS_LEAD}\n\n{trace_facts_md}" if trace_facts_md else "",
             f"\n\n--- TRAJECTORY FRONTMATTER ---\n{frontmatter}" if frontmatter else "",
             f"\n\n--- TRAJECTORY HEAD (first {_LLM_DIGESTER_HEAD_CHARS} chars) ---\n{head}",
             f"\n\n--- TRAJECTORY TAIL (last {_LLM_DIGESTER_TAIL_CHARS} chars) ---\n{tail}"
@@ -3409,6 +3547,15 @@ class _LLMDigester:
         if text is None:
             return None
         frontmatter, body = _split_trajectory_frontmatter(text)
+        # batch-4a Item 2: P.1-clean the full body (dedup repeated tool outputs +
+        # externalize >2KB bodies) BEFORE the head/tail slice, so dedup spans the
+        # whole trajectory and externalization shrinks it first. Off (default)
+        # leaves ``body`` byte-identical, so the window is byte-identical.
+        if self.digest_clean:
+            body = _clean_window_text(
+                body,
+                media_dir=self.run_dir / f"R{digest.round_idx}" / "media",
+            )
         frontmatter = frontmatter[:_LLM_DIGESTER_FRONTMATTER_CHARS]
         if len(body) <= _LLM_DIGESTER_HEAD_CHARS + _LLM_DIGESTER_TAIL_CHARS:
             # Short enough to send whole (no overlap between head and tail).
@@ -3431,6 +3578,37 @@ class _LLMDigester:
                 except OSError:
                     continue
         return None
+
+    def _trace_facts_md(self, digest: TaskDigest) -> "str | None":
+        """Item 1: render Layer-A trace facts for ``digest`` from its session jsonl.
+
+        Locates the task's settled session segment(s) under
+        ``run_dir/R{round}/active_pool/{variant}/sessions`` (the layout
+        :meth:`VariantPoolRecipe._run_config_evaluation` writes) via
+        :mod:`experiments.variant_pool.event_replay`'s resolver, then extracts +
+        renders (:func:`experiments.variant_pool.trace_facts.extract_trace_facts`).
+        Returns ``None`` when no session jsonl is found or on any read error, so
+        the prompt cleanly falls back to no facts.
+        """
+        try:
+            from experiments.variant_pool import event_replay
+            from experiments.variant_pool.trace_facts import extract_trace_facts
+
+            sessions_root = (
+                self.run_dir
+                / f"R{digest.round_idx}"
+                / "active_pool"
+                / str(digest.variant_id)
+                / "sessions"
+            )
+            paths: list[Path] = []
+            for sdir in event_replay.session_dirs_for_task(sessions_root, digest.task_id):
+                paths.extend(event_replay.run_jsonls_in_dir(sdir))
+            if not paths:
+                return None
+            return extract_trace_facts(digest.task_id, paths).to_markdown()
+        except Exception:  # noqa: BLE001 - trace facts are best-effort; never kill a digest
+            return None
 
     def _question_for(self, task_id: str) -> str:
         task = self.tasks_by_id.get(task_id)
@@ -3676,6 +3854,10 @@ class _LLMPlanner:
     #: constant so every existing construction stays byte-identical; the recipe
     #: passes ``_PAPER_PLANNER_PROMPT`` in ``paper`` mode.
     prompt: str = _LLM_PLANNER_PROMPT
+    #: batch-4a Item 3 — rendered R{n}/regressions.md content injected into the
+    #: completion prompt when ``--regressions-watchlist`` is on; "" (default)
+    #: keeps the prompt byte-identical.
+    regressions_md: str = ""
 
     async def plan(
         self,
@@ -3803,6 +3985,12 @@ class _LLMPlanner:
             self.prompt,
             f"\n\nROUND EVIDENCE:\n{summary}",
         ]
+        # batch-4a Item 3: inject the regressions watchlist (byte-identical when off).
+        if self.regressions_md:
+            parts.append(
+                "\n\n## Regressions watchlist (read before planning)\n\n"
+                + self.regressions_md
+            )
         if truncation:
             parts.append("\n\nINPUT NOTES: " + "; ".join(truncation))
         if retry_error:
@@ -4106,6 +4294,10 @@ class _LLMCritic:
     #: constant (byte-identical construction); the recipe passes
     #: ``_PAPER_CRITIC_PROMPT`` in ``paper`` mode.
     prompt: str = _LLM_CRITIC_PROMPT
+    #: batch-4a Item 3 — rendered R{n}/regressions.md content injected into the
+    #: completion prompt when ``--regressions-watchlist`` is on; "" (default)
+    #: keeps the prompt byte-identical.
+    regressions_md: str = ""
 
     async def review(
         self,
@@ -4248,6 +4440,12 @@ class _LLMCritic:
             self.prompt,
             f"\n\nROUND PORTFOLIO + EVIDENCE:\n{summary}",
         ]
+        # batch-4a Item 3: inject the regressions watchlist (byte-identical when off).
+        if self.regressions_md:
+            parts.append(
+                "\n\n## Regressions watchlist (read before reviewing)\n\n"
+                + self.regressions_md
+            )
         if truncation:
             parts.append("\n\nINPUT NOTES: " + "; ".join(truncation))
         if retry_error:
@@ -4833,6 +5031,19 @@ class VariantPoolRecipe:
         # --digest-anchor-check (batch-2a Item 4): IV-1 mechanical anti-hallucination.
         # Default off, byte-identical.
         self.digest_anchor_check = bool(getattr(args, "digest_anchor_check", False))
+        # batch-4a Items 1/2/3/4 — all default OFF, byte-identical.
+        # --trace-facts: inject Layer-A mechanical trace facts into the digester
+        # per-task prompt. --digest-clean: P.1-clean the digester's window text.
+        self.trace_facts = bool(getattr(args, "trace_facts", False))
+        self.digest_clean = bool(getattr(args, "digest_clean", False))
+        # --regressions-watchlist: write R{n}/regressions.md and inject it into the
+        # Planner/Critic prompts + the Evolver TASK.md brief. Recomputed per round
+        # into ``self._round_regressions_md`` (empty string = no injection).
+        self.regressions_watchlist = bool(getattr(args, "regressions_watchlist", False))
+        self._round_regressions_md = ""
+        # --audit-stream: append-only R{n}/audit.jsonl of lifecycle events (additive
+        # only; no existing artifact changes). Off = no file created.
+        self.audit_stream = bool(getattr(args, "audit_stream", False))
         self.record_gate_complement = bool(getattr(args, "record_gate_complement", False))
         self.retarget_after_freeze = bool(getattr(args, "retarget_after_freeze", False))
         if self.retarget_after_freeze:
@@ -5008,6 +5219,9 @@ class VariantPoolRecipe:
             # Item 3: per-round ship attribution (recomputed post-settlement when
             # --attribution-check is on; _refuted_signatures is NOT reset here).
             self._ship_attribution = {}
+            # batch-4a Item 3: per-round regressions.md content, empty unless the
+            # watchlist is on and this evolve round computed one below.
+            self._round_regressions_md = ""
 
             if self.candidate_mode == "paper" and round_idx == 0:
                 # R0 is the settled H0 measurement. It is neither a proposal nor
@@ -5029,6 +5243,11 @@ class VariantPoolRecipe:
                         round_idx=round_idx,
                         eligible=self._retarget_eligible(round_idx, all_ids),
                     )
+                # batch-4a Item 3: write R{round_idx}/regressions.md and cache it for
+                # this round's Planner/Critic prompts + Evolver brief. Must run before
+                # engine.run_round (which builds those agents). Off = no file, cache "".
+                if self.regressions_watchlist:
+                    self._compute_round_regressions(round_idx)
                 result = self.engine.run_round(round_idx, set(all_ids))
                 self._reconcile(result)
             self._score_active_portfolio(result, round_idx, set(all_ids))
@@ -5300,6 +5519,8 @@ class VariantPoolRecipe:
             actionability_mode=self.actionability_mode,
             digest_patterns=self.digest_patterns,
             anchor_check=self.digest_anchor_check,
+            trace_facts=self.trace_facts,
+            digest_clean=self.digest_clean,
         )
 
     @property
@@ -5335,6 +5556,7 @@ class VariantPoolRecipe:
                 if self.aegis_prompts == "paper"
                 else _LLM_PLANNER_PROMPT
             ),
+            regressions_md=self._round_regressions_md,
         )
 
     @property
@@ -5371,6 +5593,7 @@ class VariantPoolRecipe:
                 if self.aegis_prompts == "paper"
                 else _LLM_CRITIC_PROMPT
             ),
+            regressions_md=self._round_regressions_md,
         )
 
     @property
@@ -5521,6 +5744,55 @@ class VariantPoolRecipe:
             )
         self._pipeline_results[vid] = pipeline_result
         self._persist_pipeline_audit(vid, round_idx, pipeline_result)
+        # batch-4a Item 4: append this round's pipeline lifecycle events to
+        # R{round_idx}/audit.jsonl (additive; --audit-stream off = no file/no-op).
+        if self.audit_stream:
+            self._emit_audit(
+                round_idx, "preprocess", "preprocess",
+                {
+                    "target_variant": vid,
+                    "n_digests": len(pipeline_result.digests),
+                    "actionability": pipeline_result.actionability,
+                },
+            )
+            _plan = pipeline_result.plan
+            self._emit_audit(
+                round_idx, "plan", "plan",
+                {
+                    "target_variant": vid,
+                    "n_briefs": len(_plan.briefs) if _plan is not None else 0,
+                },
+            )
+            _considered_ids = {
+                c.candidate_id for c in pipeline_result.considered_candidates
+            }
+            for _cand in pipeline_result.considered_candidates:
+                self._emit_audit(
+                    round_idx, "proposal", "propose",
+                    {"target_variant": vid, "candidate_id": _cand.candidate_id},
+                )
+            for _rec in pipeline_result.audit:
+                if getattr(_rec, "phase", "") == "proposal" and (
+                    _rec.candidate_id is None or _rec.candidate_id not in _considered_ids
+                ):
+                    self._emit_audit(
+                        round_idx, "proposal", "propose_fail",
+                        {
+                            "target_variant": vid,
+                            "candidate_id": _rec.candidate_id,
+                            "disposition": getattr(_rec, "disposition", ""),
+                            "reason": getattr(_rec, "reason", ""),
+                        },
+                    )
+            self._emit_audit(
+                round_idx, "critic", "decision",
+                {
+                    "target_variant": vid,
+                    "ranked_for_gate": [
+                        c.candidate_id for c in pipeline_result.ranked_for_gate
+                    ],
+                },
+            )
         for candidate in pipeline_result.considered_candidates:
             self._round_candidates[candidate.candidate_id] = candidate
         # The Critic only ranks. The engine's deterministic gate remains the
@@ -5573,11 +5845,14 @@ class VariantPoolRecipe:
                 slot=slot,
                 manifest_mode=self.manifest_mode,
                 target_variant=context.target_variant,
-                planner_brief=_planner_brief_with_revision(
-                    _planner_brief_with_regressions(
-                        asdict(brief), context.regressions
+                planner_brief=_planner_brief_with_watchlist(
+                    _planner_brief_with_revision(
+                        _planner_brief_with_regressions(
+                            asdict(brief), context.regressions
+                        ),
+                        revision,
                     ),
-                    revision,
+                    self._round_regressions_md,
                 ),
                 base_evolve_kwargs=base_kwargs,
                 max_retries=self.evolve_retry,
@@ -5719,6 +5994,79 @@ class VariantPoolRecipe:
         except ValueError:
             position = 0
         return plan.briefs[position % len(plan.briefs)]
+
+    def _compute_round_regressions(self, round_idx: int) -> None:
+        """batch-4a Item 3: write ``R{round_idx}/regressions.md`` from the settled
+        ledger and cache its rendered content for this round's prompt/brief injection.
+
+        Compares the two most recent settled rounds (``max_last_round()-1 ->
+        max_last_round()``) variant-agnostically and emits next to this evolve
+        round's materials (``for_evolve_round_n=round_idx``). Best-effort: any
+        error leaves the cache empty (no injection this round).
+        """
+        try:
+            from experiments.variant_pool import regressions as _regressions_mod
+
+            compare_round = self.ledger.max_last_round()
+            if compare_round < 0:
+                self._round_regressions_md = ""
+                return
+            _path, rendered = _regressions_mod.write_regressions_md(
+                self.run_dir,
+                self.ledger,
+                compare_round=compare_round,
+                for_evolve_round_n=round_idx,
+                joint_suspect_ships=self._joint_suspect_ships(compare_round),
+            )
+            self._round_regressions_md = rendered
+        except Exception:  # noqa: BLE001 - watchlist is best-effort; never kill a round
+            self._round_regressions_md = ""
+
+    def _joint_suspect_ships(self, compare_round: int) -> list[dict]:
+        """Variants whose deployed config shipped at ``compare_round`` (APPLY/FORK).
+
+        Sourced best-effort from ``self._config_change_rounds`` (persistent across
+        rounds). Bucket-level attribution needs ``--attribution-check``; reported
+        as ``"?"`` otherwise.
+        """
+        ships: list[dict] = []
+        for vid, rounds in sorted(self._config_change_rounds.items()):
+            if compare_round in rounds:
+                ships.append({"ship_id": vid, "bucket": "?"})
+        return ships
+
+    def _emit_audit(
+        self,
+        round_idx: int,
+        stage: str,
+        kind: str,
+        payload: dict,
+        *,
+        evidence_refs: "Sequence[str]" = (),
+    ) -> None:
+        """batch-4a Item 4: append one lifecycle event to ``R{round_idx}/audit.jsonl``.
+
+        Additive only -- the log is a NEW file nothing else reads; no existing
+        artifact write is touched. Off (``--audit-stream`` unset) is a no-op, so no
+        file is created and behaviour is byte-identical.
+        """
+        if not self.audit_stream:
+            return
+        try:
+            from experiments.variant_pool.audit import AuditEvent, AuditLog
+
+            log = AuditLog(self.run_dir / f"R{round_idx}" / "audit.jsonl")
+            log.append(
+                AuditEvent(
+                    round=round_idx,
+                    stage=stage,
+                    kind=kind,
+                    payload=dict(payload),
+                    evidence_refs=list(evidence_refs),
+                )
+            )
+        except Exception:  # noqa: BLE001 - audit is best-effort observability
+            pass
 
     def _recent_regressions(self, variant: Any) -> tuple[str, ...]:
         """Tasks whose last two settled outcomes changed solved -> unsolved."""
@@ -6146,6 +6494,17 @@ class VariantPoolRecipe:
                 self._reconcile_status[vid] = "applied"
                 # F-B: this variant's deployed config changed this round (APPLY).
                 self._config_change_rounds.setdefault(vid, []).append(result.round_idx)
+                # batch-4a Item 4: record the pool mutation (additive).
+                if self.audit_stream:
+                    self._emit_audit(
+                        result.round_idx, "commit", "commit",
+                        {
+                            "decision": "apply",
+                            "variant_id": vid,
+                            "candidate_id": candidate_id,
+                            "config_path": str(candidate.config_path),
+                        },
+                    )
             elif decision is Decision.FORK:
                 self._reconcile_status[vid] = "fork_parent_unchanged"
 
@@ -6187,6 +6546,19 @@ class VariantPoolRecipe:
             self._reconcile_status[child_id] = "fork_child_active"
             # F-B: the fork child is deployed with a newly-shipped config this round.
             self._config_change_rounds.setdefault(child_id, []).append(result.round_idx)
+            # batch-4a Item 4: record the fork-child config commit (additive).
+            if self.audit_stream:
+                self._emit_audit(
+                    result.round_idx, "commit", "commit",
+                    {
+                        "decision": "fork",
+                        "variant_id": child_id,
+                        "candidate_id": candidate_id,
+                        "config_path": (
+                            str(candidate.config_path) if candidate is not None else None
+                        ),
+                    },
+                )
 
     def _adopt_candidate_memo(self, candidate_id: str, journal_path: Path) -> None:
         """Promote only the selected slot's private memo into its live lineage."""
@@ -6451,6 +6823,17 @@ class VariantPoolRecipe:
                 if diagnostic.failed_stage is not None
                 else None
             )
+            # batch-4a Item 4: one gate event per candidate diagnostic (additive).
+            if self.audit_stream:
+                self._emit_audit(
+                    round_idx, "gate", "gate",
+                    {
+                        "candidate_id": candidate_id,
+                        "variant_id": diagnostic.variant_id,
+                        "decision": decision,
+                        "failed_stage": failed_stage,
+                    },
+                )
             if not diagnostic.evaluation:
                 self.report.add_candidate(
                     CandidateTaskResult(
@@ -7505,6 +7888,70 @@ def _traj_failure_signals_provenance(args: Any) -> "str | None":
     )
 
 
+def _trace_facts_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--trace-facts`` (batch-4a Item 1); ``None`` off."""
+    if not enabled:
+        return None
+    return (
+        "trace_facts=on ENABLED (batch-4a Item 1, official Layer-A extractor ported "
+        "from upstream/feat/aegis:harnessx/aegis/stages/trace_facts.py): each failed "
+        "(and, under --digest-patterns all, each passed) task's session jsonl is "
+        "mechanically summarised (tool-call shape / exits / repeats / bursts / "
+        "tool-effect shortlist) and injected verbatim into the Digester's per-task "
+        "prompt as ground truth. No rollout behaviour changes, but the Digester's "
+        "input does, so its interpretations -- and any downstream evolution -- are not "
+        "comparable byte-for-byte with an 'off' run"
+    )
+
+
+def _digest_clean_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--digest-clean`` (batch-4a Item 2); ``None`` off."""
+    if not enabled:
+        return None
+    return (
+        "digest_clean=on ENABLED (batch-4a Item 2, official P.1 Cleaner ported from "
+        "harnessx/aegis/stages/preprocess.py clean_trajectory): the Digester's windowed "
+        "trajectory text has repeated tool-result blocks collapsed and >2KB tool-result "
+        "bodies externalized to R{n}/media/ before the head/tail slice. No rollout "
+        "behaviour changes, but the Digester's window -- and therefore its "
+        "interpretation -- differs, so it is not comparable byte-for-byte with an "
+        "'off' run"
+    )
+
+
+def _regressions_watchlist_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--regressions-watchlist`` (batch-4a Item 3); off=None."""
+    if not enabled:
+        return None
+    return (
+        "regressions_watchlist=on ENABLED (batch-4a Item 3, official adjacent-round "
+        "watchlist ported from harnessx/aegis/data/regressions.py): R{n}/regressions.md "
+        "is written from the settled ledger (variant-agnostic windowed comparison of the "
+        "two most recent settled rounds) and injected into the LLM Planner/Critic prompts "
+        "and the Evolver TASK.md brief. No rollout behaviour changes, but the meta-agents' "
+        "input does, so their decisions are not comparable byte-for-byte with an 'off' run"
+    )
+
+
+def _audit_stream_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--audit-stream`` (batch-4a Item 4); ``None`` off.
+
+    Additive-only: the flag writes a NEW ``R{n}/audit.jsonl`` that nothing reads and
+    changes no existing artifact or decision, so an 'on' run's measurements ARE
+    comparable to an 'off' run's. Recorded for provenance completeness only.
+    """
+    if not enabled:
+        return None
+    return (
+        "audit_stream=on ENABLED (batch-4a Item 4, ported from "
+        "harnessx/aegis/data/audit.py): an additive append-only R{n}/audit.jsonl of "
+        "lifecycle events (preprocess/plan/propose/propose_fail/gate/decision/commit) is "
+        "written at the existing hook points. Additive only -- no existing artifact write "
+        "or decision changes -- so scores stay comparable; the extra file is recorded "
+        "here for provenance"
+    )
+
+
 def _task_reasoning_effort(args: Any) -> str | None:
     """Effective reasoning effort for the task (inner) agent, or ``None`` to omit.
 
@@ -7650,6 +8097,12 @@ def _build_experiment_lock(
         _retarget_after_freeze_provenance(bool(getattr(args, "retarget_after_freeze", False))),
         _record_gate_complement_provenance(bool(getattr(args, "record_gate_complement", False))),
         _traj_failure_signals_provenance(args),
+        _trace_facts_provenance(bool(getattr(args, "trace_facts", False))),
+        _digest_clean_provenance(bool(getattr(args, "digest_clean", False))),
+        _regressions_watchlist_provenance(
+            bool(getattr(args, "regressions_watchlist", False))
+        ),
+        _audit_stream_provenance(bool(getattr(args, "audit_stream", False))),
         _ship_efficacy_provenance(args),
         _meta_read_scope_gate_provenance(bool(getattr(args, "meta_read_scope_gate", False))),
         _refuted_signature_gate_provenance(args),
@@ -7865,6 +8318,51 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "fetch_error_count, fetch_empty_count, loop_warning_count) into trajectory "
         "frontmatter, so the meta-agent's frontmatter-only scanners can see them. "
         "Default off keeps frontmatter byte-identical.",
+    )
+    parser.add_argument(
+        "--trace-facts",
+        action="store_true",
+        help=(
+            "batch-4a Item 1: extract Layer-A mechanical trace facts (tool-call shape "
+            "table, exits, repeated runs, tool bursts, tool-effect shortlist) from each "
+            "task's session jsonl and inject the rendered block verbatim into the LLM "
+            "Digester's per-task prompt (both fail_only and --digest-patterns all), with "
+            "the 'treat as ground truth, do not rewrite' instruction. Ported from "
+            "upstream/feat/aegis:harnessx/aegis/stages/trace_facts.py. Default off keeps "
+            "the digester prompt byte-identical."
+        ),
+    )
+    parser.add_argument(
+        "--digest-clean",
+        action="store_true",
+        help=(
+            "batch-4a Item 2: P.1-clean the LLM Digester's windowed trajectory text -- "
+            "collapse repeated tool-result blocks to a dedup marker and externalize "
+            ">2KB tool-result bodies to R{n}/media/<sha16>.txt -- before the head/tail "
+            "slice. Ported from harnessx/aegis/stages/preprocess.py clean_trajectory. "
+            "Default off keeps the window byte-identical."
+        ),
+    )
+    parser.add_argument(
+        "--regressions-watchlist",
+        action="store_true",
+        help=(
+            "batch-4a Item 3: write R{n}/regressions.md (adjacent settled rounds; grades "
+            "regressed_hard/soft/partial + joint-suspect ships) from the settled ledger "
+            "and inject its content into the LLM Planner/Critic prompts and the Evolver "
+            "TASK.md brief. Ported from harnessx/aegis/data/regressions.py. Default off "
+            "writes no file and injects nothing (prompts/brief byte-identical)."
+        ),
+    )
+    parser.add_argument(
+        "--audit-stream",
+        action="store_true",
+        help=(
+            "batch-4a Item 4: append an additive R{n}/audit.jsonl of lifecycle events "
+            "(preprocess/plan/propose/propose_fail/gate/decision/commit) at the existing "
+            "hook points. Ported from harnessx/aegis/data/audit.py. Additive only -- no "
+            "existing artifact write changes; default off creates no file."
+        ),
     )
     parser.add_argument("--evolve-cost", type=float, default=EVOLVE_COST_CAP_USD)
     parser.add_argument("--evolve-steps", type=int, default=EVOLVE_MAX_STEPS)

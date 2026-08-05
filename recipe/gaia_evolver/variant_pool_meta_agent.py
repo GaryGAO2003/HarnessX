@@ -108,12 +108,21 @@ class VariantPoolMetaAgent(MetaAgent):
         candidate_id = str(candidate_contract.get("suggested_candidate_id", "")).strip()
         target_variant = str(candidate_contract.get("target_variant", "")).strip()
         planner_brief = candidate_contract.get("planner_brief", {}) or {}
+        # batch-4a Item 3: lift the regressions watchlist markdown out of the JSON
+        # contract so it renders as a clean labeled section below. Byte-identical
+        # when absent: the JSON and the identity block are unchanged.
+        watchlist_md = str(planner_brief.get("regressions_watchlist", "") or "")
+        brief_for_json = (
+            {k: v for k, v in planner_brief.items() if k != "regressions_watchlist"}
+            if watchlist_md
+            else planner_brief
+        )
         manifest_mode = str(planner_brief.get("manifest_mode", "repo")).strip().lower()
         contract_json = json.dumps(
             {
                 "suggested_candidate_id": candidate_id,
                 "target_variant": target_variant,
-                "planner_brief": planner_brief,
+                "planner_brief": brief_for_json,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -123,6 +132,12 @@ class VariantPoolMetaAgent(MetaAgent):
             f"- `target_variant`: `{target_variant}` (use exactly this value)\n"
             f"- `planner_contract_json`: `{contract_json}`\n\n"
         )
+        if watchlist_md:
+            identity_block += (
+                "### Regressions watchlist (read before proposing)\n\n"
+                + watchlist_md
+                + "\n\n"
+            )
 
         if manifest_mode == "paper":
             # Verbatim the reverted upstream prototype: manifest.yaml required.
