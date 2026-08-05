@@ -2779,3 +2779,11 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 - **根因**:主循环攒发射器 BASE 参数时漏了 `--search-backend serper`(默认=chain;历史跑 s1k8b103 lock 有 W1 记录=显式传过;T1 用 s4 的 serper_only)。**"key 注入了"≠"工具注册了"**——efficacy 纪律又一实例,记入静默失效清单第七条(自伤型)。
 - **修复**:①发射器 BASE 补旗标;②发射器新增**强制预检**:点火前 live Serper 探针(1 credit)+ BASE 旗标断言,任一失败拒绝点火;③仓库测试 `test_search_backend_forced.py` 钉死 W1 seam 契约(swap 真发生/chain 逐字节无操作/无 WebSearch 时软路径至少响亮 warning——软点如实记录,硬强制在发射器探针)。
 - **处置**:chval30 R0-R2(瘸腿搜索段)作废不混用,`--clean` 重点火;腿 A 结论(默认路径纯净/机制管线)与搜索供给无关,保留。意外收获:M-42 计数器在实战里如实录下退化(118 轨迹 92 条非零,search_unavailable 326/fetch_error 277/loop 96)。
+
+
+## Aug-05 下午:裁决变更「官方启用=全取」+ 批 4a 落地 + chval30 用户令取消
+
+- **用户令**:「官方启用的全放进来然后test」——延后/部分取清单按新标准重排:入列 9 项(trace_facts 全表/IV-3~12/P.1 清洗/regressions 必读件/audit 流/reputation+scoreboard→Planner/ask-more 环/auto-revert(tau2 pilot 启用形态)/meta-compaction 接线),仍排除 1 项(无工单化 Planner,形态非机制)。
+- **批 4a 落地**(f6b5671,M-54..M-57):trace-facts/digest-clean/regressions-watchlist/audit-stream,+35 测试,全套件 1173 绿。`next_uses_result` uptake 启发随 M-54 入库。
+- **批 4b 施工中**:bucket-reputation/critic-ask-more/auto-revert/meta-compaction(compaction.py 核实为核心自带,移植降级为接线)。
+- **chval30(serper 版)用户令取消**(跑至 R1 段,进程树验证全灭):待批 4b 落地后以含全部机制的新快照重点火,一次验尽。发射器强制 serper 预检已在位。

@@ -565,3 +565,17 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | 工具不对称核实 | **已满足,无代码**:Digester/Planner/Critic 均为 `provider.complete(...,[])` 裸补全(零工具),仅 Evolver 持工具(含 web)——与官方不对称一致且更严 |
 | 测试 | 四组新 24 项;全套件 **1132 绿**;tests/unit 与基线逐项一致 |
 | 裁决层 | 用户令「全抄官方的」(Aug-05) |
+
+
+## M-54..M-57 全抄批 4a:官方启用通道四件(Aug-05,f6b5671,全部默认关)
+
+> 裁决变更:用户令「官方启用的全放进来然后test」(Aug-05)——此前 🟡 部分取/⏸️ 延后清单按"官方管线真实启用"标准重排,批 4a/4b 落实;唯一仍排除=无工单 landscape 化 Planner(管线形态非机制,取则失 paper-faithful 身份)。
+
+| 项 | 内容 |
+|---|---|
+| **M-54 `--trace-facts`** | Layer-A 全表移植(`trace_facts.py` 490L):工具调用形状表(args_sha/预览/return_type)+ **`next_uses_result` uptake 启发**(下一条助手消息是否含工具输出 ≥20 字符子串)+ RepeatRun + ToolBurst(官方阈值 20/10,high 30/15)+ ExitFact 终局 200 字符;官方节标题逐字,逐字注入 digester 逐题提示词。诚实退化已注明:我方流无 content_blocks(multimodal 类归并 short_marker)、journal 外置大输出读为 empty |
+| **M-55 `--digest-clean`** | P.1 清洗适配到窗口文本:相同工具输出块去重 `[deduplicated: same output as step N]`、>2048B 外置 `R{n}/media/<sha16>.txt`;右剥空白防哈希抖动(渲染器空行会破坏去重,已注明) |
+| **M-56 `--regressions-watchlist`** | agent 必读件 `R{n}/regressions.md`(相邻轮 hard/soft/partial 分级,与 M-46 windowed 同谓词、同变体不可知语义)注入 Planner/Critic 提示词与 Evolver TASK.md;joint-suspect ship 桶无 `--attribution-check` 时记 `?` |
+| **M-57 `--audit-stream`** | 逐轮 append-only `R{n}/audit.jsonl`,官方 12 kind 冻结枚举照搬,纯增量发射(preprocess/plan/propose/propose_fail/gate/decision/commit),零既有产物改动 |
+| 测试 | +35 项;全套件 **1173 绿**,零新增失败;四旗标默认逐字节等同逐一钉死 |
+| 裁决层 | 用户令「官方启用的全放进来然后test」(Aug-05) |
