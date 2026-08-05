@@ -1125,3 +1125,17 @@ no-op 免检;continuity 下重试同扣一本账。
 **记账**。`_planner_retry_provenance(value)` 走 `_epsilon_provenance` 模式(默认 `0` 返回 `None`,入 `_build_experiment_lock` warnings);`_LLMPlanner` 加 `planner_retry` dataclass 字段(默认 `0`,现有构造字节等同),`_make_planner` 经 `getattr(self.args, "planner_retry", 0)` 注入;**零 `Hyperparams` 新字段**。实际消耗的重试数逐次 WARNING 落日志。
 
 **测试**。`tests/test_planner_retry.py` +3(空→有效 retry=1 全宽池 + 单 WARNING / 全空 retry=2 落原路径 + 尝试计数 / 默认 0 单调用不重试字节等同)。全量 **1112 绿**(1109→1112)。
+
+## 7.37 候选装载反馈 `--candidate-load-feedback`(Aug-05,观测边界审计 Q1 GAP,遵 §3.5 既裁「必须到达下一次尝试」;1112→1125)
+
+**起因**。fail-closed 工件网(`_resolve_artefact_paths` / `_resolve_tool_targets`,经 `_prepare_round_config` 装配,仅在 `_run_config_evaluation` 与 decomp runner 两处调用)运行在 **EVAL 时**,在 `--evolve-continuity` 重试环(仅包 `slot_agent.evolve`)之外。故一个演化组件装不进(文件缺失 / 坏 kwargs / target 畸形)的候选会**对操作者响亮炸跑**,而 evolver **什么也学不到**——无 NOTES.md、无 DECISION_REQUIRED.md、无弃权理由。§3.5 既裁:meta agent **必须在下一次尝试里看到「自己的编辑装不进」**。
+
+**接口**。`--candidate-load-feedback`(store_true,默认关=字节等同)。一旗两段。
+
+**PART 1(主,槽内提案期校验)**。在 `_evolve_candidate_with_continuity` 里,`evolve` 成功返回 `new_yaml` 后、成功记账前:开旗时用 evaluator 同一张 fail-closed 网校验产出配置——`_candidate_config_load_error` 包 `_validate_candidate_config`(从 `_prepare_round_config` 抽出的**装载+校验半体**,journal-free;`_prepare_round_config` 仍是唯一挂 tracer 者,保持其**单次 `.copy` 字节等同**)。装不进则:把 `LOAD FAILURE — …:<错误文本>` 追加进 `decision_history`(与 DECISION_REQUIRED **同一通道**→契约 `prior_decision_required_feedback`),置 `prev_attempt_dir`(故上一 attempt 的 NOTES/收尾分析随反馈**一并**注入下一 attempt),重试;**只吃一个 attempt 名额,不吃步数预算**(校验不跑 rollout,不调 `_continuity_steps_used`)。重试耗尽→原有终局自动弃权,**理由携带装载错误文本**。仅连续性环:`continuity off` 无终局弃权/步数账机制,故 PART 1 是连续性域内的(基础 retry 环零触碰)。
+
+**PART 2(兜底,EVAL 时 raise 降级,仅候选)**。在 `_run_config_evaluation`,开旗且 `measurement_scope ∈ {candidate_gate, ship_confirm}` 时,捕 `FileNotFoundError / ValueError / RuntimeError` 并降级到**现有 infra 失败车道**——`_candidate_load_failure_evaluation` 合成全 infra 结局(每题 `0/pass_k`、`infra_failures=pass_k`),门照常判拒、报表行照常经 `_failure_counts` 记 `infra_failures`,**不另造车道**。`settled_active_pool` 保留响亮 raise(**无论旗开关**:已部署变体装不进=运行完整性事件)。decomp runner(`--decomp-eval`,§7.29 谱系)视为候选侧:子任务配置装不进降级为空输出 `SessionResult`,并在 `decomp_manifest.json` 加 `candidate_load_feedback` provenance(仅开旗时,默认字节等同)。**PART 1 开时,PART 2 对候选近乎不可达(纵深防御)**;唯 P3 提案修复(`--proposal-repair-retry`,不接本旗)产出的坏配置仍由 PART 2 兜底。
+
+**记账**。`_validate_candidate_config` 抽出后 `_prepare_round_config` 保持原样单次 `.copy(tracer=…, processors=…, tool_registry=…)`(resolve 调用顺序不变→字节等同)。provenance 走 `_epsilon_provenance` 模式(`_candidate_load_feedback_provenance`,默认关返回 `None`,入 `_build_experiment_lock` warnings);recipe 经 `getattr(args, "candidate_load_feedback", DEFAULT_CANDIDATE_LOAD_FEEDBACK)` 读 `self.candidate_load_feedback`;**零 `Hyperparams` 新字段**。
+
+**测试**。`tests/test_candidate_load_feedback.py` +13:PART 1(装载失败→错误进下一契约 + 与 NOTES 并注→修正配置放行 / 全装载失败→终局弃权携错误文本 / 校验零步数预算 / no-config 覆盖终局理由不残留 / 关旗不校验字节等同)、PART 2(候选门+上船确认降级、活跃池仍 raise、关旗仍 raise)、重构与 helper 单元(`_prepare_round_config` 装载+挂 journal 不变、`_validate_candidate_config` journal-free、`_candidate_config_load_error` 双态、合成全 infra 结局)、argparse/provenance/lock 记账(默认关不入 warnings / 开旗入)。全量 **1125 绿**(1112→1125)。

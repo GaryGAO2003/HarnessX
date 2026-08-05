@@ -2851,3 +2851,15 @@ P3 提案出口 schema 修复重试。三旗标默认字节等同;+50 测试,全
 3. **观测通道原则+边界**(两连裁):`--traj-failure-signals`=**开**;喂 meta agent 以 **harness 为界**——进:轨迹失败形态 / agent 工具失败 / evolver 自身工作记录 / 自己编辑未加载的 fail-closed 报错;不进:门判决及理由、池/路由/账本内部、serper/429 基建噪声(机制层病在机制层修,failure_density/B 臂判定量;零泄漏过审=效度声明「演化侧对评测机制盲」)。REJECT 侧机制不动(=B 臂靶,已知机制故意保留)。
 
 新文件入库:`LAUNCH-CONFIG-BASELINE.md` / `BENCH2-SELECTION-AUG03.md`(Aug-03 第二床选型=BrowseComp,补入库)/ `analysis/novelty/m_cluster_validation.py`(分区检验仪:failure-mode 分区 vs 同尺寸随机 null)。`l_rank_ablation.py` +56(E1-power:注入已知大小的合成特化,标定 E1 检出下限)用户裁「需要的」,随本批入库。后续:双向观测审计(边界内完整 / 边界外零泄漏)+ S1 旁路审计 → 缺口小批 → 最小量级双跑(设计=LAUNCH-CONFIG §6)。
+
+---
+
+## Aug-05 · §7.37 落地:`--candidate-load-feedback`(观测边界审计 Q1 GAP;本地改,无跑)
+
+**审计裁决**(承 baseline 观测边界两连裁「进:自己编辑未加载的 fail-closed 报错」):fail-closed 工件网(`_resolve_artefact_paths` / `_resolve_tool_targets`,经 `_prepare_round_config` 装配)**只在 EVAL 时跑**(`_run_config_evaluation` / decomp runner 两处),**在 `--evolve-continuity` 重试环之外**——候选演化组件装不进时对操作者响亮炸跑,evolver 却零反馈(无 NOTES / 无 DECISION_REQUIRED / 无弃权=Q1 GAP)。遵 §3.5 既裁「meta agent 必须在下一次尝试里看到自己的编辑装不进」。
+
+**特性** `--candidate-load-feedback`(store_true,默认关=字节等同;详 SPEC §7.37)。PART 1(槽内,主):`_evolve_candidate_with_continuity` 里 evolve 产出配置后即用 evaluator 同一张网校验(`_validate_candidate_config` 从 `_prepare_round_config` 抽出、journal-free;后者保原单次 `.copy(tracer=…)` 字节等同),装不进→`LOAD FAILURE …:<错误文本>` 经 DECISION_REQUIRED **同通道**注入下一 attempt(与 NOTES 并注)、**只吃 attempt 名额不吃步数**、耗尽→终局自动弃权携错误文本。PART 2(EVAL 时兜底):`_run_config_evaluation` 候选域(`candidate_gate` / `ship_confirm`)捕 `FileNotFoundError/ValueError/RuntimeError` 降级到**现有 infra 失败车道**(合成全 infra→门判拒→报表 `infra_failures`,不另造车道);`settled_active_pool` **无论旗开关仍响亮 raise**(运行完整性事件);decomp 视候选侧(空输出子任务 + `decomp_manifest.json` provenance)。provenance 走 `_epsilon_provenance` 模式(`_candidate_load_feedback_provenance` 入 lock warnings),**零 `Hyperparams` 新字段**。
+
+**判断点**:①任务给的 PART 1 行号(:2528-2620 / 无 config 分支 :2570-2592 / evolve 返回 ~:2593)实指 `_evolve_candidate_with_continuity`(非标题写的 `_evolve_candidate_with_retry` 基础环——基础环无终局弃权/步数账机制),按行号与账本变量(`attempts_made`/`steps_used`/`prev_attempt_dir`)裁定实现在连续性环;②P3 提案修复(`--proposal-repair-retry`)刻意不接本旗,其坏配置由 PART 2 兜底(与「PART 1 开时 PART 2 近乎不可达」的纵深防御框架一致)。
+
++13 测试(`tests/test_candidate_load_feedback.py`),**全量 1125 绿**(1112→1125)。本地 only:无 push、无 API、无跑,仅单测。

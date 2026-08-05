@@ -293,6 +293,27 @@ _ABSTAIN_REASON_CAP = 500
 PROPOSAL_REPAIR_RETRY_MODES = (0, 1)
 DEFAULT_PROPOSAL_REPAIR_RETRY = 0
 
+#: --candidate-load-feedback (§7.37). ``False`` (default) is byte-identical. When
+#: on, the meta-agent learns "its own edit does not load": PART 1 validates a
+#: shipped config through the SAME fail-closed net the evaluator uses, immediately
+#: after ``evolve`` returns inside the continuity retry loop, and feeds the load
+#: error back into the next attempt (costing an attempt slot but no agent steps);
+#: PART 2 is an eval-time backstop that downgrades a CANDIDATE config-load failure
+#: to the existing infra-failure lane instead of crashing the whole run. The
+#: active-pool raise is unchanged (a non-loading deployed variant is a run-integrity
+#: event, loud regardless of the flag).
+DEFAULT_CANDIDATE_LOAD_FEEDBACK = False
+#: PART 1 feedback block prefix. Clearly labeled so the next attempt (and any human
+#: reading NOTES.md / the abstain reason) recognizes a load failure vs a no-config.
+_LOAD_FAILURE_FEEDBACK_PREFIX = (
+    "LOAD FAILURE — your shipped config does not load through the evaluator's "
+    "fail-closed net. Fix the artefact/target it names and re-ship:\n"
+)
+#: ``measurement_scope`` values that identify a CANDIDATE evaluation (the window
+#: gate and the ship-confirm re-eval) rather than the settled active pool. PART 2
+#: downgrades a config-load failure to the infra-failure lane only for these.
+_CANDIDATE_MEASUREMENT_SCOPES = frozenset({"candidate_gate", "ship_confirm"})
+
 #: --regression-accountability (F-B). ``strict`` (default) is byte-identical: any
 #: active regression can trigger the whole-round no-op veto. ``shipped_only`` only
 #: hard-gates regressions a shipped APPLY/FORK config change actually caused;
@@ -1680,6 +1701,30 @@ def _resolve_tool_targets(tool_registry: Any, config_path: Path) -> Any:
     return dataclasses.replace(tool_registry, custom=patched)
 
 
+def _validate_candidate_config(config_path: Path) -> "tuple[Any, list, Any]":
+    """Load a config and run the fail-closed artefact/tool net, journal-free.
+
+    The load-and-verify half of :func:`_prepare_round_config`, factored out so the
+    evaluator and the in-slot candidate-load validation (``--candidate-load-feedback``
+    PART 1) raise through ONE implementation. Returns ``(config, resolved_processors,
+    resolved_tool_registry)``; raises the same ``FileNotFoundError`` / ``ValueError``
+    / ``RuntimeError`` the evaluator's net raises when an artefact or tool the
+    variant is defined by cannot be opened / instantiated (the exceptions already
+    name the offending target and cause).
+
+    Side-effect-free: it attaches no tracer and performs no journal I/O, so calling
+    it to validate a candidate config never perturbs the eval path.
+    """
+    from harnessx.core.harness import HarnessConfig
+
+    cfg = HarnessConfig.from_yaml_file(config_path).canonicalize()
+    return (
+        cfg,
+        _resolve_artefact_paths(cfg.processors, config_path),
+        _resolve_tool_targets(cfg.tool_registry, config_path),
+    )
+
+
 def _prepare_round_config(config_path: Path, journal: Any):
     """Load a config YAML and attach this round's tracer (``run.py`` idiom).
 
@@ -1689,16 +1734,72 @@ def _prepare_round_config(config_path: Path, journal: Any):
 
     Every artefact path the config names is normalised and verified here -- see
     :func:`_resolve_artefact_paths` (system prompts) and
-    :func:`_resolve_tool_targets` (custom tools) for why both are fail-closed.
+    :func:`_resolve_tool_targets` (custom tools) for why both are fail-closed. The
+    load-and-verify half lives in :func:`_validate_candidate_config`; this function
+    is the ONLY caller that also attaches the journal (the eval-path side effect),
+    so the single ``.copy`` below stays byte-identical to the pre-factoring form.
     """
-    from harnessx.core.harness import HarnessConfig
-
-    cfg = HarnessConfig.from_yaml_file(config_path).canonicalize()
+    cfg, processors, tool_registry = _validate_candidate_config(config_path)
     return cfg.copy(
         tracer=journal,
-        processors=_resolve_artefact_paths(cfg.processors, config_path),
-        tool_registry=_resolve_tool_targets(cfg.tool_registry, config_path),
+        processors=processors,
+        tool_registry=tool_registry,
     )
+
+
+def _candidate_config_load_error(config_path: Path) -> "str | None":
+    """``None`` if the candidate config loads through the fail-closed net, else the
+    error text (already names the offending target and cause).
+
+    Used by ``--candidate-load-feedback`` PART 1 to turn "the evolved edit does not
+    load" — today an invisible failure the evolver never sees, because the artefact
+    net raises at EVAL time, outside the retry loop — into feedback the next attempt
+    receives. Only the fail-closed exceptions are treated as load failures; anything
+    else propagates.
+    """
+    try:
+        _validate_candidate_config(config_path)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _candidate_load_failure_evaluation(
+    *,
+    task_ids: "set[str]",
+    variant_id: str,
+    round_idx: int,
+    measurement_scope: str,
+    pass_k: int,
+    traj_dir: Path,
+    reason: str,
+) -> "tuple[dict[str, tuple[int, int]], dict[str, dict], Path]":
+    """Synthesize an all-infra-failure evaluation for a candidate whose config did
+    not load (``--candidate-load-feedback`` PART 2 backstop).
+
+    Every task is scored ``0 / pass_k`` with ``pass_k`` infra failures, so the
+    candidate flows through the SAME infra-failure reporting lane the recipe already
+    uses (``_failure_counts`` reads each record's ``infra_failures``; the all-zero
+    outcome makes the gate reject the candidate) instead of the load error crashing
+    the whole run. Shaped exactly like a real ``_run_config_evaluation`` return
+    ``(outcomes, cleaned, traj_dir)``.
+    """
+    n_att = max(1, int(pass_k))
+    outcomes: dict[str, tuple[int, int]] = {}
+    cleaned: dict[str, dict] = {}
+    for tid in sorted(task_ids):
+        outcomes[tid] = (0, n_att)
+        cleaned[tid] = {
+            "task_id": tid,
+            "variant_id": variant_id,
+            "round": round_idx,
+            "n_pass": 0,
+            "n_att": n_att,
+            "infra_failures": n_att,
+            "measurement_scope": measurement_scope,
+            "candidate_load_failure": reason,
+        }
+    return outcomes, cleaned, traj_dir
 
 
 def _make_variant_meta_agent(template: Any, journal_path: Path) -> Any:
@@ -2125,6 +2226,7 @@ async def _evolve_candidate_with_retry(
     bounce_audit: "dict[str, Any] | None" = None,
     continuity: str = "off",
     abstain: str = "error",
+    candidate_load_feedback: bool = False,
 ) -> _EvolveOutcome:
     """Run ``slot_agent.evolve``; on a *no-config* outcome, retry with feedback.
 
@@ -2159,6 +2261,7 @@ async def _evolve_candidate_with_retry(
             max_retries=max_retries,
             paper_evolver_guidance=paper_evolver_guidance,
             abstain=abstain,
+            candidate_load_feedback=candidate_load_feedback,
         )
     decision_history: list[str] = []
     for attempt in range(max_retries + 1):
@@ -2497,6 +2600,7 @@ async def _evolve_candidate_with_continuity(
     max_retries: int,
     paper_evolver_guidance: str | None,
     abstain: str,
+    candidate_load_feedback: bool = False,
 ) -> _EvolveOutcome:
     """P1 no-config retry loop with slot-scoped continuity (``--evolve-continuity on``).
 
@@ -2517,6 +2621,14 @@ async def _evolve_candidate_with_continuity(
 
     ``max_steps`` is saved on entry and restored in ``finally`` so a slot agent
     shared with a later call (or a P3 repair) is left exactly as found.
+
+    ``--candidate-load-feedback`` (PART 1): when ``candidate_load_feedback`` is
+    True, a config the attempt SHIPS is validated through the SAME fail-closed net
+    the evaluator uses before it is accepted; a config that does not load feeds the
+    load error into the next attempt's feedback (alongside its working notes) and is
+    retried, costing an attempt slot but NO agent steps (validation runs no rollout).
+    Exhausting the retries on load failures ends in the same terminal auto-abstain,
+    with the load-failure text as the reason. Default off leaves the loop unchanged.
     """
     decision_history: list[str] = []
     total_budget = _agent_total_budget(slot_agent)
@@ -2524,6 +2636,10 @@ async def _evolve_candidate_with_continuity(
     steps_used = 0
     attempts_made = 0
     prev_attempt_dir: Path | None = None
+    #: PART 1: the most recent attempt's load-failure text, or None when the most
+    #: recent terminal-relevant attempt was a no-config. Threads the load error into
+    #: the terminal auto-abstain reason. Stays None when the flag is off.
+    last_load_failure: str | None = None
     last_launched_dir = Path(slot.output_dir)
     try:
         for attempt in range(max_retries + 1):
@@ -2574,6 +2690,9 @@ async def _evolve_candidate_with_continuity(
                 if decision_path.is_file():
                     decision_history.append(decision_path.read_text(encoding="utf-8"))
                     prev_attempt_dir = attempt_dir
+                    # The most recent terminal-relevant attempt is a no-config, not a
+                    # load failure; keep the terminal reason accurate (no-op when off).
+                    last_load_failure = None
                     if attempt < max_retries:
                         logger.warning(
                             "[%s] no config.yaml (attempt %d/%d, %d/%d steps used): "
@@ -2590,6 +2709,36 @@ async def _evolve_candidate_with_continuity(
                     break
                 # A non-no-config error (timeout, validator failure) still raises.
                 raise
+            # --candidate-load-feedback (PART 1): the attempt SHIPPED a config;
+            # verify it loads through the SAME fail-closed net the evaluator uses.
+            # A config that does not load teaches the meta-agent nothing today (the
+            # net raises at eval, outside this loop), so feed the load error back
+            # into the next attempt and retry — costing an attempt slot but NO agent
+            # steps (validation runs no rollout). Off => this block is skipped and
+            # the loop is byte-identical.
+            if candidate_load_feedback:
+                load_error = _candidate_config_load_error(Path(new_yaml))
+                if load_error is not None:
+                    attempts_made += 1
+                    last_load_failure = load_error
+                    decision_history.append(_LOAD_FAILURE_FEEDBACK_PREFIX + load_error)
+                    prev_attempt_dir = attempt_dir
+                    if attempt < max_retries:
+                        logger.warning(
+                            "[%s] shipped config does not load (attempt %d/%d, "
+                            "%d/%d steps used): %s; retrying with notes + LOAD "
+                            "FAILURE feedback",
+                            slot.suggested_candidate_id,
+                            attempt + 1,
+                            max_retries + 1,
+                            steps_used,
+                            total_budget,
+                            load_error,
+                        )
+                        continue
+                    # Retries exhausted on load failures: fall through to the
+                    # terminal auto-abstain (its reason carries the load error).
+                    break
             attempts_made += 1
             steps_used += _continuity_steps_used(attempt_dir, remaining)
             return _EvolveOutcome(
@@ -2602,10 +2751,19 @@ async def _evolve_candidate_with_continuity(
         # Guaranteed terminal outcome (P1-3): copy the parent config in and abstain.
         terminal_config = last_launched_dir / "config.yaml"
         terminal_config.write_bytes(_current_config_bytes(base_evolve_kwargs))
-        reason = (
-            f"exhausted without decision after {attempts_made} attempts / "
-            f"{steps_used} steps"
-        )
+        if last_load_failure is not None:
+            # PART 1: the terminating attempt(s) failed to LOAD (not no-config), so
+            # carry the load error as the abstain reason. Only reachable with the
+            # flag on; the ``else`` branch below is byte-identical to the pre-flag form.
+            reason = (
+                f"exhausted without a loadable config after {attempts_made} attempts "
+                f"/ {steps_used} steps; last load failure: {last_load_failure}"
+            )
+        else:
+            reason = (
+                f"exhausted without decision after {attempts_made} attempts / "
+                f"{steps_used} steps"
+            )
         logger.warning("[%s] continuity auto-abstain: %s", slot.suggested_candidate_id, reason)
         return _EvolveOutcome(
             config_path=terminal_config,
@@ -4646,6 +4804,11 @@ class VariantPoolRecipe:
                 f"proposal_repair_retry must be one of {PROPOSAL_REPAIR_RETRY_MODES}, "
                 f"got {self.proposal_repair_retry!r}"
             )
+        # --candidate-load-feedback (§7.37). ``False`` (default) is byte-identical:
+        # no in-slot validation (PART 1) and the eval-time raise is unchanged (PART 2).
+        self.candidate_load_feedback = bool(
+            getattr(args, "candidate_load_feedback", DEFAULT_CANDIDATE_LOAD_FEEDBACK)
+        )
         # P1 hard requirements (also enforced at argparse time in main()): the
         # guaranteed auto-abstain must be recorded as an ABSTAIN, and continuity
         # supersedes the one-shot commit bounce.
@@ -5578,6 +5741,7 @@ class VariantPoolRecipe:
                 bounce_audit=bounce_audit,
                 continuity=self.evolve_continuity,
                 abstain=self.evolve_abstain,
+                candidate_load_feedback=self.candidate_load_feedback,
             )
         except Exception as exc:  # noqa: BLE001 - adapter converts to ProposalFailure
             self._candidate_meta[slot_id] = {
@@ -6004,7 +6168,38 @@ class VariantPoolRecipe:
         sessions_dir = vround_dir / "sessions"
 
         journal = _make_journal(sessions_dir)
-        round_config = _prepare_round_config(config_path, journal)
+        try:
+            round_config = _prepare_round_config(config_path, journal)
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            # --candidate-load-feedback (PART 2, backstop): a CANDIDATE config that
+            # does not load is downgraded to the existing infra-failure lane (every
+            # task scored all-infra, so the gate rejects it) instead of crashing the
+            # whole run. The ACTIVE-POOL raise stays loud regardless of the flag — a
+            # non-loading deployed variant is a run-integrity event. With PART 1 on
+            # this is nearly unreachable for candidates (defense in depth).
+            if (
+                self.candidate_load_feedback
+                and measurement_scope in _CANDIDATE_MEASUREMENT_SCOPES
+            ):
+                logger.warning(
+                    "[R%d] %s candidate config does not load (%s); marking all %d "
+                    "task(s) as infra failures and continuing: %s",
+                    round_idx,
+                    variant_id,
+                    measurement_scope,
+                    len(task_ids),
+                    exc,
+                )
+                return _candidate_load_failure_evaluation(
+                    task_ids=task_ids,
+                    variant_id=variant_id,
+                    round_idx=round_idx,
+                    measurement_scope=measurement_scope,
+                    pass_k=int(self.args.pass_k),
+                    traj_dir=traj_dir,
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            raise
         try:
             round_config.to_yaml_file(vround_dir / "config.yaml")
         except Exception as exc:  # noqa: BLE001 - best-effort reproducibility dump
@@ -7421,6 +7616,28 @@ def _planner_retry_provenance(value: int) -> "str | None":
     )
 
 
+def _candidate_load_feedback_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--candidate-load-feedback`` (§7.37); ``None`` off.
+
+    Same pattern as :func:`_epsilon_provenance` / :func:`_planner_retry_provenance`:
+    ``Hyperparams`` is a frozen dataclass we must not extend, so a non-default flag
+    is recorded as a provenance warning (persisted in the lock, surfaced by every
+    reader). Off (default) records nothing, so a default run's lock stays
+    byte-identical.
+    """
+    if not enabled:
+        return None
+    return (
+        "candidate_load_feedback=on ENABLED (§7.37): a candidate whose evolved config "
+        "does not load through the evaluator's fail-closed net is (PART 1) fed the load "
+        "error back into the next continuity attempt and retried, and (PART 2) at eval "
+        "time downgraded to the infra-failure lane instead of crashing the run. This "
+        "adds retry attempts and changes which candidates are archived-for-infra rather "
+        "than aborting the run, so it is not comparable byte-for-byte with an 'off' run. "
+        "The active-pool raise is unchanged"
+    )
+
+
 def _task_reasoning_effort(args: Any) -> str | None:
     """Effective reasoning effort for the task (inner) agent, or ``None`` to omit.
 
@@ -7572,6 +7789,9 @@ def _build_experiment_lock(
         _record_gate_complement_provenance(bool(getattr(args, "record_gate_complement", False))),
         _traj_failure_signals_provenance(args),
         _planner_retry_provenance(int(getattr(args, "planner_retry", 0))),
+        _candidate_load_feedback_provenance(
+            bool(getattr(args, "candidate_load_feedback", DEFAULT_CANDIDATE_LOAD_FEEDBACK))
+        ),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -8217,6 +8437,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--candidate-load-feedback",
+        action="store_true",
+        help=(
+            "§7.37: teach the meta-agent when its own edit does not LOAD. Default off "
+            "is byte-identical. On: (PART 1) inside the --evolve-continuity retry loop, "
+            "a shipped config is validated through the SAME fail-closed artefact/tool "
+            "net the evaluator uses right after evolve returns; a config that does not "
+            "load feeds the load error into the next attempt (costing an attempt slot, "
+            "no step budget) and retries, ending in the terminal auto-abstain with the "
+            "load error as its reason. (PART 2, backstop) an eval-time load failure of "
+            "a CANDIDATE config (gate window / ship-confirm) is downgraded to the "
+            "infra-failure lane instead of crashing the run; the active-pool raise "
+            "stays loud regardless of the flag."
+        ),
+    )
+    parser.add_argument(
         "--planner-retry",
         type=int,
         default=0,
@@ -8671,7 +8907,27 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
         async def _runner(*, instruction, variant_id, max_steps, subtask_id, subtask_type) -> "SessionResult":
             safe_tid = str(parent_task.task_id).replace("/", "_").replace("\\", "_").replace(":", "_")
             sess_dir = sessions_root / safe_tid / f"{subtask_id}-{variant_id}"
-            round_config = _prepare_round_config(variant_config[variant_id], _make_journal(sess_dir))
+            try:
+                round_config = _prepare_round_config(
+                    variant_config[variant_id], _make_journal(sess_dir)
+                )
+            except (FileNotFoundError, ValueError, RuntimeError) as exc:
+                # --candidate-load-feedback: decomp subtasks are candidate-side, so a
+                # config that does not load is downgraded to an empty-output subtask
+                # (noted in decomp_manifest.json) instead of crashing the run. Off =>
+                # re-raised exactly as today (byte-identical).
+                if not bool(
+                    getattr(args, "candidate_load_feedback", DEFAULT_CANDIDATE_LOAD_FEEDBACK)
+                ):
+                    raise
+                logger.warning(
+                    "[decomp-%s] subtask %s config does not load; treating as an "
+                    "empty-output subtask and continuing (--candidate-load-feedback): %s",
+                    variant_id,
+                    subtask_id,
+                    exc,
+                )
+                return SessionResult(output="", steps=0, cost_usd=0.0)
             # Non-empty sentinel ground truth: keeps the reused rollout path from
             # firing the empty-GT LLM judge on a subtask (its pass/score is unused;
             # only the deterministic task-level gate over the synthesis is scored).
@@ -8819,6 +9075,14 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
         "pool_source": pool_source,
         "profile_source": profile_source,
     }
+    # --candidate-load-feedback provenance for --decomp-eval (its manifest is this
+    # mode's only provenance surface, cf. M-33). Added ONLY when on, so a default
+    # run's manifest stays byte-identical.
+    if bool(getattr(args, "candidate_load_feedback", DEFAULT_CANDIDATE_LOAD_FEEDBACK)):
+        manifest["candidate_load_feedback"] = (
+            "on: candidate-side subtask config-load failures downgraded to "
+            "empty-output subtasks (not run-fatal)"
+        )
     summary = {
         "pass_at_k": pass_at_score,
         "k": pass_k,
