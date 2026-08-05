@@ -356,6 +356,69 @@ Python 逐进程字符串哈希随机化会让**加了种子的 shuffle 在不�
 
 ---
 
+## 7. N-10 子编辑级接受(`w_subedit_acceptance.py`)—— 机制真实,机会很小
+
+> 编号见 `00-NUMBERING.md`:N-10 属于用户审过的想法池,与 P1-A/B/C 不同线。
+> 本节放在这里是因为同一夜完成,且与 §6 的 fork 判据同族。
+
+**(a) 机制本身坐实**
+
+```
+带 verdict 的候选          84 个
+mutation_surface 尺寸      {2:27, 3:4, 4:28, 5:22, 6:3}   100% 多 surface,均值 3.64,最小 2
+每候选 distinct bucket 数  {2:32, 3:41, 4:11}
+CriticRejection            只有 (candidate_id, reason),零逐项裁决位
+gate.py::_decide           只吃整份候选
+```
+
+**接受单位平均由 3.64 个部件组成,而整条链上不存在比"整份候选"更小的接受单位。** 这一条是硬的。
+
+**(b) ⛔ 但机会很小 —— 主要死因是数据,不是设计**
+
+```
+rejection 与 verdict 同键相交   1 / 40        ← Critic 只给排序过的候选写 mutation_surface
+                                                被拒的只留 {candidate_id, reason}
+替代来源 _meta_scratch/changeset.json 覆盖 37/40(scratch 产物,非契约输出)
+交叉验证门(82 个双源候选):  一致 82/82,不一致 0(0.0%) ⇒ 放行
+
+只点名部分 surface 的 rejection(排除 config.yaml,主口径):   6 / 35 可分类 = 17%
+                                       (计入 config.yaml 的敏感性口径:  22/36 = 61%)
+重放后真正能 ship 部分编辑的候选:  3 个,共 3 个 surface
+```
+
+**为什么这么低**:40 条 rejection 里 **27 条(agent 分类器)/ 28 条(主循环独立复核关键词)是
+「缺 Level-2 / capability 证据」的全局否决** —— 它指控整份候选,不指控某个 surface。
+逐项接受对这类否决**无能为力**。
+
+⭐ **这条本身指向另一个杠杆**:如果 70% 的拒绝理由是「你没给证据」,
+那瓶颈不在**接受粒度**,而在**证据要求**(以及候选生成端为什么系统性交不出证据)。
+这不是 N-10,是一条新的、尚未编号的线索。
+
+**(c) config.yaml 普遍性 = 分离性的主证据(不是噪声)**
+
+```
+config.yaml 出现在 84/84 个候选的 mutation_surface 里(主循环独立复核吻合)
+⇒ 这个系统里没有任何两个 surface 是文件不相交的
+⇒ 任何"只接受一部分"都仍要改写那个共享文件
+```
+
+两种读法数据分不开:(a) config 是**接线**(去掉一个 processor 就必须改 config)⇒ 真耦合;
+(b) config 是**被动清单**⇒ 可以只带子集。
+`file_changes` 的实际 diff **没有持久化**,盘上的数据无法裁决。这是硬限制,不是懒。
+
+**(d) 判词**
+
+**机制真实,机会小,证据弱。** N-10 是一个便宜、值得做原型的机制,
+**但这批数据没有把它立成一个 win**。两件事必须同时为真它才付得起:
+① 真的能分离(而 config.yaml 普遍性正好指向反面);
+② 那些没被点名的 surface 值得留(而实测里有 4 个此后**再没被重新提出过**)。
+
+**(e) 顺带的观测**:19 条 `strategy_concerns` 明确在说跨轮重复尝试,
+含 `[s1k8b103 R10]`「Prompt bucket (C-R10-01) continues to be attempted across rounds」
+—— **churn 是 Critic 自己记下来的**,不需要我们去证明它存在。
+
+---
+
 ## 6. ⭐ 本批的合流结论:病灶是 fork 规则,不是截断
 
 A 与 B 从两条互不相干的路走到同一处:
@@ -364,7 +427,18 @@ A 与 B 从两条互不相干的路走到同一处:
 |---|---|---|
 | **§4.2 (A)** | 截断插补把 FORK → APPLY(1.26/次),因为 regression 里混着撞顶 | fork **不该发生** |
 | **§4.3 (B)** | F-race 把净劣势 FORK 判为丢弃(3 个稳健,p≤0.008) | fork **不该发生** |
-| 主循环复核 | **10 个 FORK 里 5 个净劣势**;最极端 2 improved / 14 regressed | fork 门槛太松 |
+| 主循环复核 | **10 个 FORK 里 5 个净劣势**;最极端 4 improved / 21 regressed | fork 门槛太松 |
+
+⚠️ **口径限定(引用"10 个 FORK"时必须带)**:该数取自**已完成的 run**(有 `pool_report.json`,
+即三个姊妹脚本的默认语料)。放宽到**任何有 `pool_state.json` 的 run**(多出未完成的
+`e_pervar` / `e_pervar2` / `s2k8b50`)后是 **50 seesaw / 13 FORK / 6 净劣势**。
+
+```
+完成的 run          37 seesaw   10 fork   5 净劣势 (50%)   fork 分布 {a1big5:2, e_pervar3:1, s1k8b103:7}
+所有有 pool_state    50 seesaw   13 fork   6 净劣势 (46%)
+```
+
+**结论对两个口径都成立**(净劣势约占一半),但分母不同,**引用时必须写明哪一个**。
 
 **`min_fork=(1,1)` 是我方工程默认,不是论文规定。** `SPEC-E01` 逐字:
 > fork 默认是 `min_fork=(1,1)`。**论文未给计数阈值**;旧 `(2,2)` 是我方工程选择,现仅作为 ablation。
@@ -403,3 +477,6 @@ A 与 B 从两条互不相干的路走到同一处:
 | ⚠️15 | `i_gate_noise_replay.seesaw_decisions` 可直接使用 | 它的正则会把 `forceprobe2/C-R1-01` 的 **`synthesized_improved=[...]`** 当成真 improved(该候选 `archive_reason` 是 `FORCED_GATE(fork): real_decision=reject`)⇒ 状态量重建对不上。**任何基于它的分析必须先排 `FORCED_GATE`** | 两个 agent 独立撞到 |
 | ⚠️16 | (新)`min_fork=(1,1)` 是合理默认 | 10 个 FORK 里 **5 个净劣势**,最极端 **2 improved / 14 regressed**(p=0.004)。论文 §4.5 **未给任何 fork 判据**(`SPEC-E01` 逐字),这个过松的值是我方填的 ⇒ 见 §6 | §4.2+§4.3 合流 |
 | ⚠️17 | (新)加了 seed 就可复现 | `T_k` 曾是字符串 `set`,**逐进程字符串哈希随机化**让加种子的 shuffle 跨进程给出不同结果。凡中间经过 set 迭代的随机流程都要先 `sorted()` | `u_racing_gate` 自查 |
+| ⚠️18 | §6 首版写「10 个 FORK 里 5 个净劣势」未给口径 | 该数是**已完成 run**(有 `pool_report.json`)的语料。全语料是 **13 / 6**。两个口径结论一致(约一半),但**分母必须随句子走** | N-10 agent 报 13/6 与主循环 10/5 不符,复核后系population 定义差异 |
+| ⚠️19 | §6 首版称最极端 fork 是「2 improved / 14 regressed」 | 那是 `s1k8b103/C-R7-02`。**真正最极端的是 `C-R6-01`:4 improved / 21 regressed**(p=0.001)。主循环给下游 spec 时引了次极端的一个 | 同上 |
+| ⚠️20 | (新)Critic 的 `rejections` 可以用 `mutation_surface` 分析 | **verdicts 与 rejections 是不相交的候选集** —— 40 条 rejection 里只有 **1 条**与某个 verdict 共享 `(run, round, cid)`。Critic 只给它**排序过**的候选写 `mutation_surface`,被拒的只留 `{candidate_id, reason}`。⇒ N-10 的逐项分析必须另找 surface 来源(`_meta_scratch/changeset.json`,覆盖 37/40,**scratch 目录产物非契约输出**) | N-10 agent 拒绝按 spec 硬跑,主循环复核确认 |
