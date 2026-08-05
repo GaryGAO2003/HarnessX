@@ -119,6 +119,7 @@ P.1 Cleaner：工具输出 sha 去重 + >2048B 外置为 `content_ref`。
 | regressions.md 差一轮 off-by-one，"silently hiding every regression caused by the just-shipped config" | **官方**（1a62993 自修）|
 | `TemplateSystemPromptBuilder.extra_context` 序列化往返静默丢弃 | **官方**（digester.py 注释自曝，绕道 StaticSystemPromptBuilder）|
 | `ShipNotLandedError` / `apply.py` template_path 校验 | 官方的防复发层（≈我方 S1"成关"）|
+| **⭐ counterfactual 门本体 = 潜伏 no-op**：门按 `kind` 字段分发（`after_model/after_tool/task_end`）并读 `final_output`——**而官方全管线零个生产者产出该 schema**（runner 拷贝的是 type-based 消息流 `raw_assistant/raw_tool/episode_end`，preprocess 原样透传，从不改名、从不合成 `final_output`；`kind` 式事件行只存在于该门的单元测试夹具里）。真实喂入 → 零 `kind` 匹配 → 双侧 `final_output=None` → **恒 `ok=True`**。防静默回退的门，自己在静默空转 | **官方**（我方 Aug-05 前提检查发现；未见官方自修）|
 
 ⇒ 双方独立撞上同一类病并各自建了防线。"**效力验证是自演化系统的一等公民问题**"有了双边证据。
 
@@ -136,6 +137,15 @@ P.1 Cleaner：工具输出 sha 去重 + >2048B 外置为 `content_ref`。
 4. 论文↔代码分歧清单（§0-③）进 threats/related；"seeds=3 vs k=1-2"、"±5% 未实现"两条须并报。
 5. 官方 Layer-B 九类词表可作我方失败分类的**对照词表**（我方 `failure_category` 79.5% null 的修复参照）。
 6. 日期口径（已修正）：写作引用官方代码注 "publicly available since May–June 2026 (GitHub branches UI, verified 2026-08-05)"；我方 Jul-21 审计的"未开源"判断为**漏查分支所致的审计失误**，如需引用当时判断须连同此勘误。
+
+## 7.5 counterfactual 门移植前提检查（Aug-05，已闭）
+
+**判定：(a) REPLAYABLE NOW** —— 我方落盘 `sessions/<sid>/<run_id>.jsonl` 足以重放，需一个**强制适配器**（~60–120 行）。
+
+- **为什么必须有适配器**：官方门的 `kind`/`final_output` schema **无任何生产者**（见 §5 新行）——移植 = 门 + 适配器一起写。映射表：`raw_assistant→after_model`（content/tool_calls 从 `message.*` 拍平）、`raw_tool→after_tool`（tool_name/result/tool_call_id）、`episode_end→task_end`（`exit_reason` 自带；**`final_output` 需注入**，三个落盘来源任选：`comparison.json` 逐尝试记录（`run.py:246-262` 写入）/ 轨迹 `.md` 的 `extracted_answer`+`## Result` / 消息流最后一条 `raw_assistant.message.content`）。
+- **前向 1 行修**：`harnessx/tracing/journal.py:1136-1164` 写 `episode_end` 时手里就有 `event.final_output` 却丢掉（`message:None`）——加一行即让未来 run 原生带上。
+- **保真边界（须并报）**：journal 从未持久化 `thinking_blocks`/`usage`/`ToolResultEvent.content_blocks`/`final_messages`——读这些字段的 processor 重放时退化，且门的 `try/except` 会吞掉 AttributeError ⇒ **假"无回退"风险**。对门的既定契约（检测 `final_output`/`exit_reason` 改写）可重建面足够。
+- **移植纪律（由官方之病反推）**：门的测试**必须对着真实生产者输出**跑一条端到端，不许只用手搓夹具——官方恰恰死在"夹具 schema ≠ 生产 schema"上。
 
 ## 8. 未闭项
 
