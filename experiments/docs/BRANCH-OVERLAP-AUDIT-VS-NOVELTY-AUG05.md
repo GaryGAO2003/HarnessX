@@ -19,7 +19,7 @@ T1 K=8 状态(RUN-LOG:2875):解冻已达但**仍待发车令**;prefix-vote go/no
 
 ## 2. 文件层 overlap(一处,良性但需治理)
 
-`experiments/docs/AUDIT-IDEAS-7-12-VS-UPSTREAM-AUG05.md` **同时提交于两分支**(s4 `d440e8b` / 本分支 `6063052`),当前**逐字节一致**(`git diff` 空 → 合并无冲突)。风险不在现在而在**双主进化**:任一侧改动即分叉,且本分支 VERIFIED 文档已对原审计 §4.2 做了修正(两层裁决),"原文两分支同文 + 修正只在一支"的割裂已经发生。→ 待裁决 A(§6)。
+`experiments/docs/AUDIT-IDEAS-7-12-VS-UPSTREAM-AUG05.md` **同时提交于两分支**(s4 `d440e8b` / 本分支 `6063052`),当前**逐字节一致**(`git diff` 空 → 合并无冲突)。风险不在现在而在**双主进化**:任一侧改动即分叉,且本分支 VERIFIED 文档已对原审计 §4.2 做了修正(两层裁决),"原文两分支同文 + 修正只在一支"的割裂已经发生。→ **已执行分开(Aug-05 深夜,用户令):s4=canonical,本分支移除重复副本(`git rm`,历史见 6063052),两分支共享文件数归零;后续对原审计的任何修订只在 s4 做。**
 
 另:`experiments/analysis/novelty/` 存在**两代同字母脚本**(doc-12 批 `o_prefix_voting/p_ratchet_violation/q_budget_censoring/r_effective_n/s_effective_votes` vs batch-2 `o_decorrelation_headroom/p_prefix_vote/q_cache_design/r_marginal_retention/s_budget_reallocation`)。RUN-LOG:2899 已自 flag"引用时写文件全名勿混"。s4 侧内务,本分支不代办。
 
@@ -59,7 +59,7 @@ T1 K=8 状态(RUN-LOG:2875):解冻已达但**仍待发车令**;prefix-vote go/no
 ## 6. 问题清单与待用户裁决
 
 **P1(已修)** counterfactual 判词冲突 → 两层裁决落 VERIFIED ERRATUM;doc-11 L122 幸存。
-**P2(待裁 A)** 原审计文档双落两分支:指定 canonical 侧。建议:**s4 为 canonical**(主仓+代码在侧),本分支副本冻结为快照;后续判词修正走 canonical。
+**P2(已执行)** 原审计文档双落两分支 → 用户令"分开"后执行:**s4 为 canonical**,本分支重复副本已移除(历史见 6063052),两分支共享文件数=0;后续判词修正只走 canonical。
 **P3(s4 内务)** 两代 o–s 同字母脚本:建议子目录或前缀重命名;引用全名(RUN-LOG:2899 已 flag)。
 **P4(待裁 B,核心)** 归属规则缺失:⑦–⑫ 诊断=问题(用户已裁,fix 线),但六条修复全部超论文(§4 矩阵)→ 建议明文规则:**诊断+证据基线+论文欠规格必补件规格(⑩、cluster 定义)= audit 线;超论文增益机制(racing/ALORS/NCL/regret/vote)与全部代码 = novelty 线(s4);每条目在对方分支只留一行指针;判词唯一权威位置 = 首发文档,他文引用不复写。** 否则 ⑧↔s、⑫↔o、⑦↔m_cluster 三对将重复立项。
 **P5(口径)** §5 五条,引用前必改(尤其 CH3/doc-11 分歧表)。

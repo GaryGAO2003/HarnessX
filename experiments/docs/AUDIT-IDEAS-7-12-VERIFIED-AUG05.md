@@ -1,6 +1,6 @@
 # 亲验记录:改进 ideas ⑦–⑫ 审计核验(Aug-05 2026 晚)
 
-**性质**:对 `AUDIT-IDEAS-7-12-VS-UPSTREAM-AUG05.md`(下称"原审计",同批落盘本分支)§2/§4.2 全部 🟡 项的主循环亲验记录。**结论:六轴判定与 doc-11 拟改判词全部坐实,file:line 逐一精确命中,🟡 全部清零升 🟢。**
+**性质**:对 `AUDIT-IDEAS-7-12-VS-UPSTREAM-AUG05.md`(下称"原审计";**canonical=fix/novelty-s4 @d440e8b 同路径**——本分支曾同批落盘,Aug-05 深夜执行分开原则后移除重复副本,历史见 6063052)§2/§4.2 全部 🟡 项的主循环亲验记录。**结论:六轴判定与 doc-11 拟改判词全部坐实,file:line 逐一精确命中,🟡 全部清零升 🟢。**
 **方法**:主循环直跑 `git show` / `git grep`(对象库读取,ref 锁定,无摘要器中介——manifest 两次反转教训的合规执行);另一 session 在飞的工作树未触碰。
 **定性(用户裁定 Aug-05)**:⑦–⑫ 严格来讲是**问题**(缺陷诊断),不是 novelty——归 fix 线,本分支 `fix/audit-ideas-7-12` 即由此开。
 **ref 锚**:upstream 主审 `feat/aegis-experiment@90f5d2d`(tip 未动 = 原审计后官方零新提交);`upstream/main@bf5f199`(Jul-29,最新);我方 `origin/main@a533b07`(Aug-05 19:07)。上游共 10 分支 = 4 代码分支(main + 3×AEGIS)+ 6 网页分支;原审计"全 4 分支"口径 = 4 代码分支,无误。upstream/main 有 recipe evolvers(gaia/tau2/tb2/slime/verl)但**无 aegis 包**。
@@ -43,7 +43,7 @@
 
 - `experiments/variant_pool/` 全套在 main ✅(pool/router/target/gate/counterfactual_gate/reputation/manifest/ledger…24 文件);
 - ⑦–⑫ 对应机制我方代码**同样零实现** ✅(racing/SPRT/UCB/bandit/regret/ALORS 无一存在;grep 命中全为 "t**racing**" 假阳性)→ 六项仍是空地,原审计 §3 优先级(T1=⑧先离线+⑩;T2 条件=⑫双门+⑦;T3 配套=⑨bucket 级+⑪)立项前提有效;
-- `\bALORS\b` 全仓零命中 ✅ → 原审计头注「①–⑫ 清单 repo 未落盘」属实;**本分支落盘原审计 + 本记录即为该项修复**。
+- `\bALORS\b` 全仓零命中 ✅ → 原审计头注「①–⑫ 清单 repo 未落盘」属实;**该项已修复:原审计已落盘(canonical=fix/novelty-s4 @d440e8b),⑦–⑫ 亲验=本记录;①–⑥ 仍悬空**。
 
 ## 4. 三处偏差(不推翻任何判定,引用时注意)
 
@@ -55,7 +55,7 @@
 
 - [x] ~~`fix/novelty-s4` session:提交前恢复 RUN-LOG 16 行 + 撤稿标注~~(已闭:`d440e8b`,Aug-05 深夜核实);
 - [ ] 原审计 §1 解冻条件补一句口径(ab6eb27 所在分支);
-- [ ] **双落治理**:原审计文档现同时提交于 fix/novelty-s4(`d440e8b`)与本分支,当前逐字节一致(`git diff` 空,合并无冲突);须指定 canonical 侧防双主进化(待用户裁,详 BRANCH-OVERLAP 文档);
+- [x] ~~**双落治理**~~(已执行,Aug-05 深夜用户令"分开":s4=canonical,本分支移除重复副本,两分支共享文件数=0);
 - [ ] ⑧⑩(T1)进 CH4 臂/flag 实现时,以本记录为占位与证据基线(全部走默认关 flag,不动基线,兼容 routing-freeze 只读不变量——原审计 §4.1)。
 
 ---
