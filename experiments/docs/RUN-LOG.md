@@ -2766,7 +2766,7 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 **用户令**:「把能抄的抄了」「全抄官方的」→ 三批施工:
 - **批 1(已落地)**:web_fetch 挂死加固逐字节移植(M-44,⚠️改动物理落在 b65ca01 文档提交内——`git apply --3way` 暂存 + 定向提交连带,内容已验、历史不改,**新纪律=提交前必查 `git diff --cached`**)+ `--ship-efficacy-gate` 效力预检门(M-43,15fee8e)。变体池 1032 绿。
 - **批 2a(施工中)**:窗口回退旗标/机械 actionability/ALL_PASS+九类词表/IV-1 锚核验。
-- **批 3(施工中)**:counterfactual 门**修复版**移植=门+适配器(~60-120 行,落盘 session jsonl 判定 REPLAYABLE NOW)+零覆盖 fail-closed+阳性对照测试;前向 1 行修 `journal.py` episode_end 补 `final_output`。
+- **批 3(已落地,f15a2f8,M-45)**:counterfactual 门修复版=`event_replay.py` 适配器+`counterfactual_gate.py`(零覆盖 fail-closed/异常记账/strict)+阳性对照与真实落盘夹具测试(27/27 绿)+`journal.py` 1 行 episode_end 补 final_output;CLI 接线待批 2a 落地。
 - 批 2b 排队:隔离门 Windows 版(官方正则 POSIX-only,Windows 上静默失效——用户指出)/refuted 账本/attribution 点火/digester 工具不对称。
 
 **跨会话状态页**:https://claude.ai/code/artifact/49b484c6-2897-48c0-8d65-813e71bae8a1(地址稳定,随批次更新)。付费跑零启动。

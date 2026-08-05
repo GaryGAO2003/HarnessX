@@ -506,3 +506,15 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | 政策 | 修改 vendored 面,依据同 M-41(用户「robust 框架」令;独立分支隔离) |
 | 测试 | `test_web_fetch_browser_retry.py` 4 项(二进制/错误标记不落浏览器重试) |
 | 裁决层 | 用户令「全抄官方的」(Aug-05) |
+
+## M-45 counterfactual 重放门修复版移植(Aug-05 新增,f15a2f8;CLI 接线延后)
+
+| 项 | 内容 |
+|---|---|
+| 论文原设 | 无此门(论文只有 seesaw);官方 feat/aegis 有,但**本体为潜伏 no-op**——按 `kind`/`final_output` schema 分发,而全管线零生产者,该格式只存在于其测试夹具(`novelty/11` §5/§7.5) |
+| 我方做法(三层修复) | ①**契约补齐**:`event_replay.py` 把我方落盘 session jsonl(`raw_assistant/raw_tool/episode_end`)适配为 hook 可派发事件;`final_output` 注入三级优先(调用方覆盖 > 记录自带 > 流内最后一条助手 content);kind 格式直通兼容。②**门加固**:`counterfactual_gate.py` **零重放覆盖=失败**(官方 bug 类变成响亮报错;**空 processor 链不再等于"无回退"**——与官方 identity-OK 测试有意分歧);吞掉的异常记入 `swallowed_exceptions`,`strict=True` 时任何重放异常判门失败;事件为 frozen dataclass ⇒ 官方就地改写模型在我方会 `FrozenInstanceError`,改用 capture-yield(`dataclasses.replace`)惯例,dispatch 走各 processor 真实 `_DISPATCH` 表。③**阳性对照**:种植 `final_output`/`exit_reason` 回归必须被抓;适配器对**逐字节拷贝的真实落盘 session 文件**(`cmp` 验证,33075B/30 记录,来源注 PROVENANCE.md)端到端测试——不许只测手搓夹具(官方死因) |
+| journal +1 行 | `episode_end` 补 `final_output`(写入时本就在手)。附加性遥测字段、默认开;**非** meta 观察通道(meta 读 `.md` frontmatter,不读 session jsonl),不构成臂污染 |
+| 保真边界(须并报) | `thinking`/`usage`/`content_blocks`/逐步 token 未持久化 ⇒ 读这些字段的 processor 重放退化或抛错(被记账);`tool_results/` sidecar 大结果不回填(replay 见空串);跨 run-id 段序按文件 mtime 重建 |
+| 接线(延后) | 旗标 `--counterfactual-gate`(默认关)+ `_counterfactual_gate_provenance`,调用点=预 ship 与 seesaw 并列;待批 2a 落地后接(`run_variant_pool.py` 施工权归其) |
+| 测试 | 新三组 **27/27 绿**(阳性×2/中性/零覆盖/官方格式兼容/异常记账/strict/就地改写安全/journal);全量套件待批 2a 落地统跑 |
+| 裁决层 | 用户令「修复一下,告诉我你的方法」(Aug-05) |
