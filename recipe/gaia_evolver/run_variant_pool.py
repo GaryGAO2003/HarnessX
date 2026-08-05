@@ -76,7 +76,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -129,6 +129,7 @@ from experiments.variant_pool.engine import (
     VariantPoolEngine,
 )
 from experiments.variant_pool.candidate_pipeline import (
+    AuditRecord,
     CandidateBrief,
     CandidatePipeline,
     CandidateSlot,
@@ -1635,6 +1636,131 @@ def _prepare_round_config(config_path: Path, journal: Any):
         processors=_resolve_artefact_paths(cfg.processors, config_path),
         tool_registry=_resolve_tool_targets(cfg.tool_registry, config_path),
     )
+
+
+def _ship_efficacy_reason(candidate: Any, parent_config_path: "Path | None") -> "str | None":
+    """Return why ``candidate`` cannot take runtime effect, or ``None`` if it can.
+
+    A deterministic, read-only pre-flight -- no rollouts, no LLM, no network --
+    for the ``--ship-efficacy-gate`` path on the observation-channel branch
+    (§7.30), reusing the §7.21-7.23 fail-closed delivery-path checks as a
+    blocking gate. Run s1k8b103 shipped seven edits, five of which were runtime
+    no-ops (``file://`` targets silently
+    dropped; empty prompt templates), yet each passed every gate stage and
+    consumed a full candidate-evaluation batch. This function names the four
+    ways an edit turns out to be a no-op, in the order the real run would hit
+    them, and returns an ``efficacy:``-prefixed reason on the first failure:
+
+    1. The config does not load / canonicalize.
+    2. A declared processor or custom tool does not instantiate. Reuses the
+       recipe's own fail-closed prep path -- :func:`_resolve_artefact_paths` and
+       :func:`_resolve_tool_targets`, i.e. exactly what
+       :func:`_prepare_round_config` runs before every rollout -- which raises on
+       the ``file://`` targets the vendored loader would otherwise drop silently
+       (M-41 made that drop loud; here it is blocking).
+    3. The system-prompt template resolves to a missing or empty file. Step 2
+       already rejects a *missing* ``template_path``; this additionally rejects
+       one that resolves to an empty file, which the loader would render as a
+       blank system prompt (``_normalise_artefact_node`` checks ``is_file`` but
+       not emptiness).
+    4. The manifest declares a change but the runtime surface is identical to the
+       parent's (the ShipNotLanded analog). Compares candidate against parent on
+       the runtime-relevant surface via
+       :func:`~harnessx.meta_harness.agent.compute_changeset` -- rendered template
+       content hash, instantiated processor classes + kwargs, and tool registry
+       entries -- whose empty diff is exactly a runtime-identical config. Skipped
+       when the comparison cannot be made, so a real change is never false-rejected.
+
+    ``parent_config_path`` is the target variant's current config (check 4 only).
+    """
+    from harnessx.core.builder import _resolve_target_path
+    from harnessx.core.harness import HarnessConfig
+    from harnessx.meta_harness.agent import _collect_template_paths, compute_changeset
+
+    config_path = Path(candidate.config_path)
+
+    # 1. loads + canonicalizes
+    try:
+        cfg = HarnessConfig.from_yaml_file(config_path).canonicalize()
+    except Exception as exc:  # noqa: BLE001 - any load/parse failure is a runtime no-op
+        return f"efficacy: config {config_path} does not load ({type(exc).__name__}: {exc})"
+
+    # 2. every declared component instantiates (the real prep path, made blocking)
+    try:
+        _resolve_artefact_paths(cfg.processors, config_path)
+        _resolve_tool_targets(cfg.tool_registry, config_path)
+    except Exception as exc:  # noqa: BLE001 - fail-closed exactly as _prepare_round_config does
+        return f"efficacy: declared component does not instantiate ({type(exc).__name__}: {exc})"
+
+    # 3. system prompt resolves non-empty
+    for raw in sorted(_collect_template_paths(cfg)):
+        resolved = Path(_resolve_target_path(str(raw)))
+        try:
+            empty = (not resolved.is_file()) or (not resolved.read_text(encoding="utf-8").strip())
+        except OSError as exc:  # noqa: BLE001 - unreadable is as fatal as missing
+            return f"efficacy: system prompt template {raw!r} is unreadable ({type(exc).__name__}: {exc})"
+        if empty:
+            return (
+                f"efficacy: system prompt template {raw!r} resolves to a missing or "
+                f"empty file ({resolved})"
+            )
+
+    # 4. change actually lands (ShipNotLanded analog)
+    buckets = [str(b) for b in (getattr(getattr(candidate, "manifest", None), "bucket", ()) or ())]
+    if buckets and parent_config_path is not None and Path(parent_config_path).is_file():
+        try:
+            parent_cfg = HarnessConfig.from_yaml_file(Path(parent_config_path)).canonicalize()
+            diff = compute_changeset(parent_cfg, cfg)
+        except Exception:  # noqa: BLE001 - if we cannot compare, do not false-reject
+            diff = None
+        if diff is not None and not diff:
+            return f"efficacy: declared {buckets} but runtime surface identical to parent"
+
+    return None
+
+
+def _apply_ship_efficacy_gate(
+    ranked_for_gate: "Sequence[CandidateArtifact]",
+    audit: "Sequence[AuditRecord]",
+    parent_config_path: "Path | None",
+    *,
+    enabled: bool,
+) -> "tuple[tuple[CandidateArtifact, ...], tuple[AuditRecord, ...]]":
+    """Pre-flight the gate queue for ``--ship-efficacy-gate``.
+
+    Returns the ``(ranked_for_gate, audit)`` pair to carry forward. When
+    ``enabled`` is ``False`` the inputs are returned unchanged and none of the
+    read-only checks in :func:`_ship_efficacy_reason` run -- so the flag off
+    leaves every candidate decision and artifact byte-identical to today.
+
+    When enabled, each candidate that fails a check is dropped from the queue
+    before the engine spends a candidate-evaluation batch on it, and an
+    ``efficacy`` :class:`AuditRecord` with ``disposition="rejected"`` is appended.
+    That record flows through the existing accounting with no new artifact file:
+    :meth:`VariantPoolRecipe._persist_pipeline_audit` mirrors every rejected
+    record to a :class:`RejectedCandidate` in the evidence store, and
+    :meth:`VariantPoolRecipe._candidate_accounting` counts it under
+    ``producer_or_pipeline_rejected`` / ``skipped``.
+    """
+    if not enabled:
+        return tuple(ranked_for_gate), tuple(audit)
+
+    kept: list[CandidateArtifact] = []
+    rejections: list[AuditRecord] = []
+    for candidate in ranked_for_gate:
+        reason = _ship_efficacy_reason(candidate, parent_config_path)
+        if reason is None:
+            kept.append(candidate)
+            continue
+        rejections.append(
+            AuditRecord(
+                phase="efficacy",
+                disposition="rejected",
+                reason=reason,
+                candidate_id=candidate.candidate_id,
+            )
+        )
+    return tuple(kept), tuple(audit) + tuple(rejections)
 
 
 def _make_variant_meta_agent(template: Any, journal_path: Path) -> Any:
@@ -4726,6 +4852,24 @@ class VariantPoolRecipe:
             ),
         )
         pipeline_result = await pipeline.run(context)
+        # --ship-efficacy-gate (default OFF): drop candidates that cannot take
+        # runtime effect -- dead file:// processor/tool targets, an empty prompt
+        # template, or a runtime surface identical to the parent despite a
+        # declared change -- before the engine spends a candidate-evaluation
+        # batch on them. Off, the queue and audit are returned unchanged and
+        # decisions/artifacts stay byte-identical; on, a dropped candidate is
+        # recorded as an ``efficacy`` rejection that the existing pipeline-audit
+        # accounting mirrors to evidence and counts as producer_or_pipeline_rejected.
+        _eff_ranked, _eff_audit = _apply_ship_efficacy_gate(
+            pipeline_result.ranked_for_gate,
+            pipeline_result.audit,
+            Path(variant.config_path),
+            enabled=bool(getattr(self.args, "ship_efficacy_gate", False)),
+        )
+        if _eff_audit != pipeline_result.audit:
+            pipeline_result = replace(
+                pipeline_result, ranked_for_gate=_eff_ranked, audit=_eff_audit
+            )
         self._pipeline_results[vid] = pipeline_result
         self._persist_pipeline_audit(vid, round_idx, pipeline_result)
         for candidate in pipeline_result.considered_candidates:
@@ -6376,6 +6520,28 @@ def _epsilon_provenance(epsilon: float) -> "str | None":
     )
 
 
+def _ship_efficacy_provenance(args: Any) -> "str | None":
+    """Byte-safe lock record for ``--ship-efficacy-gate``; ``None`` when off."""
+    if not bool(getattr(args, "ship_efficacy_gate", False)):
+        return None
+    return (
+        "ship_efficacy_gate=on ENABLED (OURS): each candidate is pre-flighted "
+        "read-only after the Evolver writes its config and before any "
+        "candidate-evaluation rollout is spent -- the config must load and "
+        "canonicalize, every declared processor and custom tool must instantiate "
+        "through the same runtime path the real run uses (M-41 made that path "
+        "loud but non-fatal; this gate makes it blocking), the system-prompt "
+        "template must resolve to a non-empty file, and the candidate's runtime "
+        "surface must actually differ from its parent when the manifest declares "
+        "a change. Off, such a candidate is only logged and still consumes a full "
+        "evaluation batch before it can ship a runtime no-op (s1k8b103 shipped 7 "
+        "edits, 5 of them runtime no-ops that passed every gate stage). On, it is "
+        "rejected before evaluation with an 'efficacy:' reason, which changes "
+        "which candidates apply/fork/reject and which evaluation batches are "
+        "spent, so it is not comparable byte-for-byte with an 'off' run"
+    )
+
+
 def _regression_baseline_provenance(mode: str) -> "str | None":
     """Byte-safe lock record for ``--regression-baseline`` (M-23).
 
@@ -6555,6 +6721,7 @@ def _build_experiment_lock(
         _retarget_after_freeze_provenance(bool(getattr(args, "retarget_after_freeze", False))),
         _record_gate_complement_provenance(bool(getattr(args, "record_gate_complement", False))),
         _traj_failure_signals_provenance(args),
+        _ship_efficacy_provenance(args),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -7073,6 +7240,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "a non-random tie-break); otherwise the preview would draw from the RNG "
             "and change the real freeze, and startup fails loudly instead. The paper "
             "does not define target selection (M-16), so both orderings are OURS."
+        ),
+    )
+    parser.add_argument(
+        "--ship-efficacy-gate",
+        action="store_true",
+        help=(
+            "Pre-flight each candidate config read-only after the Evolver writes "
+            "it and before any candidate-evaluation rollout is spent, and reject "
+            "candidates that cannot take runtime effect. Default off, which keeps "
+            "every candidate decision and the lock byte-identical -- a candidate "
+            "whose processor/tool targets silently drop or whose prompt template "
+            "is empty is only logged (M-41), still burns a full evaluation batch, "
+            "and can ship as a runtime no-op (s1k8b103 shipped 7 edits, 5 of them "
+            "no-ops that passed every gate stage). On, four read-only checks run "
+            "per candidate: the config loads and canonicalizes; every declared "
+            "processor and custom tool instantiates through the same runtime path "
+            "the real run uses (M-41's loud-but-non-fatal drop becomes blocking); "
+            "the system-prompt template resolves to a non-empty file; and the "
+            "candidate's runtime surface (resolved template hash, instantiated "
+            "processor classes + kwargs, tool registry) differs from its parent "
+            "when the manifest declares a change (the ShipNotLanded analog). A "
+            "failing candidate is rejected before evaluation with an 'efficacy:' "
+            "reason recorded in the existing candidate accounting. No rollouts, "
+            "no LLM calls."
         ),
     )
     parser.add_argument(
