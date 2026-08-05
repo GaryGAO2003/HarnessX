@@ -188,6 +188,7 @@ from experiments.variant_pool.manifest import (
 )
 from experiments.variant_pool.pool import VariantPool
 from experiments.variant_pool.reporting import CandidateTaskResult, RunReport, TaskResult
+from experiments.variant_pool.structure_invariants import validate_candidate_structure
 from experiments.variant_pool.resume import (
     annotate_resume_provenance,
     apply_resume_state,
@@ -1793,6 +1794,115 @@ def _apply_ship_efficacy_gate(
 
 
 # ---------------------------------------------------------------------------
+# Batch 4c Item 1 — structure invariants (--structure-invariants)
+# ---------------------------------------------------------------------------
+# Port of the net-new IV-3(body)/IV-8(dispatch)/IV-9/IV-11/IV-12 invariants from
+# upstream/feat/aegis:harnessx/aegis/gates/structure.py — the FIRST (cheap-first)
+# gate in the official chain. Wired as the first pre-flight check in
+# _run_paper_candidate_pipeline. The per-invariant logic + the IV mapping live in
+# experiments/variant_pool/structure_invariants.py; here is only the queue wiring
+# (mirroring _apply_ship_efficacy_gate) plus the manifest-body sourcing.
+
+
+def _manifest_body_after_front_matter(text: str) -> str:
+    """Return the prose body that follows a manifest's ``---`` front matter.
+
+    The on-disk manifest form is ``---\\n<yaml>\\n---\\n<prose>`` (the paper
+    contract; see ChangeManifest.from_yaml / test_manifest.test_front_matter_form).
+    :meth:`~experiments.variant_pool.manifest._strip_front_matter` returns the
+    YAML block; this returns the complement — everything after the closing
+    ``---`` — which is the ``## Failure Evidence`` / ``## Root Cause`` prose the
+    structure gate's body invariants read. Returns ``""`` when the text carries no
+    front matter (a bare-YAML repo-journal manifest has no prose body).
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith("---"):
+        return ""
+    lines = stripped.splitlines()
+    for idx, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "\n".join(lines[idx + 1:]).strip()
+    return ""  # unterminated front matter: no prose body
+
+
+def _candidate_manifest_body(candidate: "CandidateArtifact") -> str:
+    """The manifest-body prose for ``candidate``, or ``""`` when none is retained.
+
+    Sourced from the same file the pipeline parsed the manifest out of
+    (``<config_dir>/_meta_scratch/manifest.yaml``, see
+    :meth:`VariantPoolRecipe._produce_paper_candidate`). Paper-manifest candidates
+    carry front-matter + prose there; repo-journal candidates adapted from a
+    journal entry have no manifest file (hence no body carrier), and the
+    body-dependent invariants degrade to N/A (documented in
+    structure_invariants.py).
+    """
+    manifest_file = Path(candidate.config_path).parent / "_meta_scratch" / "manifest.yaml"
+    try:
+        text = manifest_file.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return _manifest_body_after_front_matter(text)
+
+
+def _apply_structure_invariants(
+    ranked_for_gate: "Sequence[CandidateArtifact]",
+    audit: "Sequence[AuditRecord]",
+    *,
+    strategy_concern_flagged: "set[str] | None",
+    prior_ships: "Mapping[str, Any] | None" = None,
+    current_round: "int | None" = None,
+    slot_type: str = "regular",
+    enabled: bool,
+) -> "tuple[tuple[CandidateArtifact, ...], tuple[AuditRecord, ...]]":
+    """Pre-flight the gate queue for ``--structure-invariants`` (the first check).
+
+    Returns the ``(ranked_for_gate, audit)`` pair to carry forward. When
+    ``enabled`` is ``False`` the inputs are returned unchanged — no file is read,
+    no check runs — so the flag off leaves every candidate decision and artifact
+    byte-identical to today.
+
+    When enabled, each candidate failing an invariant is dropped from the queue
+    before the engine spends a candidate-evaluation batch on it, and a
+    ``structure`` :class:`AuditRecord` with ``disposition="rejected"`` and reason
+    ``"structure: IV-<n> …"`` is appended — the same accounting path as the
+    efficacy/novelty gates (:meth:`VariantPoolRecipe._persist_pipeline_audit`
+    mirrors it to the evidence store; ``_candidate_accounting`` counts it under
+    ``producer_or_pipeline_rejected``). ``strategy_concern_flagged`` feeds IV-11;
+    ``prior_ships`` feeds IV-12 (``None`` in production — the official back-compat
+    path — since we thread no ship-outcomes ledger here). The M-49
+    ``_parse_digest_anchors`` validator is injected for the IV-3 body anchor check
+    so the exact same anchor grammar is reused.
+    """
+    if not enabled:
+        return tuple(ranked_for_gate), tuple(audit)
+
+    kept: list[CandidateArtifact] = []
+    rejections: list[AuditRecord] = []
+    for candidate in ranked_for_gate:
+        result = validate_candidate_structure(
+            candidate.manifest,
+            _candidate_manifest_body(candidate),
+            slot_type=slot_type,
+            strategy_concern_flagged=strategy_concern_flagged,
+            prior_ships=prior_ships,
+            current_round=current_round,
+            anchor_parser=_parse_digest_anchors,
+        )
+        if result.ok:
+            kept.append(candidate)
+            continue
+        rejections.append(
+            AuditRecord(
+                phase="structure",
+                disposition="rejected",
+                reason=f"structure: {result.reason}",
+                candidate_id=candidate.candidate_id,
+            )
+        )
+    return tuple(kept), tuple(audit) + tuple(rejections)
+
+
+# ---------------------------------------------------------------------------
 # Batch 2b Item 2 — refuted-signature ledger (--refuted-signature-gate)
 # ---------------------------------------------------------------------------
 # Port of upstream/feat/aegis:harnessx/aegis/{gates/novelty.py,data/signatures.py}.
@@ -2213,6 +2323,58 @@ def _planner_brief_with_reputation(
     if not reputation_md:
         return merged
     merged["bucket_reputation"] = reputation_md
+    return merged
+
+
+def _render_strategy_concern_relay(
+    concern: "dict[str, Any] | str | None",
+) -> "tuple[str, set[str]]":
+    """Render a prior-round Critic ``strategy_concern`` for relay + IV-11.
+
+    Returns ``(relay_md, flagged_buckets)``. ``concern`` is what the previous
+    round's LLM Critic emitted under ``--critic-portfolio-audit`` — the structured
+    ``{"bucket", "reason"}`` mapping, a bare string, or ``None``. The relay quotes
+    it verbatim under a labeled heading (the Planner/Evolver read it); the flagged
+    set is the concern's bucket(s), which :func:`_apply_structure_invariants` feeds
+    to IV-11. A bare-string concern has no structured bucket, so its flagged set is
+    empty and IV-11 no-ops (documented). ``("", set())`` when there is no concern.
+    """
+    if not concern:
+        return "", set()
+    flagged: set[str] = set()
+    if isinstance(concern, Mapping):
+        bucket = concern.get("bucket")
+        if isinstance(bucket, str) and bucket.strip():
+            flagged.add(bucket.strip())
+        elif isinstance(bucket, (list, tuple)):
+            flagged.update(str(b).strip() for b in bucket if str(b).strip())
+        reason = str(concern.get("reason", "") or "").strip()
+        body = f"bucket: {sorted(flagged) or '(unspecified)'}\nreason: {reason}"
+    else:
+        body = str(concern).strip()
+    relay = (
+        "The prior round's Critic raised a portfolio-level strategy_concern. "
+        "Treat it as a first-class signal for this round's direction:\n\n" + body
+    )
+    return relay, flagged
+
+
+def _planner_brief_with_strategy_concern(
+    brief: Mapping[str, Any],
+    strategy_concern_md: str,
+) -> dict[str, Any]:
+    """Surface the batch-4c Item 2 prior-round strategy_concern in the Evolver brief.
+
+    Mirrors :func:`_planner_brief_with_reputation`: the relay text is carried under
+    key ``strategy_concern`` and lifted into a top-of-brief labeled TASK.md section
+    by ``VariantPoolMetaAgent._render_candidate_contract``. Byte-stable when empty:
+    with no concern the result is exactly ``dict(brief)`` (no new key), so a default
+    run keeps its brief verbatim.
+    """
+    merged = dict(brief)
+    if not strategy_concern_md:
+        return merged
+    merged["strategy_concern"] = strategy_concern_md
     return merged
 
 
@@ -3881,6 +4043,10 @@ class _LLMPlanner:
     #: completion prompt when ``--bucket-reputation`` is on; "" (default) keeps
     #: the prompt byte-identical.
     reputation_md: str = ""
+    #: batch-4c Item 2 — the prior round's Critic strategy_concern relayed into
+    #: the completion prompt when ``--critic-portfolio-audit`` is on; "" (default,
+    #: or no prior concern) keeps the prompt byte-identical.
+    strategy_concern_md: str = ""
 
     async def plan(
         self,
@@ -4008,6 +4174,14 @@ class _LLMPlanner:
             self.prompt,
             f"\n\nROUND EVIDENCE:\n{summary}",
         ]
+        # batch-4c Item 2: relay the prior Critic strategy_concern at the TOP
+        # (the official Planner surfaces it before anything else, planner.md
+        # L38-45). Byte-identical when off / no prior concern.
+        if self.strategy_concern_md:
+            parts.append(
+                "\n\n## Prior Critic strategy_concern (surface at the top of your landscape)\n\n"
+                + self.strategy_concern_md
+            )
         # batch-4a Item 3: inject the regressions watchlist (byte-identical when off).
         if self.regressions_md:
             parts.append(
@@ -4335,6 +4509,16 @@ class _LLMCritic:
     #: 0 (default) ⇒ no ask-more contract in the prompt and zero extra
     #: completions, so the review is byte-identical to today.
     ask_more_rounds: int = 0
+    #: batch-4c Item 2 (--critic-portfolio-audit) — when True, append the official
+    #: Critic Part-2 portfolio-audit contract to the prompt and parse the
+    #: ``strategy_concern`` ({bucket, reason} or str) + ``decision_type: no_op``
+    #: fields. False (default) ⇒ no Part-2, no field parsed (byte-identical prompt
+    #: + review).
+    portfolio_audit: bool = False
+    #: batch-4c Item 2 — the recipe-owned sink the parsed structured
+    #: ``strategy_concern`` is written into (the revision-sink pattern; keeps
+    #: critic.py untouched). ``None`` ⇒ nothing recorded.
+    concern_sink: dict[str, Any] | None = None
 
     async def review(
         self,
@@ -4512,6 +4696,39 @@ class _LLMCritic:
                 "\n\n## Bucket reputation & ship scoreboard (read before reviewing)\n\n"
                 + self.reputation_md
             )
+        # batch-4c Item 2: the official Critic Part-2 portfolio-audit contract
+        # (critic.md L49-79). Gated on --critic-portfolio-audit, so a default
+        # review carries none of it and stays byte-identical. The audit reads the
+        # scoreboard (the reputation table injected above when --bucket-reputation
+        # is on; the dependency is stated honestly when it is not) and the
+        # regressions watchlist (injected above when --regressions-watchlist is on).
+        if self.portfolio_audit:
+            _scoreboard_note = (
+                "the 'Bucket reputation & ship scoreboard' table above"
+                if self.reputation_md
+                else "the scoreboard is unavailable (run with --bucket-reputation "
+                "to populate it); audit from the round evidence you do have"
+            )
+            _regressions_note = (
+                "the 'Regressions watchlist' section above"
+                if self.regressions_md
+                else "no regressions watchlist was injected this round"
+            )
+            parts.append(
+                "\n\n## Part 2 — Portfolio audit (required)\n\n"
+                "Even when every individual candidate is acceptable, step back and "
+                "look at the pattern across rounds. Using "
+                f"{_scoreboard_note} and {_regressions_note}, flag a portfolio-level "
+                "problem when: (a) a bucket has >=3 ships at <40% hit rate and the "
+                "Evolver shipped in it again; (b) an untouched bucket matches a "
+                "failure cluster; or (c) a regressed task is unaddressed. When you "
+                "find one, add a top-level JSON field "
+                '`"strategy_concern": {"bucket": "<bucket>", "reason": "<one concrete '
+                'paragraph naming the bucket, round range, hit rate, failing tasks>"}` '
+                "(a bare string is also accepted). Leave it out when there is none. "
+                "If the round should ship NOTHING because a regression is unaddressed, "
+                'add `"decision_type": "no_op"` and the round is rejected wholesale.'
+            )
         # batch-4b Item 2: the ask-more contract + any answers gathered so far.
         # Both are gated (ask_more_rounds>0 / non-empty qa_sections), so a default
         # N=0 review carries neither and stays byte-identical.
@@ -4575,6 +4792,23 @@ class _LLMCritic:
             if str(concern).strip()
         ]
 
+        # -- batch-4c Item 2: Part-2 portfolio-audit outputs -----------------
+        # Gated on portfolio_audit, so a default review parses neither field and
+        # the sink / notes / no_op condition below stay byte-identical.
+        portfolio_no_op_reason: str | None = None
+        if self.portfolio_audit:
+            concern = self._parse_strategy_concern(obj.get("strategy_concern"))
+            if concern is not None:
+                if self.concern_sink is not None:
+                    # Recorded even on a no_op/veto round: the concern is relayed
+                    # to next round regardless of what this round ships.
+                    self.concern_sink["strategy_concern"] = concern
+                notes.append(f"strategy_concern: {concern}")
+            if str(obj.get("decision_type", "")).strip() == "no_op":
+                portfolio_no_op_reason = (
+                    "critic_portfolio_audit: decision_type=no_op — round ships nothing"
+                )
+
         # -- rejections: known candidate ids only ----------------------------
         rejections: list[CriticRejection] = []
         rejected_ids: set[str] = set()
@@ -4622,7 +4856,12 @@ class _LLMCritic:
             for reason in (obj.get("no_op_reasons") or [])
             if str(reason).strip()
         )
-        if bool(obj.get("no_op")):
+        # batch-4c Item 2: a Part-2 ``decision_type: no_op`` rejects the whole round,
+        # reusing the existing no_op representation (no new engine state) so the
+        # pipeline ships nothing that round.
+        if portfolio_no_op_reason is not None:
+            no_op_reasons = no_op_reasons + (portfolio_no_op_reason,)
+        if bool(obj.get("no_op")) or portfolio_no_op_reason is not None:
             # A no-op review cannot also rank candidates (CriticReview guard).
             return CriticReview(
                 rejections=tuple(rejections),
@@ -4695,6 +4934,28 @@ class _LLMCritic:
             revision_requests=tuple(revision_requests),
             strategy_concerns=tuple(notes),
         )
+
+    @staticmethod
+    def _parse_strategy_concern(value: Any) -> "dict[str, str] | str | None":
+        """Parse the Part-2 ``strategy_concern`` field (batch-4c Item 2).
+
+        Accepts the structured ``{"bucket", "reason"}`` mapping (kept as a dict of
+        only the non-empty keys) or a bare non-empty string. Returns ``None`` for
+        anything empty/absent so the caller records nothing — the byte-identical
+        path when the Critic emits no concern.
+        """
+        if isinstance(value, Mapping):
+            bucket = str(value.get("bucket", "") or "").strip()
+            reason = str(value.get("reason", "") or "").strip()
+            out: dict[str, str] = {}
+            if bucket:
+                out["bucket"] = bucket
+            if reason:
+                out["reason"] = reason
+            return out or None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
 
     @staticmethod
     def _surface(candidate: CandidateArtifact) -> tuple[str, ...]:
@@ -5251,6 +5512,27 @@ class VariantPoolRecipe:
         # --meta-compaction: override the Evolver meta-harness compaction to the
         # official AEGIS Evolver tuning (wired via extra_harness_kws below).
         self.meta_compaction = bool(getattr(args, "meta_compaction", False))
+        # batch-4c Items 1/2 — both default OFF, byte-identical.
+        # --structure-invariants: port the official IV-3(body)/IV-9/IV-11/IV-12
+        # structure gate as the first candidate pre-flight check.
+        self.structure_invariants = bool(getattr(args, "structure_invariants", False))
+        # --critic-portfolio-audit: the official Critic Part-2 portfolio audit +
+        # the strategy_concern relay loop (LLM Critic only).
+        self.critic_portfolio_audit = bool(getattr(args, "critic_portfolio_audit", False))
+        # IV-11 input: buckets the PRIOR round's Critic flagged as strategy_concern,
+        # rendered per round below from the carry. Empty ⇒ IV-11 is a no-op.
+        self._round_flagged_buckets: set[str] = set()
+        # The most recent Critic strategy_concern ({bucket, reason} or str),
+        # carried across rounds so round r relays round r-1's concern. Written by
+        # the LLM Critic into ``_round_strategy_concern_sink`` and folded here at
+        # settlement. ``None`` when --critic-portfolio-audit is off or none emitted.
+        self._strategy_concern_carry: "dict[str, Any] | str | None" = None
+        # Per-round sink the LLM Critic writes its parsed strategy_concern into
+        # (reset each round; the revision-sink pattern). Read at settlement.
+        self._round_strategy_concern_sink: dict[str, Any] = {}
+        # Per-round rendered relay of the prior concern, injected into this round's
+        # Planner prompt + Evolver TASK.md brief. "" ⇒ no injection (byte-identical).
+        self._round_strategy_concern_md: str = ""
         self.record_gate_complement = bool(getattr(args, "record_gate_complement", False))
         self.retarget_after_freeze = bool(getattr(args, "retarget_after_freeze", False))
         if self.retarget_after_freeze:
@@ -5443,6 +5725,13 @@ class VariantPoolRecipe:
             # batch-4b Item 1: per-round rendered reputation table (rebuilt below
             # when --bucket-reputation is on; empty = no injection this round).
             self._round_reputation_md = ""
+            # batch-4c Item 2: per-round Critic strategy_concern sink (the LLM
+            # Critic writes here; read at settlement) + the prior-round relay text
+            # and IV-11 flagged-bucket set, both rendered below from the carry.
+            # All empty ⇒ no relay injection and IV-11 no-op (byte-identical).
+            self._round_strategy_concern_sink = {}
+            self._round_strategy_concern_md = ""
+            self._round_flagged_buckets = set()
 
             if self.candidate_mode == "paper" and round_idx == 0:
                 # R0 is the settled H0 measurement. It is neither a proposal nor
@@ -5474,6 +5763,15 @@ class VariantPoolRecipe:
                 # prompts + Evolver brief. Off = cache stays "" (no injection).
                 if self.bucket_reputation:
                     self._round_reputation_md = self._render_reputation_table()
+                # batch-4c Item 2: relay the PRIOR round's Critic strategy_concern
+                # into this round's Planner prompt + Evolver TASK.md brief, and
+                # derive the IV-11 flagged-bucket set for --structure-invariants.
+                # Off / no prior concern ⇒ "" + empty set (no injection, IV-11 no-op).
+                if self.critic_portfolio_audit:
+                    (
+                        self._round_strategy_concern_md,
+                        self._round_flagged_buckets,
+                    ) = _render_strategy_concern_relay(self._strategy_concern_carry)
                 result = self.engine.run_round(round_idx, set(all_ids))
                 self._reconcile(result)
             self._score_active_portfolio(result, round_idx, set(all_ids))
@@ -5797,6 +6095,9 @@ class VariantPoolRecipe:
             regressions_md=self._round_regressions_md,
             # batch-4b Item 1: "" when --bucket-reputation is off ⇒ byte-identical.
             reputation_md=self._round_reputation_md,
+            # batch-4c Item 2: "" when --critic-portfolio-audit is off / no prior
+            # concern ⇒ byte-identical.
+            strategy_concern_md=self._round_strategy_concern_md,
         )
 
     @property
@@ -5838,6 +6139,11 @@ class VariantPoolRecipe:
             reputation_md=self._round_reputation_md,
             # batch-4b Item 2: 0 when --critic-ask-more is unset ⇒ byte-identical.
             ask_more_rounds=self.critic_ask_more,
+            # batch-4c Item 2: the portfolio-audit Part-2 contract + the concern
+            # sink. Off ⇒ no Part-2 in the prompt, no field parsed, sink untouched
+            # (byte-identical prompt + review).
+            portfolio_audit=self.critic_portfolio_audit,
+            concern_sink=self._round_strategy_concern_sink,
         )
 
     @property
@@ -5946,6 +6252,20 @@ class VariantPoolRecipe:
             ),
         )
         pipeline_result = await pipeline.run(context)
+        # --structure-invariants (batch-4c Item 1, default OFF): the FIRST
+        # pre-flight check (cheap-first, matching the official chain). Drops a
+        # candidate that fails IV-3(body)/IV-9/IV-11/IV-12 before the engine spends
+        # a candidate-evaluation batch on it, recording a ``structure`` rejection
+        # through the same accounting as the efficacy gate. IV-11 consumes the
+        # prior round's persisted Critic strategy_concern (Item 2); off ⇒ queue and
+        # audit are byte-identical.
+        _eff_ranked, _eff_audit = _apply_structure_invariants(
+            pipeline_result.ranked_for_gate,
+            pipeline_result.audit,
+            strategy_concern_flagged=self._round_flagged_buckets,
+            current_round=round_idx,
+            enabled=bool(getattr(self.args, "structure_invariants", False)),
+        )
         # --ship-efficacy-gate (default OFF): drop candidates that cannot take
         # runtime effect -- dead file:// processor/tool targets, an empty prompt
         # template, or a runtime surface identical to the parent despite a
@@ -5955,8 +6275,8 @@ class VariantPoolRecipe:
         # recorded as an ``efficacy`` rejection that the existing pipeline-audit
         # accounting mirrors to evidence and counts as producer_or_pipeline_rejected.
         _eff_ranked, _eff_audit = _apply_ship_efficacy_gate(
-            pipeline_result.ranked_for_gate,
-            pipeline_result.audit,
+            _eff_ranked,
+            _eff_audit,
             Path(variant.config_path),
             enabled=bool(getattr(self.args, "ship_efficacy_gate", False)),
         )
@@ -6089,17 +6409,20 @@ class VariantPoolRecipe:
                 slot=slot,
                 manifest_mode=self.manifest_mode,
                 target_variant=context.target_variant,
-                planner_brief=_planner_brief_with_reputation(
-                    _planner_brief_with_watchlist(
-                        _planner_brief_with_revision(
-                            _planner_brief_with_regressions(
-                                asdict(brief), context.regressions
+                planner_brief=_planner_brief_with_strategy_concern(
+                    _planner_brief_with_reputation(
+                        _planner_brief_with_watchlist(
+                            _planner_brief_with_revision(
+                                _planner_brief_with_regressions(
+                                    asdict(brief), context.regressions
+                                ),
+                                revision,
                             ),
-                            revision,
+                            self._round_regressions_md,
                         ),
-                        self._round_regressions_md,
+                        self._round_reputation_md,
                     ),
-                    self._round_reputation_md,
+                    self._round_strategy_concern_md,
                 ),
                 base_evolve_kwargs=base_kwargs,
                 max_retries=self.evolve_retry,
@@ -7692,6 +8015,17 @@ class VariantPoolRecipe:
         if self.bucket_reputation:
             state["bucket_reputation"] = self._reputation.to_dict()
             state["ship_scoreboard"] = self._scoreboard.to_dict()
+        # batch-4c Item 2: persist this round's Critic strategy_concern (from the
+        # sink) and carry it forward so next round's Planner/Evolver relay it and
+        # IV-11 reads its bucket. Flag-gated + only when a concern was emitted, so
+        # a default run adds no field and stays byte-identical.
+        if self.critic_portfolio_audit:
+            emitted = self._round_strategy_concern_sink.get("strategy_concern")
+            if emitted:
+                state["strategy_concern"] = emitted
+            # Replace the carry each round (None clears it): round r relays only
+            # round r-1's concern, matching the official Planner relay.
+            self._strategy_concern_carry = emitted
         self.pool_states.append(state)
         round_dir = self.run_dir / f"R{round_idx}"
         round_dir.mkdir(parents=True, exist_ok=True)
@@ -8488,6 +8822,41 @@ def _meta_compaction_provenance(enabled: bool) -> "str | None":
     )
 
 
+def _structure_invariants_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--structure-invariants`` (batch-4c Item 1); off=None."""
+    if not enabled:
+        return None
+    return (
+        "structure_invariants=on ENABLED (batch-4c Item 1, IV-3(body)/IV-9/IV-11/IV-12 "
+        "structure gate ported from upstream/feat/aegis:harnessx/aegis/gates/structure.py): "
+        "the first candidate pre-flight check drops a candidate whose manifest body lacks a "
+        "## Failure Evidence section + anchor (IV-3), whose file_changes extensions mismatch "
+        "its bucket (IV-9), that ignores the prior Critic's strategy_concern without "
+        "justification (IV-11), or whose iterates_from is malformed (IV-12), recording a "
+        "'structure' rejection through the pipeline-audit accounting. The already-run "
+        "manifest completeness check (IV-3 keys, IV-8) is not duplicated. Dropping a "
+        "candidate before evaluation changes which candidates the gate stack sees, so a run "
+        "is not comparable byte-for-byte with an 'off' run"
+    )
+
+
+def _critic_portfolio_audit_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--critic-portfolio-audit`` (batch-4c Item 2); off=None."""
+    if not enabled:
+        return None
+    return (
+        "critic_portfolio_audit=on ENABLED (batch-4c Item 2, official Critic Part-2 + "
+        "strategy_concern loop from upstream/feat/aegis:harnessx/aegis/templates/critic.md "
+        "+ planner.md): the LLM Critic prompt gains a Part-2 portfolio-audit contract and "
+        "MAY emit a strategy_concern ({bucket, reason}) and a decision_type: no_op; the "
+        "concern is persisted in pool_state.json and relayed verbatim into the next round's "
+        "Planner prompt + Evolver TASK.md brief (and feeds --structure-invariants IV-11). A "
+        "no_op ships nothing that round. This changes the meta-agents' prompts and which "
+        "rounds ship, so a run is not comparable byte-for-byte with an 'off' run; the "
+        "deterministic gate and rollouts are unaffected"
+    )
+
+
 def _task_reasoning_effort(args: Any) -> str | None:
     """Effective reasoning effort for the task (inner) agent, or ``None`` to omit.
 
@@ -8648,6 +9017,10 @@ def _build_experiment_lock(
         _critic_ask_more_provenance(int(getattr(args, "critic_ask_more", 0) or 0)),
         _auto_revert_provenance(bool(getattr(args, "auto_revert", False))),
         _meta_compaction_provenance(bool(getattr(args, "meta_compaction", False))),
+        _structure_invariants_provenance(bool(getattr(args, "structure_invariants", False))),
+        _critic_portfolio_audit_provenance(
+            bool(getattr(args, "critic_portfolio_audit", False))
+        ),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -8955,6 +9328,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "tuning (token_threshold=300000, retention_window=4, eviction_fraction=0.90; "
             "harnessx/aegis/agents/evolver.py). Default off keeps the vendored defaults "
             "(the processor list is byte-identical)."
+        ),
+    )
+    parser.add_argument(
+        "--structure-invariants",
+        action="store_true",
+        help=(
+            "batch-4c Item 1: run the IV-3(body)/IV-9/IV-11/IV-12 structure gate as the "
+            "first candidate pre-flight check -- reject a candidate whose manifest body "
+            "lacks a ## Failure Evidence section + anchor (IV-3), whose file_changes "
+            "extensions mismatch its bucket (IV-9), that ignores the prior Critic's "
+            "strategy_concern without a '## Why flagged direction is infeasible' section "
+            "(IV-11), or whose iterates_from is malformed (IV-12). Ported from "
+            "harnessx/aegis/gates/structure.py; the already-run manifest completeness "
+            "check (IV-3 keys, IV-8) is not duplicated. Default off drops nothing "
+            "(byte-identical)."
+        ),
+    )
+    parser.add_argument(
+        "--critic-portfolio-audit",
+        action="store_true",
+        help=(
+            "batch-4c Item 2: extend the LLM Critic with the official Part-2 portfolio "
+            "audit -- it MAY emit a strategy_concern ({bucket, reason}) and a "
+            "decision_type: no_op. The concern is persisted in pool_state.json and relayed "
+            "verbatim into the next round's Planner prompt + Evolver TASK.md brief (and "
+            "feeds --structure-invariants IV-11); a no_op ships nothing that round. Ported "
+            "from harnessx/aegis/templates/critic.md Part 2 + planner.md. Default off keeps "
+            "the Critic prompt byte-identical and adds no pool_state field."
         ),
     )
     parser.add_argument("--evolve-cost", type=float, default=EVOLVE_COST_CAP_USD)

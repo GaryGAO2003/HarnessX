@@ -114,11 +114,15 @@ class VariantPoolMetaAgent(MetaAgent):
         watchlist_md = str(planner_brief.get("regressions_watchlist", "") or "")
         # batch-4b Item 1: lift the bucket-reputation table out the same way.
         reputation_md = str(planner_brief.get("bucket_reputation", "") or "")
+        # batch-4c Item 2: lift the relayed prior-round Critic strategy_concern.
+        strategy_concern_md = str(planner_brief.get("strategy_concern", "") or "")
         _lift_keys = set()
         if watchlist_md:
             _lift_keys.add("regressions_watchlist")
         if reputation_md:
             _lift_keys.add("bucket_reputation")
+        if strategy_concern_md:
+            _lift_keys.add("strategy_concern")
         brief_for_json = (
             {k: v for k, v in planner_brief.items() if k not in _lift_keys}
             if _lift_keys
@@ -139,6 +143,14 @@ class VariantPoolMetaAgent(MetaAgent):
             f"- `target_variant`: `{target_variant}` (use exactly this value)\n"
             f"- `planner_contract_json`: `{contract_json}`\n\n"
         )
+        if strategy_concern_md:
+            # Relayed at the TOP (the official Planner relays the prior Critic's
+            # strategy_concern before anything else, planner.md L38-45).
+            identity_block += (
+                "### Prior Critic strategy_concern (read first)\n\n"
+                + strategy_concern_md
+                + "\n\n"
+            )
         if watchlist_md:
             identity_block += (
                 "### Regressions watchlist (read before proposing)\n\n"
