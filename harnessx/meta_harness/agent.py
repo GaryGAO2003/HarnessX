@@ -121,6 +121,15 @@ def build_meta_agent_harness_config(
     read_scope_blocked_roots: "tuple[str | Path, ...] | None" = None,
     read_scope_allowed_files: "tuple[str | Path, ...] | None" = None,
     read_scope_allowed_roots: "tuple[str | Path, ...] | None" = None,
+    # batch-4b Item 4 (--meta-compaction): the Evolver meta-harness always carries
+    # a CompactionProcessor; these expose its three numeric knobs. The defaults are
+    # the vendored values (byte-identical when a caller passes nothing), overridden
+    # to the official AEGIS Evolver tuning (300000 / 4 / 0.90 — see
+    # upstream/feat/aegis:harnessx/aegis/agents/evolver.py ~L211-238) when the flag
+    # is on. Param names are the real CompactionProcessor kwargs (no mismatch).
+    compaction_token_threshold: int = 200000,
+    compaction_retention_window: int = 4,
+    compaction_eviction_fraction: float = 0.95,
 ) -> "HarnessConfig":
     """Assemble the meta-agent's HarnessConfig.
 
@@ -252,9 +261,9 @@ def build_meta_agent_harness_config(
 
     cfg = builder.add(
         CompactionProcessor(
-            token_threshold=200000,
-            retention_window=4,
-            eviction_fraction=0.95,
+            token_threshold=compaction_token_threshold,
+            retention_window=compaction_retention_window,
+            eviction_fraction=compaction_eviction_fraction,
             summarize_prompt_template=(
                 "You are compacting older conversation context for a meta-agent that reads\n"
                 "task trajectories and evolves a HarnessConfig (processor pipeline, prompts,\n"

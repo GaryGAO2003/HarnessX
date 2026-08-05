@@ -2197,6 +2197,25 @@ def _planner_brief_with_watchlist(
     return merged
 
 
+def _planner_brief_with_reputation(
+    brief: Mapping[str, Any],
+    reputation_md: str,
+) -> dict[str, Any]:
+    """Surface the batch-4b Item 1 bucket-reputation table in the Evolver brief.
+
+    Mirrors :func:`_planner_brief_with_watchlist`: the rendered table is carried
+    under key ``bucket_reputation`` and lifted into a clearly-labeled TASK.md
+    section by ``VariantPoolMetaAgent._render_candidate_contract``. Byte-stable
+    when empty: with no table the result is exactly ``dict(brief)`` (no new key),
+    so a default run keeps its brief verbatim.
+    """
+    merged = dict(brief)
+    if not reputation_md:
+        return merged
+    merged["bucket_reputation"] = reputation_md
+    return merged
+
+
 #: A revision slot id (``C-R1-01-revision-01``, allocated by
 #: :meth:`experiments.variant_pool.candidate_pipeline.IsolatedEvolverAdapter.revise`).
 #: Kept as an OWN recipe constant rather than reaching into candidate_pipeline's
@@ -3858,6 +3877,10 @@ class _LLMPlanner:
     #: completion prompt when ``--regressions-watchlist`` is on; "" (default)
     #: keeps the prompt byte-identical.
     regressions_md: str = ""
+    #: batch-4b Item 1 — rendered bucket-reputation table injected into the
+    #: completion prompt when ``--bucket-reputation`` is on; "" (default) keeps
+    #: the prompt byte-identical.
+    reputation_md: str = ""
 
     async def plan(
         self,
@@ -3990,6 +4013,12 @@ class _LLMPlanner:
             parts.append(
                 "\n\n## Regressions watchlist (read before planning)\n\n"
                 + self.regressions_md
+            )
+        # batch-4b Item 1: inject the bucket-reputation table (byte-identical when off).
+        if self.reputation_md:
+            parts.append(
+                "\n\n## Bucket reputation & ship scoreboard (read before planning)\n\n"
+                + self.reputation_md
             )
         if truncation:
             parts.append("\n\nINPUT NOTES: " + "; ".join(truncation))
@@ -4298,6 +4327,14 @@ class _LLMCritic:
     #: completion prompt when ``--regressions-watchlist`` is on; "" (default)
     #: keeps the prompt byte-identical.
     regressions_md: str = ""
+    #: batch-4b Item 1 — rendered bucket-reputation table injected into the
+    #: completion prompt when ``--bucket-reputation`` is on; "" (default) keeps
+    #: the prompt byte-identical.
+    reputation_md: str = ""
+    #: batch-4b Item 2 (--critic-ask-more N) — max orchestrated ask-more loops.
+    #: 0 (default) ⇒ no ask-more contract in the prompt and zero extra
+    #: completions, so the review is byte-identical to today.
+    ask_more_rounds: int = 0
 
     async def review(
         self,
@@ -4322,9 +4359,31 @@ class _LLMCritic:
     ) -> CriticReview:
         summary, truncation = self._build_input(context, candidates)
         error: str | None = None
-        for _attempt in range(2):
-            prompt = self._build_prompt(summary, truncation=truncation, retry_error=error)
+        # batch-4b Item 2: accumulated Evolver answers, injected into the next
+        # critic prompt. Empty at N=0 (no ask-more), so the prompt and the flow
+        # are byte-identical to the pre-4b two-attempt loop.
+        qa_sections = ""
+        ask_rounds_used = 0
+        parse_attempts = 0
+        while parse_attempts < 2:
+            prompt = self._build_prompt(
+                summary, truncation=truncation, retry_error=error, qa_sections=qa_sections
+            )
             text = await self._complete(prompt)
+            # An ask-more turn (only while enabled and under the cap) does NOT
+            # consume a parse attempt: answer each question, append it to the
+            # candidate + the running Q&A, and re-invoke the Critic. Past the cap
+            # any further ask_evolver block is ignored and a verdict is forced.
+            if self.ask_more_rounds > 0 and ask_rounds_used < self.ask_more_rounds:
+                questions = self._parse_ask_evolver(text)
+                if questions:
+                    ask_rounds_used += 1
+                    qa_sections += await self._run_ask_more(
+                        candidates, questions, ask_rounds_used
+                    )
+                    error = None
+                    continue
+            parse_attempts += 1
             parsed, error = self._parse_review_json(text)
             if parsed is not None:
                 return self._map_review(context, candidates, parsed)
@@ -4435,6 +4494,7 @@ class _LLMCritic:
         *,
         truncation: tuple[str, ...],
         retry_error: str | None,
+        qa_sections: str = "",
     ) -> str:
         parts = [
             self.prompt,
@@ -4445,6 +4505,30 @@ class _LLMCritic:
             parts.append(
                 "\n\n## Regressions watchlist (read before reviewing)\n\n"
                 + self.regressions_md
+            )
+        # batch-4b Item 1: inject the bucket-reputation table (byte-identical when off).
+        if self.reputation_md:
+            parts.append(
+                "\n\n## Bucket reputation & ship scoreboard (read before reviewing)\n\n"
+                + self.reputation_md
+            )
+        # batch-4b Item 2: the ask-more contract + any answers gathered so far.
+        # Both are gated (ask_more_rounds>0 / non-empty qa_sections), so a default
+        # N=0 review carries neither and stays byte-identical.
+        if self.ask_more_rounds > 0:
+            parts.append(
+                "\n\n## Ask-more protocol (optional)\n\n"
+                "Before your final verdict you MAY ask an Evolver to clarify a "
+                "candidate. To do so, return ONLY a JSON object of the form "
+                '{"ask_evolver": [{"candidate_id": "C-...", "question": "..."}]} '
+                "and nothing else. Each answer is appended to the candidate and you "
+                "are asked to review again (at most "
+                f"{self.ask_more_rounds} more time(s)); after that you must return a "
+                "verdict. When ready to decide, return the normal verdict JSON."
+            )
+        if qa_sections:
+            parts.append(
+                "\n\n## Evolver answers to your questions so far\n\n" + qa_sections
             )
         if truncation:
             parts.append("\n\nINPUT NOTES: " + "; ".join(truncation))
@@ -4702,6 +4786,114 @@ class _LLMCritic:
             f"nor explained: {', '.join(unresolved)}"
         )
         return veto, demoted_concerns
+
+    # -- batch-4b Item 2: orchestrated ask-more loop --------------------------
+
+    def _parse_ask_evolver(self, text: str) -> list[dict[str, str]]:
+        """The ``ask_evolver`` questions in the response, or ``[]``.
+
+        The Critic MAY return a JSON object carrying ``ask_evolver``: a list of
+        ``{"candidate_id", "question"}`` items. Malformed / empty entries are
+        dropped; a response with no such block yields ``[]`` (⇒ verdict path).
+        """
+        block = _first_json_object(text)
+        if block is None:
+            return []
+        try:
+            obj = json.loads(block)
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(obj, dict):
+            return []
+        raw = obj.get("ask_evolver")
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("candidate_id", "")).strip()
+            question = str(item.get("question", "")).strip()
+            if cid and question:
+                out.append({"candidate_id": cid, "question": question})
+        return out
+
+    async def _run_ask_more(
+        self,
+        candidates: tuple[CandidateArtifact, ...],
+        questions: list[dict[str, str]],
+        k: int,
+    ) -> str:
+        """Answer each Critic question and return the Q&A as markdown.
+
+        The official orchestrator (``judge.py``) runs a full Evolver harness to
+        answer via an ``ask_evolver`` tool and appends the answer to the
+        candidate file. OUR Critic is a bare completion whose candidates arrive
+        as :class:`CandidateArtifact` (config_path + manifest, no memo pointer),
+        so each answer is one tool-less "mini-evolver" completion over the
+        candidate's manifest + config + the question. The block is appended to a
+        candidate-scoped ``critic_qa.md`` beside the candidate's config (the
+        on-disk audit trail the official keeps) AND returned for injection into
+        the re-judgment prompt (our Critic reads the prompt, not files).
+        """
+        by_id = {c.candidate_id: c for c in candidates}
+        prompt_section = ""
+        for q in questions:
+            candidate = by_id.get(q["candidate_id"])
+            answer = await self._answer_question(candidate, q["question"])
+            md = (
+                f"## Critic Q&A (ask-more round {k})\n\n"
+                f"- candidate: {q['candidate_id']}\n"
+                f"- Q: {q['question']}\n"
+                f"- A: {answer}\n\n"
+            )
+            prompt_section += md
+            if candidate is not None:
+                self._append_candidate_qa(candidate, md)
+        return prompt_section
+
+    async def _answer_question(
+        self, candidate: "CandidateArtifact | None", question: str
+    ) -> str:
+        """One tool-less provider completion answering the Critic's question."""
+        if candidate is None:
+            return "(no such candidate; cannot answer)"
+        manifest = candidate.manifest
+        try:
+            config_text = Path(candidate.config_path).read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            config_text = "(config unavailable)"
+        config_text = config_text[:8000]  # cap so a large config can't blow the prompt
+        prompt = (
+            "You are the Evolver that produced the candidate below. Answer the "
+            "Critic's question about THIS candidate concisely and factually, using "
+            "only the manifest and config shown. Do not propose new changes.\n\n"
+            f"CANDIDATE: {candidate.candidate_id}\n"
+            f"BUCKET: {list(manifest.bucket)}\n"
+            f"TARGET VARIANT: {manifest.target_variant}\n"
+            "PREDICTED FLIPS: "
+            f"{', '.join(manifest.predicted_impact.predicted_flips()) or 'none'}\n"
+            f"FILE CHANGES: {[str(c.get('path', '')) for c in manifest.file_changes]}\n\n"
+            f"CONFIG (truncated):\n{config_text}\n\n"
+            f"CRITIC QUESTION: {question}\n\n"
+            "Answer:"
+        )
+        return await self._complete(prompt)
+
+    @staticmethod
+    def _append_candidate_qa(candidate: "CandidateArtifact", md: str) -> None:
+        """Append the Q&A block to ``critic_qa.md`` in the candidate's slot dir.
+
+        Best-effort — an unwritable path never kills the review.
+        """
+        try:
+            path = Path(candidate.config_path).with_name("critic_qa.md")
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(md)
+        except OSError:
+            pass
 
     # -- LLM plumbing / fallback ---------------------------------------------
 
@@ -5044,6 +5236,21 @@ class VariantPoolRecipe:
         # --audit-stream: append-only R{n}/audit.jsonl of lifecycle events (additive
         # only; no existing artifact changes). Off = no file created.
         self.audit_stream = bool(getattr(args, "audit_stream", False))
+        # batch-4b Items 1/2/3/4 — all default OFF/0, byte-identical.
+        # --bucket-reputation: per-bucket reputation + ship scoreboard, rendered
+        # into the Planner/Critic prompts + Evolver brief and persisted flag-gated
+        # in pool_state.json. Recomputed per round into ``self._round_reputation_md``.
+        self.bucket_reputation = bool(getattr(args, "bucket_reputation", False))
+        self._round_reputation_md = ""
+        # --critic-ask-more N: max orchestrated Critic→question→answer→re-judge
+        # loops (0 = off, byte-identical Critic prompt + zero extra completions).
+        self.critic_ask_more = int(getattr(args, "critic_ask_more", 0) or 0)
+        # --auto-revert: Stage-5 adjudication of the previous round's APPLY ship
+        # (hit_rate < 0.5 ⇒ revert the variant's config for the next round).
+        self.auto_revert = bool(getattr(args, "auto_revert", False))
+        # --meta-compaction: override the Evolver meta-harness compaction to the
+        # official AEGIS Evolver tuning (wired via extra_harness_kws below).
+        self.meta_compaction = bool(getattr(args, "meta_compaction", False))
         self.record_gate_complement = bool(getattr(args, "record_gate_complement", False))
         self.retarget_after_freeze = bool(getattr(args, "retarget_after_freeze", False))
         if self.retarget_after_freeze:
@@ -5101,6 +5308,17 @@ class VariantPoolRecipe:
         # Item 2 (--refuted-signature-gate): signatures of gate-stack-rejected
         # candidates, accumulated ACROSS rounds (never per-round reset).
         self._refuted_signatures: set[str] = set()
+        # batch-4b Item 1 (--bucket-reputation): persistent reputation + ship
+        # scoreboard, accumulated ACROSS rounds (never per-round reset), rendered
+        # into next round's prompts and folded into pool_state.json flag-gated.
+        from experiments.variant_pool.reputation import Reputation, Scoreboard
+
+        self._reputation = Reputation()
+        self._scoreboard = Scoreboard()
+        # batch-4b Item 3 (--auto-revert): the pre-ship config of the most recent
+        # APPLY per variant, captured before ``variant.config_path`` is overwritten.
+        # variant_id -> (ship_round, prior_config_path, predicted_tasks, bucket).
+        self._preship_config: dict[str, tuple[int, str, tuple[str, ...], str]] = {}
         # Item 3 (--attribution-check): per-round ship firing classification,
         # overwritten each settled round and folded into pool_state.json.
         self._ship_attribution: dict[str, Any] = {}
@@ -5222,6 +5440,9 @@ class VariantPoolRecipe:
             # batch-4a Item 3: per-round regressions.md content, empty unless the
             # watchlist is on and this evolve round computed one below.
             self._round_regressions_md = ""
+            # batch-4b Item 1: per-round rendered reputation table (rebuilt below
+            # when --bucket-reputation is on; empty = no injection this round).
+            self._round_reputation_md = ""
 
             if self.candidate_mode == "paper" and round_idx == 0:
                 # R0 is the settled H0 measurement. It is neither a proposal nor
@@ -5248,6 +5469,11 @@ class VariantPoolRecipe:
                 # engine.run_round (which builds those agents). Off = no file, cache "".
                 if self.regressions_watchlist:
                     self._compute_round_regressions(round_idx)
+                # batch-4b Item 1: render the current bucket-reputation table (state
+                # through the previous settled round) for this round's Planner/Critic
+                # prompts + Evolver brief. Off = cache stays "" (no injection).
+                if self.bucket_reputation:
+                    self._round_reputation_md = self._render_reputation_table()
                 result = self.engine.run_round(round_idx, set(all_ids))
                 self._reconcile(result)
             self._score_active_portfolio(result, round_idx, set(all_ids))
@@ -5263,6 +5489,18 @@ class VariantPoolRecipe:
                 # settled trajectories. Off, the checker never runs (byte-identical).
                 if bool(getattr(self.args, "attribution_check", False)):
                     self._ship_attribution = self._check_ship_attribution(result, round_idx)
+                # batch-4b Item 1 (--bucket-reputation): record this round's ships'
+                # realized flips into the reputation deque + ship scoreboard. Runs
+                # post-settlement so the ledger already holds this round. Off ⇒ never
+                # runs, so the reputation/scoreboard stay empty and pool_state.json is
+                # byte-identical.
+                if self.bucket_reputation:
+                    self._update_reputation(result, round_idx)
+                # batch-4b Item 3 (--auto-revert): adjudicate the previous round's
+                # APPLY ship and revert its variant's config for the next round when
+                # its hit_rate < 0.5. Off ⇒ never runs (byte-identical).
+                if self.auto_revert:
+                    self._adjudicate_previous_ships(result, round_idx)
             self._ingest_report(result, round_idx)
             self._dump_round(result, round_idx)
             results.append(result)
@@ -5557,6 +5795,8 @@ class VariantPoolRecipe:
                 else _LLM_PLANNER_PROMPT
             ),
             regressions_md=self._round_regressions_md,
+            # batch-4b Item 1: "" when --bucket-reputation is off ⇒ byte-identical.
+            reputation_md=self._round_reputation_md,
         )
 
     @property
@@ -5594,6 +5834,10 @@ class VariantPoolRecipe:
                 else _LLM_CRITIC_PROMPT
             ),
             regressions_md=self._round_regressions_md,
+            # batch-4b Item 1: "" when --bucket-reputation is off ⇒ byte-identical.
+            reputation_md=self._round_reputation_md,
+            # batch-4b Item 2: 0 when --critic-ask-more is unset ⇒ byte-identical.
+            ask_more_rounds=self.critic_ask_more,
         )
 
     @property
@@ -5845,14 +6089,17 @@ class VariantPoolRecipe:
                 slot=slot,
                 manifest_mode=self.manifest_mode,
                 target_variant=context.target_variant,
-                planner_brief=_planner_brief_with_watchlist(
-                    _planner_brief_with_revision(
-                        _planner_brief_with_regressions(
-                            asdict(brief), context.regressions
+                planner_brief=_planner_brief_with_reputation(
+                    _planner_brief_with_watchlist(
+                        _planner_brief_with_revision(
+                            _planner_brief_with_regressions(
+                                asdict(brief), context.regressions
+                            ),
+                            revision,
                         ),
-                        revision,
+                        self._round_regressions_md,
                     ),
-                    self._round_regressions_md,
+                    self._round_reputation_md,
                 ),
                 base_evolve_kwargs=base_kwargs,
                 max_retries=self.evolve_retry,
@@ -6034,6 +6281,176 @@ class VariantPoolRecipe:
             if compare_round in rounds:
                 ships.append({"ship_id": vid, "bucket": "?"})
         return ships
+
+    # ------------------------------------------------------------------
+    # batch-4b Item 1 (--bucket-reputation) + Item 3 (--auto-revert)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ship_bucket(manifest: Any) -> str:
+        """The primary reputation bucket for a manifest.
+
+        Our manifest ``bucket`` is a LIST (multi-bucket edits are allowed); the
+        official AEGIS reputation/scoreboard are single-bucket. We take the first
+        declared bucket as the primary category (empty ⇒ ``"unknown"``) and use it
+        for BOTH the ShipRecord and the reputation deque, so the two stay aligned
+        in the rendered `bucket | reputation | ships | hit_rate` table.
+        """
+        buckets = list(getattr(manifest, "bucket", []) or [])
+        return buckets[0] if buckets else "unknown"
+
+    def _solved_in_round(self, task_ids: "Iterable[str]", round_idx: int) -> set[str]:
+        """Variant-agnostic set of ``task_ids`` with >=1 settled pass in exactly
+        round ``round_idx``.
+
+        Reuses the windowed one-round ledger read (``aggregate_counts`` with
+        ``before_round=round_idx+1, window=1``) that the regressions watchlist and
+        the ``--regression-baseline windowed`` gate use. ``round_idx < 0`` ⇒ empty.
+        """
+        if round_idx < 0:
+            return set()
+        solved: set[str] = set()
+        variant_ids = self.ledger.variants()
+        for task_id in task_ids:
+            total_pass = 0
+            for vid in variant_ids:
+                passes, _att = self.ledger.aggregate_counts(
+                    vid, (task_id,), before_round=round_idx + 1, window=1
+                )
+                total_pass += passes
+            if total_pass >= 1:
+                solved.add(task_id)
+        return solved
+
+    def _render_reputation_table(self) -> str:
+        """Compact `bucket | reputation | ships | hit_rate` table over the four
+        edit-class buckets, from the persistent reputation + scoreboard state."""
+        from experiments.variant_pool.reputation import BUCKETS
+
+        rollup = self._scoreboard.to_dict()["by_bucket"]
+        lines = [
+            "| bucket | reputation | ships | hit_rate |",
+            "|---|---|---|---|",
+        ]
+        for bucket in BUCKETS:
+            entry = rollup.get(bucket, {})
+            ships = int(entry.get("ships", 0))
+            hit_rate = float(entry.get("hit_rate", 0.0))
+            lines.append(
+                f"| {bucket} | {self._reputation.score(bucket):.2f} | "
+                f"{ships} | {hit_rate:.2f} |"
+            )
+        return "\n".join(lines)
+
+    def _update_reputation(self, result: Any, round_idx: int) -> None:
+        """Record this round's APPLY/FORK ships into the reputation + scoreboard.
+
+        A ship's ``flipped_in_ship_round`` = its predicted flips that were unsolved
+        in the previous settled round and solved this round (variant-agnostic). The
+        reputation hit bit uses the SAME 0.5 boundary as Stage-5 adjudication
+        (official ``adjudicate.should_revert``): ``hit_rate >= 0.5`` ⇒ True. The
+        primary bucket (:meth:`_ship_bucket`) keys both the ShipRecord and the
+        deque. Same ship-selection predicate as the attribution check.
+        """
+        from experiments.variant_pool.reputation import ShipRecord
+
+        ships: list[tuple[str, Any]] = []
+        for vid, candidate_id in sorted(result.selected_candidate_ids.items()):
+            if result.decisions.get(vid) not in (Decision.APPLY, Decision.FORK):
+                continue
+            candidate = self._round_candidates.get(candidate_id)
+            manifest = getattr(candidate, "manifest", None)
+            if manifest is None:
+                continue  # baseline / non-manifest candidate: nothing to score
+            ships.append((candidate_id, manifest))
+        self._scoreboard.last_updated_round = round_idx
+        if not ships:
+            return
+        all_predicted: set[str] = set()
+        for _cid, manifest in ships:
+            all_predicted.update(manifest.predicted_impact.predicted_flips())
+        newly_solved = self._solved_in_round(all_predicted, round_idx) - self._solved_in_round(
+            all_predicted, round_idx - 1
+        )
+        for candidate_id, manifest in ships:
+            predicted = manifest.predicted_impact.predicted_flips()
+            bucket = self._ship_bucket(manifest)
+            flipped = tuple(t for t in predicted if t in newly_solved)
+            record = ShipRecord(
+                cid=candidate_id,
+                round=round_idx,
+                bucket=bucket,
+                predicted_tasks=tuple(predicted),
+                flipped_in_ship_round=flipped,
+            )
+            self._scoreboard.add_ship(record)
+            self._reputation.record(bucket, record.hit_rate() >= 0.5)
+
+    def _adjudicate_previous_ships(self, result: Any, round_idx: int) -> None:
+        """Stage-5 adjudication of the previous round's APPLY ship (--auto-revert).
+
+        Port of the tau2-pilot-ENABLED form of
+        ``upstream/feat/aegis:harnessx/aegis/stages/adjudicate.py``: for each
+        variant whose most-recent recorded APPLY was in round ``r-1``,
+        ``hit_rate = |predicted ∩ solved_in_r| / |predicted|``; if ``< 0.5`` the
+        variant's config is reverted to its captured pre-ship path (taking effect
+        next round), an audit-stream ``adjudicate``→``revert`` event is emitted
+        (M-57, only when ``--audit-stream`` is also on), and a reputation False bit
+        is recorded when ``--bucket-reputation`` is on.
+
+        Scope-outs (documented deviations from the official pilot's unconditional
+        revert): APPLY only — we have FORK, the official has no analog, so a
+        FORK-shipped config is never adjudicated here (captured only at APPLY). A
+        variant that shipped AGAIN this round has its pre-ship entry overwritten to
+        the round-``r`` ship, so the ``r-1`` ship is superseded and never
+        adjudicated. The division-of-labour guard skips (no revert, logged reason)
+        when the manifest predicted nothing (``|predicted| == 0``).
+        """
+        prev = round_idx - 1
+        if prev < 0:
+            return
+        for vid in sorted(self._preship_config):
+            ship_round, prior_path, predicted, bucket = self._preship_config[vid]
+            if ship_round != prev:
+                continue
+            # Being adjudicated now — drop the entry either way.
+            del self._preship_config[vid]
+            variant = self.pool.variants.get(vid)
+            if variant is None:
+                self._emit_audit(
+                    round_idx, "adjudicate", "skip",
+                    {"variant_id": vid, "ship_round": prev, "reason": "variant_absent"},
+                )
+                continue
+            if not predicted:
+                # Division-of-labour guard: no prediction ⇒ nothing to adjudicate.
+                self._emit_audit(
+                    round_idx, "adjudicate", "skip",
+                    {"variant_id": vid, "ship_round": prev, "reason": "empty_predicted"},
+                )
+                continue
+            solved_r = self._solved_in_round(set(predicted), round_idx)
+            hits = sum(1 for task_id in predicted if task_id in solved_r)
+            hit_rate = hits / len(predicted)
+            if hit_rate < 0.5:
+                variant.config_path = Path(prior_path)
+                self._emit_audit(
+                    round_idx, "adjudicate", "revert",
+                    {
+                        "variant_id": vid,
+                        "ship_round": prev,
+                        "hit_rate": round(hit_rate, 4),
+                        "reverted_to": prior_path,
+                        "predicted": list(predicted),
+                    },
+                )
+                if self.bucket_reputation:
+                    self._reputation.record(bucket, False)
+            else:
+                self._emit_audit(
+                    round_idx, "adjudicate", "keep",
+                    {"variant_id": vid, "ship_round": prev, "hit_rate": round(hit_rate, 4)},
+                )
 
     def _emit_audit(
         self,
@@ -6488,6 +6905,29 @@ class VariantPoolRecipe:
                 self._last_traj_dir[vid] = traj_dir
                 self._reconcile_status[vid] = "baseline_active"
             elif decision is Decision.APPLY:
+                # batch-4b Item 3 (--auto-revert): capture the pre-ship config path
+                # (a pointer to the config already on disk — no copy) BEFORE the
+                # APPLY overwrites it, keyed by variant, together with the ship's
+                # predicted flips + primary bucket, so next round's adjudication can
+                # roll back and reputation can score. Off ⇒ nothing captured.
+                if self.auto_revert:
+                    manifest = getattr(candidate, "manifest", None)
+                    predicted = (
+                        tuple(manifest.predicted_impact.predicted_flips())
+                        if manifest is not None
+                        else ()
+                    )
+                    bucket = (
+                        (list(manifest.bucket)[0] if manifest.bucket else "unknown")
+                        if manifest is not None
+                        else "unknown"
+                    )
+                    self._preship_config[vid] = (
+                        result.round_idx,
+                        str(variant.config_path),
+                        predicted,
+                        bucket,
+                    )
                 variant.config_path = Path(candidate.config_path)
                 self._last_traj_dir[vid] = traj_dir
                 self._adopt_candidate_memo(candidate_id, variant.journal_path)
@@ -7247,6 +7687,11 @@ class VariantPoolRecipe:
             state["refuted_signatures"] = sorted(self._refuted_signatures)
         if bool(getattr(self.args, "attribution_check", False)):
             state["ship_attribution"] = self._ship_attribution
+        # batch-4b Item 1: persist the reputation + ship scoreboard (same flag-gated
+        # pattern; absent when --bucket-reputation is off ⇒ byte-identical).
+        if self.bucket_reputation:
+            state["bucket_reputation"] = self._reputation.to_dict()
+            state["ship_scoreboard"] = self._scoreboard.to_dict()
         self.pool_states.append(state)
         round_dir = self.run_dir / f"R{round_idx}"
         round_dir.mkdir(parents=True, exist_ok=True)
@@ -7812,6 +8257,30 @@ def _meta_read_scope_roots(args: Any, run_dir: Path) -> "dict[str, tuple[str, ..
     }
 
 
+def _meta_compaction_kws(args: Any) -> "dict[str, Any] | None":
+    """``extra_harness_kws`` fragment for ``--meta-compaction``; ``None`` off.
+
+    The Evolver meta-harness ALWAYS carries a ``CompactionProcessor`` (built by
+    ``build_meta_agent_harness_config`` with the vendored default 200000 / 4 /
+    0.95). This flag overrides its three numeric knobs to the official AEGIS
+    Evolver tuning (``token_threshold=300000, retention_window=4,
+    eviction_fraction=0.90`` — upstream/feat/aegis:harnessx/aegis/agents/
+    evolver.py ~L211-238; the Critic's 400000 has no analog — our Critic is a
+    bare completion with no harness — so Evolver-only). ``None`` when off, so the
+    caller wires nothing and the processor keeps its vendored defaults (the
+    processor list is byte-identical). Param names are the real
+    ``CompactionProcessor`` kwargs — no mismatch; the summarize_prompt_template is
+    left at the vendored meta-agent template (already Evolver-appropriate).
+    """
+    if not bool(getattr(args, "meta_compaction", False)):
+        return None
+    return {
+        "compaction_token_threshold": 300000,
+        "compaction_retention_window": 4,
+        "compaction_eviction_fraction": 0.90,
+    }
+
+
 def _refuted_signature_gate_provenance(args: Any) -> "str | None":
     """Byte-safe lock record for ``--refuted-signature-gate``; ``None`` when off."""
     if not bool(getattr(args, "refuted_signature_gate", False)):
@@ -7949,6 +8418,73 @@ def _audit_stream_provenance(enabled: bool) -> "str | None":
         "written at the existing hook points. Additive only -- no existing artifact write "
         "or decision changes -- so scores stay comparable; the extra file is recorded "
         "here for provenance"
+    )
+
+
+def _bucket_reputation_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--bucket-reputation`` (batch-4b Item 1); off=None."""
+    if not enabled:
+        return None
+    return (
+        "bucket_reputation=on ENABLED (batch-4b Item 1, official reputation + "
+        "scoreboard ported from upstream/feat/aegis:harnessx/aegis/data/reputation.py "
+        "+ data/scoreboard.py): after each settled round every APPLY/FORK ship's "
+        "realized flips (predicted flips unsolved in the previous settled round and "
+        "solved this round) update a per-bucket moving-average reputation (window 5, "
+        "0.7 unknown-bucket boost) and a ship scoreboard, both folded into "
+        "pool_state.json; the rendered bucket|reputation|ships|hit_rate table is "
+        "injected into the LLM Planner/Critic prompts and the Evolver TASK.md brief. No "
+        "rollout behaviour changes, but the meta-agents' input does and pool_state.json "
+        "gains two fields, so it is not comparable byte-for-byte with an 'off' run"
+    )
+
+
+def _critic_ask_more_provenance(n: int) -> "str | None":
+    """Byte-safe lock record for ``--critic-ask-more N`` (batch-4b Item 2); 0=None."""
+    if n <= 0:
+        return None
+    return (
+        f"critic_ask_more={n} ENABLED (batch-4b Item 2, orchestrated ask-more loop "
+        "faithful to upstream/feat/aegis:harnessx/aegis/stages/judge.py, hard-capped "
+        f"at {n}): the LLM Critic MAY return an ask_evolver JSON block; each question is "
+        "answered by one tool-less 'mini-evolver' provider completion over the "
+        "candidate's manifest + config, appended to the candidate's critic_qa.md and to "
+        "the re-judgment prompt, and the Critic is re-invoked (capped at N; past the cap "
+        "a verdict is forced). This spends extra meta completions and changes the "
+        "Critic's verdict path, so it is not comparable byte-for-byte with an N=0 run"
+    )
+
+
+def _auto_revert_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--auto-revert`` (batch-4b Item 3); off=None."""
+    if not enabled:
+        return None
+    return (
+        "auto_revert=on ENABLED (batch-4b Item 3, tau2-pilot-enabled Stage-5 "
+        "adjudication ported from upstream/feat/aegis:harnessx/aegis/stages/"
+        "adjudicate.py): at round r settlement the variant APPLY'd in round r-1 is "
+        "adjudicated -- hit_rate = |predicted flips solved in r| / |predicted| -- and "
+        "when < 0.5 its config is reverted to the pre-ship path for the next round (an "
+        "adjudicate/revert audit event when --audit-stream is on; a reputation False bit "
+        "when --bucket-reputation is on). APPLY only (FORK has no official analog; "
+        "empty-predicted ships are skipped). This changes which config a variant carries "
+        "into the next round, so it is not comparable byte-for-byte with an 'off' run"
+    )
+
+
+def _meta_compaction_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--meta-compaction`` (batch-4b Item 4); off=None."""
+    if not enabled:
+        return None
+    return (
+        "meta_compaction=on ENABLED (batch-4b Item 4, official AEGIS Evolver "
+        "compaction tuning from upstream/feat/aegis:harnessx/aegis/agents/evolver.py): "
+        "the Evolver meta-harness CompactionProcessor is overridden from the vendored "
+        "default (token_threshold=200000, retention_window=4, eviction_fraction=0.95) to "
+        "the official Evolver values (300000 / 4 / 0.90), so the Evolver's context is "
+        "compacted at a different threshold/fraction and its evolution decisions are not "
+        "comparable byte-for-byte with an 'off' run; the deterministic gate and rollouts "
+        "are unaffected"
     )
 
 
@@ -8108,6 +8644,10 @@ def _build_experiment_lock(
         _refuted_signature_gate_provenance(args),
         _attribution_check_provenance(args),
         _counterfactual_gate_provenance(args),
+        _bucket_reputation_provenance(bool(getattr(args, "bucket_reputation", False))),
+        _critic_ask_more_provenance(int(getattr(args, "critic_ask_more", 0) or 0)),
+        _auto_revert_provenance(bool(getattr(args, "auto_revert", False))),
+        _meta_compaction_provenance(bool(getattr(args, "meta_compaction", False))),
     ):
         if _flag_warn:
             warnings.append(_flag_warn)
@@ -8362,6 +8902,59 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(preprocess/plan/propose/propose_fail/gate/decision/commit) at the existing "
             "hook points. Ported from harnessx/aegis/data/audit.py. Additive only -- no "
             "existing artifact write changes; default off creates no file."
+        ),
+    )
+    parser.add_argument(
+        "--bucket-reputation",
+        action="store_true",
+        help=(
+            "batch-4b Item 1: maintain a per-bucket reputation (window-5 moving average "
+            "of ship hits, 0.7 unknown-bucket boost) + a ship scoreboard from each "
+            "settled round's APPLY/FORK ships' realized flips, fold both into "
+            "pool_state.json, and inject the bucket|reputation|ships|hit_rate table into "
+            "the LLM Planner/Critic prompts + the Evolver TASK.md brief. Ported from "
+            "harnessx/aegis/data/reputation.py + data/scoreboard.py. Default off injects "
+            "nothing and adds no pool_state field (byte-identical)."
+        ),
+    )
+    parser.add_argument(
+        "--critic-ask-more",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "batch-4b Item 2: cap N (default 0) on an orchestrated Critic ask-more loop "
+            "-- the LLM Critic MAY return an ask_evolver block, each question is answered "
+            "by one tool-less mini-evolver completion (manifest + config), appended to the "
+            "candidate's critic_qa.md + the re-judgment prompt, and the Critic re-invoked "
+            "(capped at N; past the cap a verdict is forced). Faithful to "
+            "harnessx/aegis/stages/judge.py. N=0 keeps the Critic prompt byte-identical "
+            "with zero extra completions."
+        ),
+    )
+    parser.add_argument(
+        "--auto-revert",
+        action="store_true",
+        help=(
+            "batch-4b Item 3: Stage-5 adjudication -- at round r settlement the variant "
+            "APPLY'd in r-1 is scored (hit_rate = |predicted flips solved in r| / "
+            "|predicted|) and, when < 0.5, its config is reverted to the pre-ship path "
+            "for the next round (+ an adjudicate/revert audit event with --audit-stream, "
+            "+ a reputation False bit with --bucket-reputation). APPLY only; "
+            "empty-predicted ships are skipped. Ported from "
+            "harnessx/aegis/stages/adjudicate.py. Default off keeps every variant's "
+            "config lineage byte-identical."
+        ),
+    )
+    parser.add_argument(
+        "--meta-compaction",
+        action="store_true",
+        help=(
+            "batch-4b Item 4: override the Evolver meta-harness CompactionProcessor from "
+            "the vendored default (200000 / 4 / 0.95) to the official AEGIS Evolver "
+            "tuning (token_threshold=300000, retention_window=4, eviction_fraction=0.90; "
+            "harnessx/aegis/agents/evolver.py). Default off keeps the vendored defaults "
+            "(the processor list is byte-identical)."
         ),
     )
     parser.add_argument("--evolve-cost", type=float, default=EVOLVE_COST_CAP_USD)
@@ -9160,6 +9753,15 @@ def setup(args: Any, run_dir: Path) -> dict[str, Any]:
     _read_scope_kws = _meta_read_scope_roots(args, run_dir)
     if _read_scope_kws is not None:
         meta_agent.extra_harness_kws.update(_read_scope_kws)
+
+    # --meta-compaction (default OFF, batch-4b Item 4): override the Evolver
+    # meta-harness CompactionProcessor to the official AEGIS Evolver tuning. Off,
+    # ``_meta_compaction_kws`` returns None, extra_harness_kws is left untouched,
+    # and build_meta_agent_harness_config keeps the vendored defaults -- the
+    # processor list is byte-identical to today.
+    _compaction_kws = _meta_compaction_kws(args)
+    if _compaction_kws is not None:
+        meta_agent.extra_harness_kws.update(_compaction_kws)
 
     return {
         "model_config": model_config,

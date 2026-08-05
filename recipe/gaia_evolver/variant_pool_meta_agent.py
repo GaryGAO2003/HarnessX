@@ -112,9 +112,16 @@ class VariantPoolMetaAgent(MetaAgent):
         # contract so it renders as a clean labeled section below. Byte-identical
         # when absent: the JSON and the identity block are unchanged.
         watchlist_md = str(planner_brief.get("regressions_watchlist", "") or "")
+        # batch-4b Item 1: lift the bucket-reputation table out the same way.
+        reputation_md = str(planner_brief.get("bucket_reputation", "") or "")
+        _lift_keys = set()
+        if watchlist_md:
+            _lift_keys.add("regressions_watchlist")
+        if reputation_md:
+            _lift_keys.add("bucket_reputation")
         brief_for_json = (
-            {k: v for k, v in planner_brief.items() if k != "regressions_watchlist"}
-            if watchlist_md
+            {k: v for k, v in planner_brief.items() if k not in _lift_keys}
+            if _lift_keys
             else planner_brief
         )
         manifest_mode = str(planner_brief.get("manifest_mode", "repo")).strip().lower()
@@ -136,6 +143,12 @@ class VariantPoolMetaAgent(MetaAgent):
             identity_block += (
                 "### Regressions watchlist (read before proposing)\n\n"
                 + watchlist_md
+                + "\n\n"
+            )
+        if reputation_md:
+            identity_block += (
+                "### Bucket reputation & ship scoreboard (read before proposing)\n\n"
+                + reputation_md
                 + "\n\n"
             )
 
