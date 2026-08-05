@@ -17,6 +17,7 @@
 | **`08-PROBLEM-INVENTORY.md`** | 🔴 **"哪里错了"的权威索引**。八个问题 P1–P8 × 证据强度 × 因果链 × 修复顺序 × **撤回记录**（经一轮对抗性自查，撤回 7 条、降级 1 条、升级 1 条）|
 | **`09-SCORE-LEVERS.md`** | 🔴 **"哪里有分数"——先读这份**。找到根因 **silent processor drop**（`harness.py:353-360` 裸 except，上线的编辑被静默丢弃、变体退回原厂 stack），它同时解释了本轮三个死胡同。含涨分杠杆 S1–S5 排序、五条判死清单、以及**对 `06`/README 两条判词的撤回**（"变体冗余"、"论文基线 73.8"）|
 | **`10-CHANNEL-AUDIT.md`** | 🔴 **观测通道审计（2026-08-04，现行主线）**。双 run 核查：s1 上线编辑仅 2/7 生效（`file:///` bug + 890 空提示词），**e_pervar3 干净 2/2**；环子的观察通道 = 自写扫描器只读 frontmatter，fetch 652 次 / loop 807 次 / 搜索 437 次**全部到不了它手上** → 判"修不了"自我关停 7 轮；R8 自然实验证明信号一进去它立刻会修。**本分支 `feat/observation-channel` = 地基修复 + `--traj-failure-signals` 通道拓宽旗标（默认关）**。含 rg 假零等方法学警告 |
+| **`11-OFFICIAL-AEGIS-DIFF.md`** | 🔴 **官方 AEGIS 对比（2026-08-05）**。upstream 三条分支（feat/aegis 等）含官方 AEGIS 全实现，但**无变体池/Ensemble**（论文 §4.5 头条机制未随代码发布 ⇒ 我方 variant_pool = 唯一存世实现）、**GAIA 无成规模实验**、论文↔代码五处实质分歧（seeds=3 vs k=1-2、±5% 未实现、无 FORK、无 briefs、无棘轮）。官方 Layer-A/B/C 通道验证 M-42 方向但**仍漏数 search/fetch 失败标记**；P3/P5/P6/P7 重新定性为论文规格之病 |
 
 ---
 
