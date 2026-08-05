@@ -2787,3 +2787,6 @@ R8      不属于任何一组 —— 其 V0 为 in-sample 选择值,与活跃池
 - **批 4a 落地**(f6b5671,M-54..M-57):trace-facts/digest-clean/regressions-watchlist/audit-stream,+35 测试,全套件 1173 绿。`next_uses_result` uptake 启发随 M-54 入库。
 - **批 4b 施工中**:bucket-reputation/critic-ask-more/auto-revert/meta-compaction(compaction.py 核实为核心自带,移植降级为接线)。
 - **chval30(serper 版)用户令取消**(跑至 R1 段,进程树验证全灭):待批 4b 落地后以含全部机制的新快照重点火,一次验尽。发射器强制 serper 预检已在位。
+
+- **批 4b 落地**(7bf0948,M-58..M-61):bucket-reputation/critic-ask-more/auto-revert/meta-compaction,+31 测试,全套件 1204 绿。
+- **批 4c 施工中**(主循环自查抓到清点缺口):IV-3~12 清单核对移植 + Critic Part-2 组合审计(strategy_concern:Critic 产出→pool_state 持久→下轮 Planner/Evolver 转达→IV-11 消费)。流程教训:按批派工必须回头对总清单。

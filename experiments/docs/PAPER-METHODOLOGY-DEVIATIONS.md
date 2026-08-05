@@ -579,3 +579,14 @@ processor 桶 v2 用 replay-execution 证据;**演化器亲笔申报优先采用
 | **M-57 `--audit-stream`** | 逐轮 append-only `R{n}/audit.jsonl`,官方 12 kind 冻结枚举照搬,纯增量发射(preprocess/plan/propose/propose_fail/gate/decision/commit),零既有产物改动 |
 | 测试 | +35 项;全套件 **1173 绿**,零新增失败;四旗标默认逐字节等同逐一钉死 |
 | 裁决层 | 用户令「官方启用的全放进来然后test」(Aug-05) |
+
+## M-58..M-61 全抄批 4b:官方启用控制四件(Aug-05,7bf0948,全部默认关)
+
+| 项 | 内容 |
+|---|---|
+| **M-58 `--bucket-reputation`** | reputation(滑窗 5 deque/未知桶 0.7 助探索/downweight_all)+ scoreboard(幂等 ShipRecord/桶级 hit_rate/官方"设计撤退"注保留)逐字移植;`predicted` = `PredictedImpact.predicted_flips()`(unlock∪stabilize——不存在字面 `tasks_will_pass` 字段,与论文 C-R10-02 命中率算法一致,已注明);`flipped` 按相邻结算轮变体不可知计;表注入 Planner 提示词与 Evolver TASK.md。桶为列表 ⇒ 取 `bucket[0]`(已注明) |
+| **M-59 `--critic-ask-more N`** | judge.py 审讯环的编排级移植:Critic 可发 `ask_evolver` 问题 → 每问一次无工具 mini-evolver 补全(manifest+config 语境)作答 → Q&A 追加候选侧 `critic_qa.md` 并注入再判提示词;上限 N,越限强制判决;N=0 逐字节等同。与官方差异:官方 Critic 持工具跑完整 Evolver harness,我方 Critic 为裸补全 ⇒ 答案为单次补全(已注明) |
+| **M-60 `--auto-revert`** | Stage-5 裁决的 tau2-pilot 启用形态:APPLY seam 捕获 pre-ship 配置路径(指针不拷文件),预测翻转命中率 <0.5 ⇒ 下轮回滚该变体配置,发 `adjudicate`→`revert` 审计事件(M-57 联动)+ reputation False 位(M-58 联动);**仅 APPLY**(FORK 无官方对应,已注明);空预测跳过 |
+| **M-61 `--meta-compaction`** | 核心自带 `CompactionProcessor` 三旋钮参数化(vendored 默认 200000/4/0.95 不变),旗标开时经 M-50 的 extra_harness_kws seam 覆写为官方 Evolver 值 300000/4/0.90;Critic 无 harness ⇒ 仅 Evolver(已注明) |
+| 测试 | +31 项;全套件 **1204 绿**,零新增失败;四旗标默认逐字节等同逐一钉死;`agent.py` 参数化经 tests/unit/test_meta_harness_fixes.py 16 绿佐证 |
+| 裁决层 | 用户令「官方启用的全放进来然后test」(Aug-05) |
