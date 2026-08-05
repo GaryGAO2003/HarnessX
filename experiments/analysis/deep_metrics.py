@@ -574,7 +574,12 @@ def cost_account(console_paths: list[Path], run_dir: Path | None = None) -> dict
         for line in raw.splitlines():
             line = ps.strip_ansi(line)
             low = line.lower()
-            if "serper search failed" in low:
+            # 'serper search failed' = the serper backend's fallback warning;
+            # 'serper (serper_only)' = the serper_only backend's retry/exhaustion
+            # warnings (no fallback exists there, but the failures still count).
+            if "serper search failed" in low or (
+                "serper (serper_only)" in low and "failed" in low
+            ):
                 serper_failed += 1
             if "LAUNCHER_START" in line and launcher_start is None:
                 launcher_start = _parse_launcher_dt(line)

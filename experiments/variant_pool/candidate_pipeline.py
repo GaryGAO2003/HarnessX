@@ -61,6 +61,12 @@ class PipelineContext:
     #: a tuple = shipped_only accountability (only these hard-gate). Forwarded to
     #: :class:`~experiments.variant_pool.critic.CriticContext`.
     shipped_regressions: tuple[str, ...] | None = None
+    #: P2 (``--evolve-abstain outcome``): last round's abstain records for this
+    #: target variant, as ``(candidate_id, reason)`` pairs. Empty (the default,
+    #: and always so under ``--evolve-abstain error``) means an LLM planner's
+    #: serialized input adds no "PRIOR ABSTAINS" section and stays byte-identical;
+    #: the deterministic planner ignores this field entirely.
+    prior_abstains: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "current_config_path", Path(self.current_config_path))
@@ -201,6 +207,26 @@ class CandidateSlot:
 @dataclass(frozen=True)
 class ProposalFailure:
     """A producer-side failure retained in the audit instead of becoming opaque."""
+
+    candidate_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class AbstainProposal:
+    """A first-class abstain: the Evolver deliberately declined to change the config.
+
+    P2 (``--evolve-abstain outcome``). A byte-identical config (a model-authored
+    explicit no-op, or a P1 continuity auto-abstain) is a *decision not to ship*,
+    not a producer error. Unlike :class:`ProposalFailure` it carries the abstain
+    ``reason``; :meth:`CandidatePipeline._normalise_candidates` maps it to an
+    ``AuditRecord(phase="abstain")`` so it is archived as ``PIPELINE_ABSTAIN``
+    rather than ``PIPELINE_PROPOSAL``. It still consumes its slot (it counts in
+    the candidate denominator exactly as a rejection does), so only the
+    *classification* changes, never the slot arithmetic. In ``--evolve-abstain
+    error`` (the default) the producer never returns this — the no-op raises and
+    the path stays byte-identical.
+    """
 
     candidate_id: str
     reason: str
@@ -362,6 +388,11 @@ class IsolatedEvolverAdapter:
                 slot.suggested_candidate_id,
                 f"producer raised {type(exc).__name__}: {exc}",
             )
+        if isinstance(artifact, AbstainProposal):
+            # P2: a deliberate abstain is retained verbatim (like ProposalFailure),
+            # not treated as an opaque/no-op proposal. Only reachable under
+            # --evolve-abstain outcome; the error-mode no-op raises above.
+            return artifact
         if artifact is None:
             return ProposalFailure(
                 slot.suggested_candidate_id,
@@ -742,7 +773,20 @@ class CandidatePipeline:
         audit: list[AuditRecord] = []
         artifacts: list[CandidateArtifact] = []
         for raw in raw_candidates:
-            if isinstance(raw, ProposalFailure):
+            if isinstance(raw, AbstainProposal):
+                # P2: a first-class abstain is archived under a dedicated phase so
+                # it becomes a PIPELINE_ABSTAIN row (not PIPELINE_PROPOSAL). It is
+                # still ``rejected`` so it consumes its slot in the candidate
+                # denominator exactly as a producer rejection does today.
+                audit.append(
+                    AuditRecord(
+                        phase="abstain",
+                        disposition="rejected",
+                        candidate_id=raw.candidate_id,
+                        reason=f"ABSTAIN: {raw.reason}",
+                    )
+                )
+            elif isinstance(raw, ProposalFailure):
                 audit.append(
                     AuditRecord(
                         phase=phase,

@@ -124,11 +124,15 @@ from benchmarks.gaia.task import GAIATask, load_gaia_tasks, load_gaia_tasks_from
 from experiments.variant_pool.engine import (
     DEFAULT_MIN_FORK,
     DEFAULT_PATIENCE,
+    DEFAULT_SHIP_CONFIRMATION,
+    SHIP_CONFIRM_PHASE,
+    SHIP_CONFIRMATION_MODES,
     SHIP_POLICIES,
     RoundResult,
     VariantPoolEngine,
 )
 from experiments.variant_pool.candidate_pipeline import (
+    AbstainProposal,
     AuditRecord,
     CandidateBrief,
     CandidatePipeline,
@@ -179,6 +183,7 @@ from experiments.variant_pool.gate import (
 )
 from experiments.variant_pool.ledger import SuccessLedger
 from experiments.variant_pool.manifest import (
+    BUCKETS,
     CandidateArtifact,
     ChangeManifest,
     DEFAULT_LEVEL2_LABEL,
@@ -236,8 +241,10 @@ DEFAULT_EVOLVE_RETRY = 1
 
 #: --search-backend (W1). ``chain`` (default) keeps the built-in ``WebSearch``
 #: fallback chain byte-identical; ``serper`` swaps a Serper-first drop-in
-#: (``harnessx.tools.contrib.serper_search``) into the deployed H0 registry.
-SEARCH_BACKENDS = ("chain", "serper")
+#: (``harnessx.tools.contrib.serper_search``) into the deployed H0 registry;
+#: ``serper_only`` swaps the fallback-free Serper drop-in (no native chain, ever)
+#: and fails fast at launch when ``SERPER_API_KEY`` is missing.
+SEARCH_BACKENDS = ("chain", "serper", "serper_only")
 DEFAULT_SEARCH_BACKEND = "chain"
 
 #: --evolve-commit-bounce (W1/F-A). ``off`` (default) is byte-identical; ``on``
@@ -247,6 +254,67 @@ EVOLVE_COMMIT_BOUNCE_MODES = ("off", "on")
 DEFAULT_EVOLVE_COMMIT_BOUNCE = "off"
 #: The bounce runs a strictly bounded continuation so it is cheap: <= 15 steps.
 _BOUNCE_MAX_STEPS = 15
+
+#: --evolve-continuity (P1). ``off`` (default) is byte-identical. ``on`` gives the
+#: no-config retry loop slot-scoped continuity: (1) the meta-agent maintains
+#: ``_meta_scratch/NOTES.md`` and each retry is handed the previous attempt's
+#: notes (or, when absent, its closing transcript) ALONGSIDE the DECISION_REQUIRED
+#: feedback; (2) a single per-slot step ledger — the configured evolve max_steps
+#: is drawn down across attempts, and an attempt is not launched below the floor;
+#: (3) a GUARANTEED terminal outcome — when retries/budget are exhausted without a
+#: config.yaml the parent config is written and the slot auto-abstains, so the
+#: RuntimeError death path never fires. Requires ``--evolve-abstain outcome`` and
+#: is mutually exclusive with ``--evolve-commit-bounce on`` (continuity supersedes
+#: the one-shot bounce).
+EVOLVE_CONTINUITY_MODES = ("off", "on")
+DEFAULT_EVOLVE_CONTINUITY = "off"
+#: Below this many steps remaining, a continuity slot does not launch another
+#: attempt (a sub-floor budget cannot commit a decision) — it auto-abstains.
+_CONTINUITY_MIN_STEPS = 5
+#: Injection caps for the between-attempt continuity context (chars). NOTES.md is
+#: head-truncated (the tail — the most recent reasoning — is kept); the transcript
+#: fallback keeps the last few assistant messages under its own cap.
+_CONTINUITY_NOTES_CAP = 6000
+_CONTINUITY_TRANSCRIPT_CAP = 4000
+
+#: --evolve-abstain (P2). ``error`` (default) is byte-identical: a byte-identical
+#: config (a model-authored explicit no-op, or a P1 auto-abstain) raises and is
+#: archived as PIPELINE_PROPOSAL. ``outcome`` makes it a first-class ABSTAIN — a
+#: PIPELINE_ABSTAIN ledger row, a per-round pool_state counter, and last-round
+#: abstain feedback into the next LLM planner input — instead of an error.
+EVOLVE_ABSTAIN_MODES = ("error", "outcome")
+DEFAULT_EVOLVE_ABSTAIN = "error"
+#: Cap for the model-authored abstain reason read from ``_meta_scratch/ABSTAIN.md``.
+_ABSTAIN_REASON_CAP = 500
+
+#: --proposal-repair-retry (P3). ``0`` (default) is byte-identical. ``1`` adds ONE
+#: targeted repair evolve when a produced (non-no-op) proposal's machine-readable
+#: surface is invalid — ``bucket`` missing / not in the legal enum, or an empty
+#: ``predicted_impact`` — the fields behind the observed schema failures. A second
+#: failure is archived exactly as today.
+PROPOSAL_REPAIR_RETRY_MODES = (0, 1)
+DEFAULT_PROPOSAL_REPAIR_RETRY = 0
+
+#: --candidate-load-feedback (§7.37). ``False`` (default) is byte-identical. When
+#: on, the meta-agent learns "its own edit does not load": PART 1 validates a
+#: shipped config through the SAME fail-closed net the evaluator uses, immediately
+#: after ``evolve`` returns inside the continuity retry loop, and feeds the load
+#: error back into the next attempt (costing an attempt slot but no agent steps);
+#: PART 2 is an eval-time backstop that downgrades a CANDIDATE config-load failure
+#: to the existing infra-failure lane instead of crashing the whole run. The
+#: active-pool raise is unchanged (a non-loading deployed variant is a run-integrity
+#: event, loud regardless of the flag).
+DEFAULT_CANDIDATE_LOAD_FEEDBACK = False
+#: PART 1 feedback block prefix. Clearly labeled so the next attempt (and any human
+#: reading NOTES.md / the abstain reason) recognizes a load failure vs a no-config.
+_LOAD_FAILURE_FEEDBACK_PREFIX = (
+    "LOAD FAILURE — your shipped config does not load through the evaluator's "
+    "fail-closed net. Fix the artefact/target it names and re-ship:\n"
+)
+#: ``measurement_scope`` values that identify a CANDIDATE evaluation (the window
+#: gate and the ship-confirm re-eval) rather than the settled active pool. PART 2
+#: downgrades a config-load failure to the infra-failure lane only for these.
+_CANDIDATE_MEASUREMENT_SCOPES = frozenset({"candidate_gate", "ship_confirm"})
 
 #: --regression-accountability (F-B). ``strict`` (default) is byte-identical: any
 #: active regression can trigger the whole-round no-op veto. ``shipped_only`` only
@@ -275,6 +343,23 @@ DEFAULT_L2_CERT = "auto"
 #: engine; ``bucket_disjoint`` is the App B.1 (p.34) ranked multi-ship arm. The
 #: allowed set is owned by :data:`experiments.variant_pool.engine.SHIP_POLICIES`.
 DEFAULT_SHIP_POLICY = "first_wins"
+
+#: --ship-confirmation — pre-ship full-bed gate (the routed-window blindness fix).
+#: Candidates are gated on their routed window ``T_k`` (~12 of 103 tasks in
+#: e_pervar3), so a window APPLY/FORK cannot see what the edit does to the ~90
+#: tasks routed elsewhere. ``off`` (default) is byte-identical — the window
+#: seesaw ships directly, nothing new is written. ``full_bed`` re-evaluates every
+#: candidate about to APPLY/FORK on the whole task bed (same pass-k structure and
+#: the same candidate-evaluation path, only parameterised by task list),
+#: re-classifies + re-decides, and lets that verdict REPLACE the window decision;
+#: a full-bed REJECT archives the candidate under GateStage.SHIP_CONFIRM. Window
+#: REJECTs are never confirmed (no extra cost). The allowed set is owned by
+#: :data:`experiments.variant_pool.engine.SHIP_CONFIRMATION_MODES`; a non-default
+#: mode is recorded in the experiment lock provenance. Modes ``next_round`` and
+#: ``eprocess`` are RESERVED by STATPOOL-DESIGN.md §6.2/§8 for a *post*-ship
+#: probation mechanism (provisional ship -> next round's fresh measurement ->
+#: rollback) and are NOT implemented here; ``full_bed`` is the pre-ship,
+#: candidate-scope confirmation.
 
 #: The pass-marker replay.py writes as the first line of ``REPLAY.md`` on a
 #: passing smoke (``harnessx/meta_harness/replay.py`` ``render_report_md`` ->
@@ -1647,6 +1732,30 @@ def _resolve_tool_targets(tool_registry: Any, config_path: Path) -> Any:
     return dataclasses.replace(tool_registry, custom=patched)
 
 
+def _validate_candidate_config(config_path: Path) -> "tuple[Any, list, Any]":
+    """Load a config and run the fail-closed artefact/tool net, journal-free.
+
+    The load-and-verify half of :func:`_prepare_round_config`, factored out so the
+    evaluator and the in-slot candidate-load validation (``--candidate-load-feedback``
+    PART 1) raise through ONE implementation. Returns ``(config, resolved_processors,
+    resolved_tool_registry)``; raises the same ``FileNotFoundError`` / ``ValueError``
+    / ``RuntimeError`` the evaluator's net raises when an artefact or tool the
+    variant is defined by cannot be opened / instantiated (the exceptions already
+    name the offending target and cause).
+
+    Side-effect-free: it attaches no tracer and performs no journal I/O, so calling
+    it to validate a candidate config never perturbs the eval path.
+    """
+    from harnessx.core.harness import HarnessConfig
+
+    cfg = HarnessConfig.from_yaml_file(config_path).canonicalize()
+    return (
+        cfg,
+        _resolve_artefact_paths(cfg.processors, config_path),
+        _resolve_tool_targets(cfg.tool_registry, config_path),
+    )
+
+
 def _prepare_round_config(config_path: Path, journal: Any):
     """Load a config YAML and attach this round's tracer (``run.py`` idiom).
 
@@ -1656,16 +1765,72 @@ def _prepare_round_config(config_path: Path, journal: Any):
 
     Every artefact path the config names is normalised and verified here -- see
     :func:`_resolve_artefact_paths` (system prompts) and
-    :func:`_resolve_tool_targets` (custom tools) for why both are fail-closed.
+    :func:`_resolve_tool_targets` (custom tools) for why both are fail-closed. The
+    load-and-verify half lives in :func:`_validate_candidate_config`; this function
+    is the ONLY caller that also attaches the journal (the eval-path side effect),
+    so the single ``.copy`` below stays byte-identical to the pre-factoring form.
     """
-    from harnessx.core.harness import HarnessConfig
-
-    cfg = HarnessConfig.from_yaml_file(config_path).canonicalize()
+    cfg, processors, tool_registry = _validate_candidate_config(config_path)
     return cfg.copy(
         tracer=journal,
-        processors=_resolve_artefact_paths(cfg.processors, config_path),
-        tool_registry=_resolve_tool_targets(cfg.tool_registry, config_path),
+        processors=processors,
+        tool_registry=tool_registry,
     )
+
+
+def _candidate_config_load_error(config_path: Path) -> "str | None":
+    """``None`` if the candidate config loads through the fail-closed net, else the
+    error text (already names the offending target and cause).
+
+    Used by ``--candidate-load-feedback`` PART 1 to turn "the evolved edit does not
+    load" — today an invisible failure the evolver never sees, because the artefact
+    net raises at EVAL time, outside the retry loop — into feedback the next attempt
+    receives. Only the fail-closed exceptions are treated as load failures; anything
+    else propagates.
+    """
+    try:
+        _validate_candidate_config(config_path)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _candidate_load_failure_evaluation(
+    *,
+    task_ids: "set[str]",
+    variant_id: str,
+    round_idx: int,
+    measurement_scope: str,
+    pass_k: int,
+    traj_dir: Path,
+    reason: str,
+) -> "tuple[dict[str, tuple[int, int]], dict[str, dict], Path]":
+    """Synthesize an all-infra-failure evaluation for a candidate whose config did
+    not load (``--candidate-load-feedback`` PART 2 backstop).
+
+    Every task is scored ``0 / pass_k`` with ``pass_k`` infra failures, so the
+    candidate flows through the SAME infra-failure reporting lane the recipe already
+    uses (``_failure_counts`` reads each record's ``infra_failures``; the all-zero
+    outcome makes the gate reject the candidate) instead of the load error crashing
+    the whole run. Shaped exactly like a real ``_run_config_evaluation`` return
+    ``(outcomes, cleaned, traj_dir)``.
+    """
+    n_att = max(1, int(pass_k))
+    outcomes: dict[str, tuple[int, int]] = {}
+    cleaned: dict[str, dict] = {}
+    for tid in sorted(task_ids):
+        outcomes[tid] = (0, n_att)
+        cleaned[tid] = {
+            "task_id": tid,
+            "variant_id": variant_id,
+            "round": round_idx,
+            "n_pass": 0,
+            "n_att": n_att,
+            "infra_failures": n_att,
+            "measurement_scope": measurement_scope,
+            "candidate_load_failure": reason,
+        }
+    return outcomes, cleaned, traj_dir
 
 
 def _ship_efficacy_reason(candidate: Any, parent_config_path: "Path | None") -> "str | None":
@@ -2162,6 +2327,24 @@ def _make_variant_meta_agent(template: Any, journal_path: Path) -> Any:
     return clone
 
 
+#: P1 continuity: instruct the meta-agent to keep a running scratch log so a
+#: retried attempt can pick up where the last one left off instead of restarting.
+_WORKING_NOTES_DIRECTIVE = (
+    "WORKING NOTES (continuity). As you work, keep a running "
+    "`_meta_scratch/NOTES.md`: what you read, hypotheses you ruled out, and your "
+    "current leaning. Update it before you stop. If your attempt ends without a "
+    "`config.yaml`, the next attempt is handed these notes verbatim, so writing "
+    "them well means it continues your reasoning rather than starting over."
+)
+#: P2 reason capture: if the meta-agent chooses the explicit no-op, ask it to
+#: record one sentence explaining why so the abstain is not silent.
+_ABSTAIN_REASON_DIRECTIVE = (
+    "ABSTAIN REASON. If you choose the explicit no-op (copy the current config "
+    "byte-for-byte), write one sentence explaining why into "
+    "`_meta_scratch/ABSTAIN.md` before you stop. This is recorded with the abstain."
+)
+
+
 def _build_candidate_contract(
     *,
     manifest_mode: str,
@@ -2170,6 +2353,10 @@ def _build_candidate_contract(
     planner_brief: Mapping[str, Any],
     decision_feedback: str | None = None,
     paper_evolver_guidance: str | None = None,
+    working_notes_directive: bool = False,
+    prior_working_notes: str | None = None,
+    abstain_reason_directive: bool = False,
+    repair_instruction: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the ``candidate_contract`` our recipe injects into ``TASK.md``.
 
@@ -2189,6 +2376,13 @@ def _build_candidate_contract(
     "no manifest needed" note) for fault (1), and (2) the B4 decision-contract
     emphasis for fault (2). On a retry it also carries the prior
     ``DECISION_REQUIRED.md`` text.
+
+    The four trailing flags add OPTIONAL sections that are each present only when
+    set, so a default contract (all off / notes / instruction ``None``) is
+    byte-identical to the pre-P1/P2/P3 output: ``working_notes_directive`` (P1 —
+    keep ``NOTES.md``), ``prior_working_notes`` (P1 retry — the previous attempt's
+    notes / closing analysis), ``abstain_reason_directive`` (P2 — record an abstain
+    reason), and ``repair_instruction`` (P3 — the targeted schema-repair ask).
     """
     manifest_instructions = (
         PAPER_MANIFEST_SCHEMA_BRIEF
@@ -2213,6 +2407,17 @@ def _build_candidate_contract(
     # the brief byte-identical to the pre-P1-1 output.
     if paper_evolver_guidance:
         brief["paper_evolver_guidance"] = paper_evolver_guidance
+    # P1/P2/P3 contract text. Each section is added ONLY when its flag-gated
+    # argument is set, so a default (all-off) contract is byte-identical to the
+    # pre-P1/P2/P3 output.
+    if working_notes_directive:  # P1 --evolve-continuity on
+        brief["working_notes_requirement"] = _WORKING_NOTES_DIRECTIVE
+    if prior_working_notes:  # P1 retry: the prior attempt's notes / closing analysis
+        brief["prior_working_notes"] = prior_working_notes
+    if abstain_reason_directive:  # P2 --evolve-abstain outcome
+        brief["abstain_reason_requirement"] = _ABSTAIN_REASON_DIRECTIVE
+    if repair_instruction:  # P3 --proposal-repair-retry 1: the targeted repair ask
+        brief["proposal_repair_instruction"] = repair_instruction
     return {
         # The id the meta-agent must use verbatim is the repo-gate-safe ALIAS
         # of our paper-shape slot id: the repo's own validate_workflow scans
@@ -2585,6 +2790,16 @@ class _EvolveOutcome:
     attempts: int  # total evolve invocations (>= 1)
     retries: int  # attempts - 1
     decision_required_history: tuple[str, ...]
+    #: P1 continuity: total meta-agent steps consumed across all attempts of this
+    #: slot (0 when --evolve-continuity is off). Lets a P3 repair draw the same
+    #: per-slot ledger.
+    steps_used: int = 0
+    #: P1 continuity: ``True`` when the terminal outcome is a guaranteed
+    #: auto-abstain (parent config copied because retries/budget were exhausted
+    #: without a decision) rather than a model-produced config. ``abstain_reason``
+    #: carries the generated reason. Both default so an ``off`` outcome is unchanged.
+    auto_abstain: bool = False
+    abstain_reason: str | None = None
 
 
 async def _evolve_candidate_with_retry(
@@ -2600,6 +2815,9 @@ async def _evolve_candidate_with_retry(
     commit_bounce: str = "off",
     bounce_max_steps: int = _BOUNCE_MAX_STEPS,
     bounce_audit: "dict[str, Any] | None" = None,
+    continuity: str = "off",
+    abstain: str = "error",
+    candidate_load_feedback: bool = False,
 ) -> _EvolveOutcome:
     """Run ``slot_agent.evolve``; on a *no-config* outcome, retry with feedback.
 
@@ -2614,7 +2832,28 @@ async def _evolve_candidate_with_retry(
     other exception (no DECISION_REQUIRED.md) re-raises immediately, and a
     byte-identical explicit no-op is a *successful* evolve handled by the caller
     — it is never silently converted into a retry or a no-op fallback.
+
+    P1: ``continuity="on"`` delegates to :func:`_evolve_candidate_with_continuity`,
+    which supersedes this loop with a slot-scoped step ledger, between-attempt
+    working notes, and a guaranteed terminal auto-abstain (no RuntimeError death
+    path). ``continuity="off"`` (default) keeps this loop byte-identical. P2:
+    ``abstain="outcome"`` only adds the reason-capture directive to the contract
+    (the abstain itself is realized by the producer); ``abstain="error"`` (default)
+    adds nothing and stays byte-identical.
     """
+    if continuity == "on":
+        return await _evolve_candidate_with_continuity(
+            slot_agent=slot_agent,
+            slot=slot,
+            manifest_mode=manifest_mode,
+            target_variant=target_variant,
+            planner_brief=planner_brief,
+            base_evolve_kwargs=base_evolve_kwargs,
+            max_retries=max_retries,
+            paper_evolver_guidance=paper_evolver_guidance,
+            abstain=abstain,
+            candidate_load_feedback=candidate_load_feedback,
+        )
     decision_history: list[str] = []
     for attempt in range(max_retries + 1):
         attempt_dir = (
@@ -2630,6 +2869,7 @@ async def _evolve_candidate_with_retry(
             planner_brief=planner_brief,
             decision_feedback=decision_history[-1] if decision_history else None,
             paper_evolver_guidance=paper_evolver_guidance,
+            abstain_reason_directive=(abstain == "outcome"),
         )
         # ``evolve``'s signature is upstream and cannot take the contract, so we
         # set it on the (subclass) agent immediately before the call. Each
@@ -2672,6 +2912,7 @@ async def _evolve_candidate_with_retry(
                     decision_feedback=bounce_feedback,
                     paper_evolver_guidance=paper_evolver_guidance,
                     bounce_max_steps=bounce_max_steps,
+                    abstain=abstain,
                 )
                 if bounce_audit is not None:
                     bounce_audit["bounce_used"] = True
@@ -2721,6 +2962,7 @@ async def _run_commit_bounce(
     decision_feedback: str,
     paper_evolver_guidance: str | None,
     bounce_max_steps: int,
+    abstain: str = "error",
 ) -> "Path | None":
     """One short, tiny-budget continuation asking the meta-agent to commit a decision.
 
@@ -2747,6 +2989,9 @@ async def _run_commit_bounce(
         planner_brief=bounce_brief,
         decision_feedback=decision_feedback,
         paper_evolver_guidance=paper_evolver_guidance,
+        # P2: a bounce that commits the explicit no-op is an abstain, so carry the
+        # reason-capture ask when in outcome mode (byte-identical in error mode).
+        abstain_reason_directive=(abstain == "outcome"),
     )
     slot_agent.set_candidate_contract(contract)
 
@@ -2778,6 +3023,501 @@ async def _run_commit_bounce(
             except Exception:  # noqa: BLE001
                 pass
     return Path(new_yaml) if new_yaml is not None else None
+
+
+# ---------------------------------------------------------------------------
+# P1 --evolve-continuity helpers
+# ---------------------------------------------------------------------------
+
+
+def _agent_total_budget(slot_agent: Any) -> int:
+    """The slot's TOTAL continuity step budget = the configured evolve max_steps.
+
+    Reads the agent instance's ``max_steps`` (set from ``--evolve-steps`` at
+    construction). Falls back to :data:`EVOLVE_MAX_STEPS` only when the attribute
+    is absent / non-positive, so the ledger always has a concrete ceiling.
+    """
+    steps = getattr(slot_agent, "max_steps", None)
+    if isinstance(steps, int) and steps > 0:
+        return steps
+    return int(EVOLVE_MAX_STEPS)
+
+
+def _set_agent_max_steps(slot_agent: Any, value: "int | None") -> None:
+    """Best-effort set of the agent's per-attempt ``max_steps`` (mirrors the bounce).
+
+    ``value=None`` is a no-op so restoring an agent that never exposed the
+    attribute leaves it untouched. Same instance-attribute seam as
+    ``set_candidate_contract``; nothing under ``harnessx/`` is modified.
+    """
+    if value is None:
+        return
+    try:
+        slot_agent.max_steps = int(value)
+    except Exception:  # noqa: BLE001 - budget set is best-effort on stub agents
+        pass
+
+
+def _newest_session_files(attempt_dir: Path, pattern: str) -> list[Path]:
+    """Session files under ``<attempt_dir>/meta_workspace/sessions`` newest-first.
+
+    That is where ``MetaAgent.evolve`` lands its ``HarnessJournal`` (agent.py
+    builds ``base_dir=output_dir/meta_workspace/sessions``); each attempt has its
+    own isolated ``output_dir`` so the newest file is this attempt's session.
+    """
+    sessions = attempt_dir / "meta_workspace" / "sessions"
+    try:
+        return sorted(
+            sessions.rglob(pattern),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return []
+
+
+def _continuity_steps_used(attempt_dir: Path, granted: int) -> int:
+    """Steps this attempt consumed, read from the newest ``*_state.json``.
+
+    The session state file carries a cumulative ``step`` field; each attempt runs
+    a fresh session in its own dir, so that value is this attempt's usage. When it
+    cannot be read the ``granted`` budget is charged in full — the conservative
+    assumption keeps the ledger from over-granting a slot that may have run long.
+    """
+    for path in _newest_session_files(attempt_dir, "*_state.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        step = data.get("step") if isinstance(data, dict) else None
+        if isinstance(step, int) and step >= 0:
+            return step
+    return int(granted)
+
+
+def _head_truncate(text: str, cap: int) -> str:
+    """Keep the last ``cap`` chars (the most recent reasoning), marking the cut."""
+    if len(text) <= cap:
+        return text
+    marker = f"[... head-truncated to the last {cap} chars ...]\n"
+    return marker + text[-cap:]
+
+
+def _continuity_transcript_tail(prev_attempt_dir: Path) -> "str | None":
+    """The previous attempt's last (<=3) assistant text messages, capped.
+
+    Fallback for when the attempt wrote no ``NOTES.md``: mirrors agent.py's
+    ``_read_last_assistant_message`` JSONL shape (``type`` in
+    ``{raw_assistant, assistant}``, ``message.content`` a non-empty string) but
+    keeps up to three, oldest-first, under :data:`_CONTINUITY_TRANSCRIPT_CAP`.
+    """
+    for path in _newest_session_files(prev_attempt_dir, "*.jsonl"):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        messages: list[str] = []
+        for raw in reversed(lines):
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in {"raw_assistant", "assistant"}:
+                continue
+            content = (rec.get("message") or {}).get("content")
+            if isinstance(content, str) and content.strip():
+                messages.append(content.strip())
+                if len(messages) >= 3:
+                    break
+        if messages:
+            joined = "\n\n---\n\n".join(reversed(messages))
+            return joined[-_CONTINUITY_TRANSCRIPT_CAP:]
+        # Only the newest session segment is worth inspecting for diagnostics.
+        break
+    return None
+
+
+def _continuity_prior_context(prev_attempt_dir: Path) -> "str | None":
+    """Between-attempt continuity payload from the previous attempt (P1-1).
+
+    Prefers the meta-agent's own ``_meta_scratch/NOTES.md`` (head-truncated to the
+    last :data:`_CONTINUITY_NOTES_CAP` chars); when absent, falls back to the
+    attempt's closing transcript (:func:`_continuity_transcript_tail`). Returns
+    ``None`` when neither exists, so the next contract carries only the
+    DECISION_REQUIRED feedback.
+    """
+    notes = prev_attempt_dir / "_meta_scratch" / "NOTES.md"
+    if notes.is_file():
+        try:
+            text = notes.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if text.strip():
+            return (
+                "The previous attempt's working notes (`_meta_scratch/NOTES.md`) "
+                "follow verbatim — continue from them:\n\n"
+                + _head_truncate(text, _CONTINUITY_NOTES_CAP)
+            )
+    tail = _continuity_transcript_tail(prev_attempt_dir)
+    if tail:
+        return (
+            "The previous attempt wrote no NOTES.md; its closing analysis (last "
+            "assistant messages) follows — continue from it:\n\n" + tail
+        )
+    return None
+
+
+def _current_config_bytes(base_evolve_kwargs: Mapping[str, Any]) -> bytes:
+    """The parent config bytes the evolve kwargs carry (for the auto-abstain copy).
+
+    ``current_config`` is the same object the producer's byte-identical check reads
+    (``context.current_config_path``), so copying it verbatim guarantees the
+    terminal auto-abstain config is byte-identical to the parent.
+    """
+    current = base_evolve_kwargs.get("current_config")
+    if current is None:
+        raise RuntimeError("continuity auto-abstain needs current_config in evolve kwargs")
+    return Path(current).read_bytes()
+
+
+async def _evolve_candidate_with_continuity(
+    *,
+    slot_agent: Any,
+    slot: "CandidateSlot",
+    manifest_mode: str,
+    target_variant: str,
+    planner_brief: Mapping[str, Any],
+    base_evolve_kwargs: Mapping[str, Any],
+    max_retries: int,
+    paper_evolver_guidance: str | None,
+    abstain: str,
+    candidate_load_feedback: bool = False,
+) -> _EvolveOutcome:
+    """P1 no-config retry loop with slot-scoped continuity (``--evolve-continuity on``).
+
+    Supersedes :func:`_evolve_candidate_with_retry`'s loop with three additions,
+    all recipe-layer (``harnessx/`` untouched):
+
+    * **Working notes / closing analysis** — every attempt's contract asks for
+      ``NOTES.md``; a retry is handed the previous attempt's notes (or, absent
+      those, its closing transcript) ALONGSIDE the DECISION_REQUIRED feedback.
+    * **One step ledger per slot** — the total budget is the agent's configured
+      ``max_steps``; each attempt is granted ``total - steps_used`` and its usage
+      is read back from the session ``*_state.json``. Below
+      :data:`_CONTINUITY_MIN_STEPS` remaining, no further attempt is launched.
+    * **Guaranteed terminal outcome** — when retries/budget are exhausted with no
+      ``config.yaml``, the parent config is copied in and an auto-abstain outcome
+      is returned. The RuntimeError death path never fires here; only a timeout or
+      other non-DECISION_REQUIRED error still raises (as today).
+
+    ``max_steps`` is saved on entry and restored in ``finally`` so a slot agent
+    shared with a later call (or a P3 repair) is left exactly as found.
+
+    ``--candidate-load-feedback`` (PART 1): when ``candidate_load_feedback`` is
+    True, a config the attempt SHIPS is validated through the SAME fail-closed net
+    the evaluator uses before it is accepted; a config that does not load feeds the
+    load error into the next attempt's feedback (alongside its working notes) and is
+    retried, costing an attempt slot but NO agent steps (validation runs no rollout).
+    Exhausting the retries on load failures ends in the same terminal auto-abstain,
+    with the load-failure text as the reason. Default off leaves the loop unchanged.
+    """
+    decision_history: list[str] = []
+    total_budget = _agent_total_budget(slot_agent)
+    prev_max_steps = getattr(slot_agent, "max_steps", None)
+    steps_used = 0
+    attempts_made = 0
+    prev_attempt_dir: Path | None = None
+    #: PART 1: the most recent attempt's load-failure text, or None when the most
+    #: recent terminal-relevant attempt was a no-config. Threads the load error into
+    #: the terminal auto-abstain reason. Stays None when the flag is off.
+    last_load_failure: str | None = None
+    last_launched_dir = Path(slot.output_dir)
+    try:
+        for attempt in range(max_retries + 1):
+            attempt_dir = (
+                Path(slot.output_dir)
+                if attempt == 0
+                else Path(slot.output_dir) / f"retry_{attempt:02d}"
+            )
+            attempt_dir.mkdir(parents=True, exist_ok=True)
+            remaining = total_budget - steps_used
+            # Floor: a retry with a sub-floor budget cannot commit a decision, so
+            # go straight to the terminal auto-abstain. Attempt 0 always launches.
+            if attempt > 0 and remaining < _CONTINUITY_MIN_STEPS:
+                logger.warning(
+                    "[%s] continuity budget floor hit (%d/%d steps left); auto-abstaining",
+                    slot.suggested_candidate_id,
+                    remaining,
+                    total_budget,
+                )
+                break
+            _set_agent_max_steps(slot_agent, remaining)
+            contract = _build_candidate_contract(
+                manifest_mode=manifest_mode,
+                suggested_candidate_id=slot.suggested_candidate_id,
+                target_variant=target_variant,
+                planner_brief=planner_brief,
+                decision_feedback=decision_history[-1] if decision_history else None,
+                paper_evolver_guidance=paper_evolver_guidance,
+                working_notes_directive=True,
+                prior_working_notes=(
+                    _continuity_prior_context(prev_attempt_dir)
+                    if prev_attempt_dir is not None
+                    else None
+                ),
+                abstain_reason_directive=(abstain == "outcome"),
+            )
+            slot_agent.set_candidate_contract(contract)
+            last_launched_dir = attempt_dir
+            try:
+                new_yaml = await slot_agent.evolve(
+                    output_dir=attempt_dir,
+                    **dict(base_evolve_kwargs),
+                )
+            except Exception as exc:  # noqa: BLE001 - classify no-config vs other
+                attempts_made += 1
+                steps_used += _continuity_steps_used(attempt_dir, remaining)
+                decision_path = attempt_dir / "_meta_scratch" / "DECISION_REQUIRED.md"
+                if decision_path.is_file():
+                    decision_history.append(decision_path.read_text(encoding="utf-8"))
+                    prev_attempt_dir = attempt_dir
+                    # The most recent terminal-relevant attempt is a no-config, not a
+                    # load failure; keep the terminal reason accurate (no-op when off).
+                    last_load_failure = None
+                    if attempt < max_retries:
+                        logger.warning(
+                            "[%s] no config.yaml (attempt %d/%d, %d/%d steps used): "
+                            "%s; retrying with notes + DECISION_REQUIRED feedback",
+                            slot.suggested_candidate_id,
+                            attempt + 1,
+                            max_retries + 1,
+                            steps_used,
+                            total_budget,
+                            exc,
+                        )
+                        continue
+                    # Retries exhausted: fall through to the terminal auto-abstain.
+                    break
+                # A non-no-config error (timeout, validator failure) still raises.
+                raise
+            # --candidate-load-feedback (PART 1): the attempt SHIPPED a config;
+            # verify it loads through the SAME fail-closed net the evaluator uses.
+            # A config that does not load teaches the meta-agent nothing today (the
+            # net raises at eval, outside this loop), so feed the load error back
+            # into the next attempt and retry — costing an attempt slot but NO agent
+            # steps (validation runs no rollout). Off => this block is skipped and
+            # the loop is byte-identical.
+            if candidate_load_feedback:
+                load_error = _candidate_config_load_error(Path(new_yaml))
+                if load_error is not None:
+                    attempts_made += 1
+                    last_load_failure = load_error
+                    decision_history.append(_LOAD_FAILURE_FEEDBACK_PREFIX + load_error)
+                    prev_attempt_dir = attempt_dir
+                    if attempt < max_retries:
+                        logger.warning(
+                            "[%s] shipped config does not load (attempt %d/%d, "
+                            "%d/%d steps used): %s; retrying with notes + LOAD "
+                            "FAILURE feedback",
+                            slot.suggested_candidate_id,
+                            attempt + 1,
+                            max_retries + 1,
+                            steps_used,
+                            total_budget,
+                            load_error,
+                        )
+                        continue
+                    # Retries exhausted on load failures: fall through to the
+                    # terminal auto-abstain (its reason carries the load error).
+                    break
+            attempts_made += 1
+            steps_used += _continuity_steps_used(attempt_dir, remaining)
+            return _EvolveOutcome(
+                config_path=Path(new_yaml),
+                attempts=attempts_made,
+                retries=attempts_made - 1,
+                decision_required_history=tuple(decision_history),
+                steps_used=steps_used,
+            )
+        # Guaranteed terminal outcome (P1-3): copy the parent config in and abstain.
+        terminal_config = last_launched_dir / "config.yaml"
+        terminal_config.write_bytes(_current_config_bytes(base_evolve_kwargs))
+        if last_load_failure is not None:
+            # PART 1: the terminating attempt(s) failed to LOAD (not no-config), so
+            # carry the load error as the abstain reason. Only reachable with the
+            # flag on; the ``else`` branch below is byte-identical to the pre-flag form.
+            reason = (
+                f"exhausted without a loadable config after {attempts_made} attempts "
+                f"/ {steps_used} steps; last load failure: {last_load_failure}"
+            )
+        else:
+            reason = (
+                f"exhausted without decision after {attempts_made} attempts / "
+                f"{steps_used} steps"
+            )
+        logger.warning("[%s] continuity auto-abstain: %s", slot.suggested_candidate_id, reason)
+        return _EvolveOutcome(
+            config_path=terminal_config,
+            attempts=attempts_made,
+            retries=max(0, attempts_made - 1),
+            decision_required_history=tuple(decision_history),
+            steps_used=steps_used,
+            auto_abstain=True,
+            abstain_reason=reason,
+        )
+    finally:
+        _set_agent_max_steps(slot_agent, prev_max_steps)
+
+
+# ---------------------------------------------------------------------------
+# P2 abstain + P3 proposal-repair helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_abstain_reason(scratch_parent: Path) -> str:
+    """The model-authored abstain reason from ``<attempt>/_meta_scratch/ABSTAIN.md``.
+
+    Capped at :data:`_ABSTAIN_REASON_CAP` chars; absent / empty / unreadable
+    yields ``"(no reason given)"`` so an abstain always carries a reason string.
+    """
+    path = scratch_parent / "_meta_scratch" / "ABSTAIN.md"
+    if path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
+        if text:
+            return text[:_ABSTAIN_REASON_CAP]
+    return "(no reason given)"
+
+
+def _strip_abstain_prefix(reason: str) -> str:
+    """The raw abstain reason without the ``ABSTAIN: `` archive prefix."""
+    prefix = "ABSTAIN: "
+    return reason[len(prefix):] if reason.startswith(prefix) else reason
+
+
+def _round_abstain_records(pipeline_result: "PipelineResult") -> "tuple[tuple[str, str], ...]":
+    """``(candidate_id, reason)`` for each PIPELINE_ABSTAIN audit record (P2).
+
+    Reads the pipeline audit rather than a side channel, so the pool_state counter,
+    the planner feedback, and the ledger rows all derive from one source of truth.
+    """
+    return tuple(
+        (record.candidate_id, _strip_abstain_prefix(record.reason))
+        for record in pipeline_result.audit
+        if record.phase == "abstain" and record.candidate_id
+    )
+
+
+def _proposal_schema_problems(manifest: ChangeManifest) -> list[str]:
+    """The P3 producer-exit schema check: ``bucket`` + ``predicted_impact`` only.
+
+    Reuses the manifest's own field semantics — the legal :data:`BUCKETS` enum and
+    :meth:`PredictedImpact.predicted_flips` — and the exact error strings
+    ``ChangeManifest.validate_complete`` emits, so a repaired proposal is judged by
+    the same bar the gate uses. Deliberately a SUBSET of ``validate_complete``:
+    these two fields are the ones behind the observed producer-exit failures
+    (``bucket: missing``, ``predicted_impact: no predicted flip``); the remaining
+    Table-9 checks stay the gate's job and are not re-litigated here.
+    """
+    problems: list[str] = []
+    if not manifest.bucket:
+        problems.append("bucket: missing")
+    else:
+        unknown = [b for b in manifest.bucket if b not in BUCKETS]
+        if unknown:
+            problems.append(
+                f"bucket: unknown edit types {unknown}, expected any of {list(BUCKETS)}"
+            )
+    if not manifest.predicted_impact.predicted_flips():
+        problems.append(
+            "predicted_impact: no predicted flip "
+            "(tasks_will_unlock and tasks_will_stabilize are both empty)"
+        )
+    return problems
+
+
+def _proposal_repair_instruction(problems: Sequence[str]) -> str:
+    """The targeted repair ask (P3): names the offending field(s) + legal values."""
+    return (
+        "PROPOSAL REPAIR (single retry). Your config.yaml was produced but its "
+        "change manifest / journal entry is missing or has invalid machine-readable "
+        "fields, so it cannot be scored. Keep your intended intervention unchanged "
+        "and re-emit config.yaml plus its manifest / journal entry, fixing EXACTLY "
+        "these:\n- " + "\n- ".join(problems) + "\n"
+        f"Legal `bucket` edit types are exactly {list(BUCKETS)} (list every bucket "
+        "your change touches). `predicted_impact` MUST name at least one task in "
+        "`tasks_will_unlock` (a currently all-failing task you expect to pass) or "
+        "`tasks_will_stabilize` (a partially-passing task you expect to fully pass)."
+    )
+
+
+async def _run_proposal_repair(
+    *,
+    slot_agent: Any,
+    slot: "CandidateSlot",
+    manifest_mode: str,
+    target_variant: str,
+    planner_brief: Mapping[str, Any],
+    base_evolve_kwargs: Mapping[str, Any],
+    problems: Sequence[str],
+    paper_evolver_guidance: str | None,
+    continuity: str,
+    abstain: str,
+    total_budget: "int | None",
+    steps_used: int,
+) -> "tuple[Path | None, int]":
+    """One targeted repair evolve for a schema-invalid proposal (P3).
+
+    Runs a fresh evolve into an isolated ``<slot>/repair`` dir whose contract
+    carries :func:`_proposal_repair_instruction`. Returns ``(config_path_or_None,
+    steps_used_by_repair)``. Under ``--evolve-continuity on`` it draws the SAME
+    slot step ledger: it is granted ``total_budget - steps_used`` (skipped, with
+    ``(None, 0)``, when that is below the floor) and restores ``max_steps`` after.
+    Never raises — a failed repair just leaves the original (invalid) proposal to
+    be archived exactly as today.
+    """
+    repair_dir = Path(slot.output_dir) / "repair"
+    repair_dir.mkdir(parents=True, exist_ok=True)
+    contract = _build_candidate_contract(
+        manifest_mode=manifest_mode,
+        suggested_candidate_id=slot.suggested_candidate_id,
+        target_variant=target_variant,
+        planner_brief=planner_brief,
+        paper_evolver_guidance=paper_evolver_guidance,
+        working_notes_directive=(continuity == "on"),
+        abstain_reason_directive=(abstain == "outcome"),
+        repair_instruction=_proposal_repair_instruction(problems),
+    )
+    slot_agent.set_candidate_contract(contract)
+
+    prev_steps = getattr(slot_agent, "max_steps", None)
+    granted: int | None = None
+    if continuity == "on" and total_budget is not None:
+        remaining = total_budget - steps_used
+        if remaining < _CONTINUITY_MIN_STEPS:
+            return None, 0  # no budget left in the ledger for a repair
+        granted = remaining
+        _set_agent_max_steps(slot_agent, granted)
+    new_yaml: Path | None = None
+    try:
+        new_yaml = await slot_agent.evolve(
+            output_dir=repair_dir,
+            **dict(base_evolve_kwargs),
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed repair is not fatal
+        logger.warning(
+            "[%s] proposal repair did not produce config.yaml: %s",
+            slot.suggested_candidate_id,
+            exc,
+        )
+        new_yaml = None
+    finally:
+        if granted is not None:
+            _set_agent_max_steps(slot_agent, prev_steps)
+    repair_steps = _continuity_steps_used(repair_dir, granted) if granted is not None else 0
+    return (Path(new_yaml) if new_yaml is not None else None), repair_steps
 
 
 @dataclass
@@ -4148,6 +4888,15 @@ class _LLMPlanner:
             prior = self._prior_ship_history(digest)
             if prior:
                 lines.append(f"    prior_history: {prior}")
+        # P2: surface last round's abstains for this variant so the planner can
+        # avoid re-proposing what was already declined. Appended ONLY when the
+        # tuple is non-empty, so an empty tuple (always so under --evolve-abstain
+        # error) keeps this serialized input byte-identical to the pre-P2 output.
+        if context.prior_abstains:
+            lines.append("")
+            lines.append("PRIOR ABSTAINS (last round):")
+            for candidate_id, reason in context.prior_abstains:
+                lines.append(f"- {candidate_id}: {reason}")
         return "\n".join(lines)
 
     @staticmethod
@@ -5369,6 +6118,50 @@ class VariantPoolRecipe:
                 f"evolve_commit_bounce must be one of {EVOLVE_COMMIT_BOUNCE_MODES}, "
                 f"got {self.evolve_commit_bounce!r}"
             )
+        # --evolve-continuity (P1). ``off`` (default) is byte-identical.
+        self.evolve_continuity = str(
+            getattr(args, "evolve_continuity", DEFAULT_EVOLVE_CONTINUITY)
+        )
+        if self.evolve_continuity not in EVOLVE_CONTINUITY_MODES:
+            raise ValueError(
+                f"evolve_continuity must be one of {EVOLVE_CONTINUITY_MODES}, "
+                f"got {self.evolve_continuity!r}"
+            )
+        # --evolve-abstain (P2). ``error`` (default) is byte-identical.
+        self.evolve_abstain = str(
+            getattr(args, "evolve_abstain", DEFAULT_EVOLVE_ABSTAIN)
+        )
+        if self.evolve_abstain not in EVOLVE_ABSTAIN_MODES:
+            raise ValueError(
+                f"evolve_abstain must be one of {EVOLVE_ABSTAIN_MODES}, "
+                f"got {self.evolve_abstain!r}"
+            )
+        # --proposal-repair-retry (P3). ``0`` (default) is byte-identical.
+        self.proposal_repair_retry = int(
+            getattr(args, "proposal_repair_retry", DEFAULT_PROPOSAL_REPAIR_RETRY)
+        )
+        if self.proposal_repair_retry not in PROPOSAL_REPAIR_RETRY_MODES:
+            raise ValueError(
+                f"proposal_repair_retry must be one of {PROPOSAL_REPAIR_RETRY_MODES}, "
+                f"got {self.proposal_repair_retry!r}"
+            )
+        # --candidate-load-feedback (§7.37). ``False`` (default) is byte-identical:
+        # no in-slot validation (PART 1) and the eval-time raise is unchanged (PART 2).
+        self.candidate_load_feedback = bool(
+            getattr(args, "candidate_load_feedback", DEFAULT_CANDIDATE_LOAD_FEEDBACK)
+        )
+        # P1 hard requirements (also enforced at argparse time in main()): the
+        # guaranteed auto-abstain must be recorded as an ABSTAIN, and continuity
+        # supersedes the one-shot commit bounce.
+        if self.evolve_continuity == "on":
+            if self.evolve_abstain != "outcome":
+                raise ValueError(
+                    "evolve_continuity=on requires evolve_abstain=outcome"
+                )
+            if self.evolve_commit_bounce == "on":
+                raise ValueError(
+                    "evolve_continuity=on is mutually exclusive with evolve_commit_bounce=on"
+                )
         # --regression-accountability (F-B). ``strict`` (default) is byte-identical.
         self.regression_accountability = str(
             getattr(args, "regression_accountability", DEFAULT_REGRESSION_ACCOUNTABILITY)
@@ -5420,6 +6213,18 @@ class VariantPoolRecipe:
         if self.ship_policy not in SHIP_POLICIES:
             raise ValueError(
                 f"ship_policy must be one of {SHIP_POLICIES}, got {self.ship_policy!r}"
+            )
+        # --ship-confirmation: pre-ship full-bed gate. ``off`` (default) keeps the
+        # window seesaw's ship byte-identical; ``full_bed`` re-classifies every
+        # window APPLY/FORK on the whole task bed before it is enacted (engine
+        # SHIP_CONFIRMATION_MODES). Window REJECTs are never confirmed.
+        self.ship_confirmation = str(
+            getattr(args, "ship_confirmation", DEFAULT_SHIP_CONFIRMATION)
+        )
+        if self.ship_confirmation not in SHIP_CONFIRMATION_MODES:
+            raise ValueError(
+                f"ship_confirmation must be one of {SHIP_CONFIRMATION_MODES}, "
+                f"got {self.ship_confirmation!r}"
             )
         # --aegis-digester: Phase A1. ``deterministic`` (default) keeps the
         # byte-identical _EvidenceDigester; ``llm`` model-backs the Digester role.
@@ -5618,6 +6423,9 @@ class VariantPoolRecipe:
         self._candidate_meta: dict[str, dict[str, Any]] = {}
         self._paper_target_variant: str | None = None
         self._pipeline_results: dict[str, PipelineResult] = {}
+        # P2: last round's abstains per variant, {vid: ((candidate_id, reason), ...)}.
+        # Feeds the next round's PipelineContext.prior_abstains (outcome mode only).
+        self._prior_variant_abstains: dict[str, tuple[tuple[str, str], ...]] = {}
         self._pipeline_audit_paths: dict[str, str] = {}
         self._active_round_pass: dict[str, dict[str, tuple[int, int]]] = {}
         self._active_round_records: dict[str, dict[str, dict]] = {}
@@ -5685,6 +6493,7 @@ class VariantPoolRecipe:
             record_selected_results=self.candidate_mode != "paper",
             ship_policy=self.ship_policy,
             regression_baseline=self.regression_baseline,
+            ship_confirmation=self.ship_confirmation,
         )
 
     # ------------------------------------------------------------------
@@ -5706,6 +6515,12 @@ class VariantPoolRecipe:
             self._round_candidates = {}
             self._round_traj_dir = {}
             self._round_records = {}
+            # --ship-confirmation full_bed: full-bed confirmation rollouts, kept in
+            # dedicated buckets so they never mix into the window gate accounting
+            # (_round_records) or the settled active pool. Empty under ``off``.
+            self._round_confirm_traj_dir = {}
+            self._round_confirm_records = {}
+            self._round_confirm_outcomes = {}
             self._round_candidate_memos = {}
             self._round_revision_requests = {}
             self._pipeline_results = {}
@@ -6191,7 +7006,7 @@ class VariantPoolRecipe:
             context: PipelineContext,
             plan: PlanningArtifact,
             slot: CandidateSlot,
-        ) -> CandidateArtifact | None:
+        ) -> "CandidateArtifact | AbstainProposal | None":
             return await self._produce_paper_candidate(
                 variant=variant,
                 context=context,
@@ -6204,7 +7019,7 @@ class VariantPoolRecipe:
             context: PipelineContext,
             plan: PlanningArtifact,
             slot: CandidateSlot,
-        ) -> CandidateArtifact | None:
+        ) -> "CandidateArtifact | AbstainProposal | None":
             # A3 Part 2. The adapter hands us the revision slot only
             # (``slot.revision_of`` = the parent candidate id); the Critic's
             # ``reason``+``instructions`` are looked up from the round revision
@@ -6249,6 +7064,14 @@ class VariantPoolRecipe:
                 self._shipped_caused_regressions(variant, _regressions)
                 if self.regression_accountability == "shipped_only"
                 else None
+            ),
+            # P2: feed last round's abstains for THIS variant to the LLM planner.
+            # Empty (and always so under --evolve-abstain error) keeps the planner
+            # input byte-identical.
+            prior_abstains=(
+                self._prior_variant_abstains.get(vid, ())
+                if self.evolve_abstain == "outcome"
+                else ()
             ),
         )
         pipeline_result = await pipeline.run(context)
@@ -6307,6 +7130,10 @@ class VariantPoolRecipe:
                 pipeline_result, ranked_for_gate=_eff_ranked, audit=_eff_audit
             )
         self._pipeline_results[vid] = pipeline_result
+        # P2: remember this round's abstains for this variant so next round's
+        # context can surface them to the planner (outcome mode only).
+        if self.evolve_abstain == "outcome":
+            self._prior_variant_abstains[vid] = _round_abstain_records(pipeline_result)
         self._persist_pipeline_audit(vid, round_idx, pipeline_result)
         # batch-4a Item 4: append this round's pipeline lifecycle events to
         # R{round_idx}/audit.jsonl (additive; --audit-stream off = no file/no-op).
@@ -6363,6 +7190,99 @@ class VariantPoolRecipe:
         # sole shipping authority and therefore receives only this queue.
         return pipeline_result.ranked_for_gate
 
+    def _maybe_abstain(
+        self,
+        *,
+        slot_id: str,
+        config_path: Path,
+        context: PipelineContext,
+        meta: dict[str, Any],
+        auto_abstain_reason: str | None = None,
+    ) -> "AbstainProposal | None":
+        """Classify a byte-identical (explicit no-op) config (P2).
+
+        Returns ``None`` when the config is a real change. When it is byte-identical
+        to the parent, ``parse_status`` is marked ``explicit_noop`` and then, by
+        mode: ``error`` (default) raises the same ``ValueError`` as the pre-P2 path
+        (byte-identical behaviour); ``outcome`` records ``abstain_reason`` in the
+        candidate meta and returns an :class:`AbstainProposal`. The reason is the
+        P1 auto-abstain's generated ``auto_abstain_reason`` when given, otherwise
+        the model-authored one from ``_meta_scratch/ABSTAIN.md``.
+        """
+        if context.current_config_path.read_bytes() != config_path.read_bytes():
+            return None
+        meta["parse_status"] = "explicit_noop"
+        if self.evolve_abstain != "outcome":
+            raise ValueError(f"{slot_id}: byte-identical explicit no-op")
+        reason = (
+            auto_abstain_reason
+            if auto_abstain_reason is not None
+            else _read_abstain_reason(config_path.parent)
+        )
+        meta["abstain_reason"] = reason
+        return AbstainProposal(candidate_id=slot_id, reason=reason)
+
+    def _source_candidate_manifest(
+        self,
+        *,
+        config_path: Path,
+        slot_id: str,
+        context: PipelineContext,
+        memo_path: Path,
+        meta: dict[str, Any],
+    ) -> ChangeManifest:
+        """Source the change manifest for a produced config (fault 1 recipe side).
+
+        ``paper`` mode requires manifest.yaml (paper fidelity). ``repo`` mode
+        (default) makes it OPTIONAL: the meta-agent's burden is one artefact
+        (config.yaml + its journal entry), not two. When it wrote no manifest.yaml
+        the caller adapts one from repo-native products (the config diff + the
+        journal's levers/predicted_affected); a journal-vocabulary manifest.yaml, if
+        it still wrote one, is honoured. Extracted so a P3 repair can re-source the
+        repaired config through the exact same path; ``meta`` is mutated with the
+        parse status / manifest source exactly as the inline block did.
+        """
+        manifest_path = config_path.parent / "_meta_scratch" / "manifest.yaml"
+
+        if self.manifest_mode == "paper":
+            if not manifest_path.is_file():
+                meta["parse_status"] = "manifest_missing"
+                raise FileNotFoundError(
+                    f"{slot_id}: required manifest missing: {manifest_path}"
+                )
+            try:
+                return ChangeManifest.from_yaml(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve parser detail in audit
+                meta["parse_status"] = "format_mismatch"
+                raise ValueError(
+                    f"{slot_id}: invalid manifest.yaml (paper schema mismatch): {exc}"
+                ) from exc
+        if manifest_path.is_file():
+            # repo mode, manifest.yaml present: accept the journal vocabulary.
+            meta["manifest_source"] = "manifest_yaml"
+            try:
+                return adapt_repo_journal_manifest(
+                    manifest_path.read_text(encoding="utf-8"),
+                    fallback_candidate_id=slot_id,
+                    fallback_target_variant=context.target_variant,
+                )
+            except RepoJournalFormatError as exc:
+                meta["parse_status"] = "format_mismatch"
+                raise ValueError(
+                    f"{slot_id}: repo manifest format mismatch: {exc}"
+                ) from exc
+        # repo mode, no manifest.yaml: adapt from repo-native products.
+        meta["manifest_source"] = "repo_journal_entry"
+        return _repo_manifest_from_journal(
+            memo_path=memo_path,
+            current_config_path=context.current_config_path,
+            new_config_path=config_path,
+            candidate_id=slot_id,
+            target_variant=context.target_variant,
+        )
+
     async def _produce_paper_candidate(
         self,
         *,
@@ -6371,7 +7291,7 @@ class VariantPoolRecipe:
         plan: PlanningArtifact,
         slot: CandidateSlot,
         revision: Mapping[str, str] | None = None,
-    ) -> CandidateArtifact | None:
+    ) -> "CandidateArtifact | AbstainProposal | None":
         """Run MetaAgent in one isolated slot and require a valid manifest.
 
         Two faults from ``runs/forkprobe_11`` are fixed here in the recipe layer:
@@ -6403,35 +7323,41 @@ class VariantPoolRecipe:
         # --evolve-commit-bounce is on; it stays ``{}`` (and the ``**`` merges add
         # nothing) when off, so the default audit is byte-identical.
         bounce_audit: dict[str, Any] = {}
+        # Captured once so a P3 repair reuses the SAME planner brief + guidance.
+        candidate_planner_brief = _planner_brief_with_strategy_concern(
+            _planner_brief_with_reputation(
+                _planner_brief_with_watchlist(
+                    _planner_brief_with_revision(
+                        _planner_brief_with_regressions(
+                            asdict(brief), context.regressions
+                        ),
+                        revision,
+                    ),
+                    self._round_regressions_md,
+                ),
+                self._round_reputation_md,
+            ),
+            self._round_strategy_concern_md,
+        )
+        paper_guidance = (
+            _PAPER_EVOLVER_GUIDANCE if self.aegis_prompts == "paper" else None
+        )
         try:
             outcome = await _evolve_candidate_with_retry(
                 slot_agent=slot_agent,
                 slot=slot,
                 manifest_mode=self.manifest_mode,
                 target_variant=context.target_variant,
-                planner_brief=_planner_brief_with_strategy_concern(
-                    _planner_brief_with_reputation(
-                        _planner_brief_with_watchlist(
-                            _planner_brief_with_revision(
-                                _planner_brief_with_regressions(
-                                    asdict(brief), context.regressions
-                                ),
-                                revision,
-                            ),
-                            self._round_regressions_md,
-                        ),
-                        self._round_reputation_md,
-                    ),
-                    self._round_strategy_concern_md,
-                ),
+                planner_brief=candidate_planner_brief,
                 base_evolve_kwargs=base_kwargs,
                 max_retries=self.evolve_retry,
-                paper_evolver_guidance=(
-                    _PAPER_EVOLVER_GUIDANCE if self.aegis_prompts == "paper" else None
-                ),
+                paper_evolver_guidance=paper_guidance,
                 commit_bounce=self.evolve_commit_bounce,
                 bounce_max_steps=_BOUNCE_MAX_STEPS,
                 bounce_audit=bounce_audit,
+                continuity=self.evolve_continuity,
+                abstain=self.evolve_abstain,
+                candidate_load_feedback=self.candidate_load_feedback,
             )
         except Exception as exc:  # noqa: BLE001 - adapter converts to ProposalFailure
             self._candidate_meta[slot_id] = {
@@ -6459,60 +7385,76 @@ class VariantPoolRecipe:
         }
         self._candidate_meta[slot_id] = meta
 
-        if context.current_config_path.read_bytes() == config_path.read_bytes():
-            meta["parse_status"] = "explicit_noop"
-            raise ValueError(f"{slot_id}: byte-identical explicit no-op")
+        # P2: a byte-identical config is the explicit no-op. In ``error`` mode this
+        # raises (byte-identical to the pre-P2 path); in ``outcome`` mode it returns
+        # a first-class AbstainProposal. A P1 auto-abstain carries its own reason.
+        abstained = self._maybe_abstain(
+            slot_id=slot_id,
+            config_path=config_path,
+            context=context,
+            meta=meta,
+            auto_abstain_reason=outcome.abstain_reason if outcome.auto_abstain else None,
+        )
+        if abstained is not None:
+            return abstained
 
         # Manifest sourcing. Retries write to isolated subdirs, so the manifest
         # (if any) lives beside the config the winning attempt returned.
-        #
-        # ``paper`` mode requires manifest.yaml (paper fidelity). ``repo`` mode
-        # (default) makes it OPTIONAL: the meta-agent's burden is one artefact
-        # (config.yaml + its journal entry), not two. When it wrote no
-        # manifest.yaml the caller adapts one from repo-native products (the
-        # config diff + the journal's levers/predicted_affected); a
-        # journal-vocabulary manifest.yaml, if it still wrote one, is honoured.
-        manifest_path = config_path.parent / "_meta_scratch" / "manifest.yaml"
+        manifest = self._source_candidate_manifest(
+            config_path=config_path,
+            slot_id=slot_id,
+            context=context,
+            memo_path=slot.memo_path,
+            meta=meta,
+        )
 
-        if self.manifest_mode == "paper":
-            if not manifest_path.is_file():
-                meta["parse_status"] = "manifest_missing"
-                raise FileNotFoundError(
-                    f"{slot_id}: required manifest missing: {manifest_path}"
+        # P3: producer-exit schema check + ONE targeted repair retry. A no-op is
+        # already handled above (nothing to validate), so anything reaching here is
+        # a real change. When repair is off, this block is skipped entirely and the
+        # path is byte-identical.
+        if self.proposal_repair_retry >= 1:
+            problems = _proposal_schema_problems(manifest)
+            if problems:
+                repaired, _repair_steps = await _run_proposal_repair(
+                    slot_agent=slot_agent,
+                    slot=slot,
+                    manifest_mode=self.manifest_mode,
+                    target_variant=context.target_variant,
+                    planner_brief=candidate_planner_brief,
+                    base_evolve_kwargs=base_kwargs,
+                    problems=problems,
+                    paper_evolver_guidance=paper_guidance,
+                    continuity=self.evolve_continuity,
+                    abstain=self.evolve_abstain,
+                    total_budget=(
+                        _agent_total_budget(slot_agent)
+                        if self.evolve_continuity == "on"
+                        else None
+                    ),
+                    steps_used=outcome.steps_used,
                 )
-            try:
-                manifest = ChangeManifest.from_yaml(
-                    manifest_path.read_text(encoding="utf-8")
-                )
-            except Exception as exc:  # noqa: BLE001 - preserve parser detail in audit
-                meta["parse_status"] = "format_mismatch"
-                raise ValueError(
-                    f"{slot_id}: invalid manifest.yaml (paper schema mismatch): {exc}"
-                ) from exc
-        elif manifest_path.is_file():
-            # repo mode, manifest.yaml present: accept the journal vocabulary.
-            meta["manifest_source"] = "manifest_yaml"
-            try:
-                manifest = adapt_repo_journal_manifest(
-                    manifest_path.read_text(encoding="utf-8"),
-                    fallback_candidate_id=slot_id,
-                    fallback_target_variant=context.target_variant,
-                )
-            except RepoJournalFormatError as exc:
-                meta["parse_status"] = "format_mismatch"
-                raise ValueError(
-                    f"{slot_id}: repo manifest format mismatch: {exc}"
-                ) from exc
-        else:
-            # repo mode, no manifest.yaml: adapt from repo-native products.
-            meta["manifest_source"] = "repo_journal_entry"
-            manifest = _repo_manifest_from_journal(
-                memo_path=slot.memo_path,
-                current_config_path=context.current_config_path,
-                new_config_path=config_path,
-                candidate_id=slot_id,
-                target_variant=context.target_variant,
-            )
+                meta["proposal_repair_attempted"] = True
+                if repaired is not None:
+                    config_path = repaired
+                    meta["proposal_repair_config"] = str(repaired)
+                    # A repair that copied the parent is itself an abstain.
+                    abstained = self._maybe_abstain(
+                        slot_id=slot_id,
+                        config_path=config_path,
+                        context=context,
+                        meta=meta,
+                    )
+                    if abstained is not None:
+                        return abstained
+                    # Re-source from the repaired config. If it is still invalid it
+                    # is archived by the pipeline exactly as today (second failure).
+                    manifest = self._source_candidate_manifest(
+                        config_path=config_path,
+                        slot_id=slot_id,
+                        context=context,
+                        memo_path=slot.memo_path,
+                        meta=meta,
+                    )
 
         # The contract hands the meta-agent the repo-gate-safe ALIAS of the
         # slot id, so a manifest echoing that alias is OUR candidate under its
@@ -6977,34 +7919,59 @@ class VariantPoolRecipe:
     # callback: evaluate
     # ------------------------------------------------------------------
 
-    def _evaluate(self, candidate: Any, t_k: set[str], round_idx: int) -> dict[str, tuple[int, int]]:
-        """Evaluate a pre-settlement candidate on ``T_k`` for the gate."""
-        return self._await(self._run_evaluation(candidate, set(t_k), round_idx))
+    def _evaluate(
+        self,
+        candidate: Any,
+        t_k: set[str],
+        round_idx: int,
+        phase: str = "window",
+    ) -> dict[str, tuple[int, int]]:
+        """Evaluate a pre-settlement candidate for the gate.
 
-    async def _run_evaluation(self, candidate: Any, t_k: set[str], round_idx: int) -> dict[str, tuple[int, int]]:
+        ``phase`` is ``"window"`` for the routed-window gate eval (the default the
+        engine passes on every window call, so an ``off`` run is byte-identical)
+        and :data:`SHIP_CONFIRM_PHASE` when the engine re-evaluates the same
+        candidate on the whole task bed under ``--ship-confirmation full_bed``.
+        The confirmation reuses this exact evaluator (only ``t_k`` widens to the
+        full bed); the phase only routes accounting into the ``ship_confirm``
+        scope so its rollouts never mix into the window gate counters.
+        """
+        return self._await(self._run_evaluation(candidate, set(t_k), round_idx, phase=phase))
+
+    async def _run_evaluation(
+        self,
+        candidate: Any,
+        t_k: set[str],
+        round_idx: int,
+        phase: str = "window",
+    ) -> dict[str, tuple[int, int]]:
         vid = candidate.target_variant
         candidate_id = str(candidate.candidate_id)
-        vround_dir = (
-            self.run_dir
-            / f"R{round_idx}"
-            / vid
-            / "candidate_gate"
-            / candidate_id
-        )
+        # A confirmation eval carries the same pass-k structure as the window gate
+        # eval; only the scope tag, output dir and accounting bucket differ.
+        confirm = phase == SHIP_CONFIRM_PHASE
+        scope = "ship_confirm" if confirm else "candidate_gate"
+        vround_dir = self.run_dir / f"R{round_idx}" / vid / scope / candidate_id
         outcomes, cleaned, traj_dir = await self._run_config_evaluation(
             config_path=Path(candidate.config_path),
             variant_id=vid,
             task_ids=set(t_k),
             round_idx=round_idx,
             vround_dir=vround_dir,
-            label=f"R{round_idx}-{vid}-{candidate_id}",
-            trajectory_rel_dir=(
-                f"R{round_idx}/{vid}/candidate_gate/{candidate_id}/trajectories"
-            ),
-            measurement_scope="candidate_gate",
+            label=f"R{round_idx}-{vid}-{candidate_id}"
+            + ("-confirm" if confirm else ""),
+            trajectory_rel_dir=f"R{round_idx}/{vid}/{scope}/{candidate_id}/trajectories",
+            measurement_scope=scope,
         )
-        self._round_traj_dir[candidate_id] = traj_dir
-        self._round_records[candidate_id] = cleaned
+        if confirm:
+            # Kept in dedicated buckets: never folded into the window gate's
+            # _round_records / candidate_gate accounting or the settled active pool.
+            self._round_confirm_traj_dir[candidate_id] = traj_dir
+            self._round_confirm_records[candidate_id] = cleaned
+            self._round_confirm_outcomes[candidate_id] = dict(outcomes)
+        else:
+            self._round_traj_dir[candidate_id] = traj_dir
+            self._round_records[candidate_id] = cleaned
         return outcomes
 
     def _evaluate_active_variant(
@@ -7060,7 +8027,38 @@ class VariantPoolRecipe:
         sessions_dir = vround_dir / "sessions"
 
         journal = _make_journal(sessions_dir)
-        round_config = _prepare_round_config(config_path, journal)
+        try:
+            round_config = _prepare_round_config(config_path, journal)
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            # --candidate-load-feedback (PART 2, backstop): a CANDIDATE config that
+            # does not load is downgraded to the existing infra-failure lane (every
+            # task scored all-infra, so the gate rejects it) instead of crashing the
+            # whole run. The ACTIVE-POOL raise stays loud regardless of the flag — a
+            # non-loading deployed variant is a run-integrity event. With PART 1 on
+            # this is nearly unreachable for candidates (defense in depth).
+            if (
+                self.candidate_load_feedback
+                and measurement_scope in _CANDIDATE_MEASUREMENT_SCOPES
+            ):
+                logger.warning(
+                    "[R%d] %s candidate config does not load (%s); marking all %d "
+                    "task(s) as infra failures and continuing: %s",
+                    round_idx,
+                    variant_id,
+                    measurement_scope,
+                    len(task_ids),
+                    exc,
+                )
+                return _candidate_load_failure_evaluation(
+                    task_ids=task_ids,
+                    variant_id=variant_id,
+                    round_idx=round_idx,
+                    measurement_scope=measurement_scope,
+                    pass_k=int(self.args.pass_k),
+                    traj_dir=traj_dir,
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            raise
         try:
             round_config.to_yaml_file(vround_dir / "config.yaml")
         except Exception as exc:  # noqa: BLE001 - best-effort reproducibility dump
@@ -7597,6 +8595,13 @@ class VariantPoolRecipe:
                         "failed_stage": failed_stage,
                     },
                 )
+            # --ship-confirmation full_bed: the candidate's full-bed confirmation
+            # rollout count (sum of attempts over the whole bed) and the window-vs-
+            # full verdict meta. Both stay 0 / None under ``off`` (no confirmation
+            # ran), so CandidateTaskResult omits them and the stream is byte-identical.
+            confirm_outcomes = self._round_confirm_outcomes.get(candidate_id, {})
+            confirm_attempts = sum(int(n_att) for (_n_pass, n_att) in confirm_outcomes.values())
+            ship_confirm = diagnostic.ship_confirm
             if not diagnostic.evaluation:
                 self.report.add_candidate(
                     CandidateTaskResult(
@@ -7611,6 +8616,8 @@ class VariantPoolRecipe:
                         archive_reason=diagnostic.archive_reason,
                         skipped_reason=diagnostic.skipped_reason,
                         evaluated=False,
+                        confirm_attempts=confirm_attempts,
+                        ship_confirm=ship_confirm,
                     )
                 )
                 continue
@@ -7631,6 +8638,8 @@ class VariantPoolRecipe:
                         evaluated=True,
                         infra_failures=infra,
                         budget_exhaustions=budget,
+                        confirm_attempts=confirm_attempts,
+                        ship_confirm=ship_confirm,
                     )
                 )
 
@@ -7742,7 +8751,7 @@ class VariantPoolRecipe:
             }
         )
 
-    def _candidate_accounting(self, result: RoundResult) -> dict[str, int]:
+    def _candidate_accounting(self, result: RoundResult) -> dict[str, Any]:
         """Actual runtime proposal/evaluation counts, separate from planned K_t."""
 
         actual_ids = set(result.candidate_diagnostics)
@@ -7750,6 +8759,7 @@ class VariantPoolRecipe:
         valid_ids: set[str] = set()
         ranked_ids: set[str] = set()
         pipeline_rejected_ids: set[str] = set()
+        abstain_records: list[dict[str, str]] = []
         for pipeline_result in self._pipeline_results.values():
             valid_ids.update(
                 candidate.candidate_id
@@ -7760,10 +8770,20 @@ class VariantPoolRecipe:
                 for candidate in pipeline_result.ranked_for_gate
             )
             for audit in pipeline_result.audit:
-                if audit.candidate_id and audit.phase == "proposal":
+                # P2: a PIPELINE_ABSTAIN record counts as a produced proposal (like
+                # today's byte-identical no-op) AND as a rejection that consumes the
+                # slot, so only its classification changes, not the slot arithmetic.
+                if audit.candidate_id and audit.phase in ("proposal", "abstain"):
                     proposal_ids.add(audit.candidate_id)
                 if audit.candidate_id and audit.disposition == "rejected":
                     pipeline_rejected_ids.add(audit.candidate_id)
+                if audit.phase == "abstain" and audit.candidate_id:
+                    abstain_records.append(
+                        {
+                            "candidate_id": audit.candidate_id,
+                            "reason": _strip_abstain_prefix(audit.reason),
+                        }
+                    )
             proposal_ids.update(
                 candidate.candidate_id
                 for candidate in pipeline_result.considered_candidates
@@ -7786,7 +8806,7 @@ class VariantPoolRecipe:
             if diagnostic.decision is Decision.REJECT
             or diagnostic.failed_stage is not None
         }
-        return {
+        accounting: dict[str, Any] = {
             "requested_slots": (
                 self.candidates_per_round if self._pipeline_results else 0
             ),
@@ -7803,6 +8823,12 @@ class VariantPoolRecipe:
             "skipped": len(skipped),
             "selected": len(result.selected_candidate_ids),
         }
+        # P2: surface the per-round abstain count + reasons in pool_state, ONLY in
+        # outcome mode so the default accounting dict is byte-identical.
+        if self.evolve_abstain == "outcome":
+            accounting["abstains"] = len(abstain_records)
+            accounting["abstain_records"] = abstain_records
+        return accounting
 
     @staticmethod
     def _failure_counts(record: Mapping[str, Any], n_pass: int, n_att: int) -> tuple[int, int]:
@@ -7927,6 +8953,46 @@ class VariantPoolRecipe:
             }
         return out
 
+    def _candidate_diagnostic_state(self, candidate_id: str, diagnostic: Any) -> dict[str, Any]:
+        """One candidate's pool_state diagnostic block.
+
+        The base block is unchanged. ``--ship-confirmation full_bed`` adds two
+        keys — ``ship_confirm`` (window-vs-full verdict meta) and
+        ``confirm_attempts`` (the full-bed confirmation rollout count, a separate
+        bucket, never mixed into the window ``evaluation`` counts) — but ONLY when
+        confirmation actually ran for this candidate. Under ``off`` no candidate
+        carries ``ship_confirm``, so no key is added and the snapshot is
+        byte-identical.
+        """
+        block: dict[str, Any] = {
+            "variant_id": diagnostic.variant_id,
+            "decision": (
+                diagnostic.decision.value
+                if diagnostic.decision is not None
+                else None
+            ),
+            "failed_stage": (
+                diagnostic.failed_stage.name
+                if diagnostic.failed_stage is not None
+                else None
+            ),
+            "archive_reason": diagnostic.archive_reason,
+            "skipped_reason": diagnostic.skipped_reason,
+            "evaluated": bool(diagnostic.evaluation),
+            "evaluation": {
+                task_id: [outcome[0], outcome[1]]
+                for task_id, outcome in sorted(diagnostic.evaluation.items())
+            },
+        }
+        ship_confirm = getattr(diagnostic, "ship_confirm", None)
+        if ship_confirm is not None:
+            confirm_outcomes = self._round_confirm_outcomes.get(candidate_id, {})
+            block["ship_confirm"] = ship_confirm
+            block["confirm_attempts"] = sum(
+                int(n_att) for (_n_pass, n_att) in confirm_outcomes.values()
+            )
+        return block
+
     def _dump_round(self, result: RoundResult, round_idx: int) -> None:
         """Per-round variant-pool snapshot (routing partition + events)."""
         candidate_accounting = self._candidate_accounting(result)
@@ -7959,26 +9025,7 @@ class VariantPoolRecipe:
             "no_candidate": candidate_accounting["actual_candidates"] == 0,
             "selected_candidate_ids": dict(sorted(result.selected_candidate_ids.items())),
             "candidate_diagnostics": {
-                candidate_id: {
-                    "variant_id": diagnostic.variant_id,
-                    "decision": (
-                        diagnostic.decision.value
-                        if diagnostic.decision is not None
-                        else None
-                    ),
-                    "failed_stage": (
-                        diagnostic.failed_stage.name
-                        if diagnostic.failed_stage is not None
-                        else None
-                    ),
-                    "archive_reason": diagnostic.archive_reason,
-                    "skipped_reason": diagnostic.skipped_reason,
-                    "evaluated": bool(diagnostic.evaluation),
-                    "evaluation": {
-                        task_id: [outcome[0], outcome[1]]
-                        for task_id, outcome in sorted(diagnostic.evaluation.items())
-                    },
-                }
+                candidate_id: self._candidate_diagnostic_state(candidate_id, diagnostic)
                 for candidate_id, diagnostic in sorted(
                     result.candidate_diagnostics.items()
                 )
@@ -8301,7 +9348,10 @@ def _maybe_use_serper_backend(config: Any, backend: str) -> Any:
     every candidate derived from it stay byte-identical and ``harnessx/tools/contrib``
     is never even imported. ``serper`` replaces the live H0 tool_registry's
     ``WebSearch`` entry in place with ``serper_web_search_tool`` (identical
-    name/description/schema, Serper-first fn). Because the swapped-in tool carries
+    name/description/schema, Serper-first fn). ``serper_only`` does the same swap
+    with ``serper_only_web_search_tool`` (Serper with NO native fallback) and
+    fails fast with ``SystemExit`` when ``SERPER_API_KEY`` is missing, so a run
+    cannot start without the key. Because the swapped-in tool carries
     ``__hx_target__``, when the H0 config is serialised to ``V0/config.yaml`` the
     entry round-trips as a ``tool_registry.custom`` import path, so every candidate
     authored FROM H0 resolves ``WebSearch`` to the same Serper backend. Only the
@@ -8309,20 +9359,38 @@ def _maybe_use_serper_backend(config: Any, backend: str) -> Any:
     """
     if backend == "chain":
         return config
-    if backend != "serper":
+    if backend not in ("serper", "serper_only"):
         raise ValueError(f"--search-backend must be one of {SEARCH_BACKENDS}, got {backend!r}")
-    from harnessx.tools.contrib.serper_search import serper_web_search_tool
+
+    if backend == "serper_only":
+        # Fail fast at launch: serper_only has no native fallback, so without the
+        # key EVERY query would return the 'unavailable' tool result. A run must
+        # not start in that state.
+        if not os.environ.get("SERPER_API_KEY"):
+            raise SystemExit(
+                "--search-backend serper_only requires SERPER_API_KEY to be set: the "
+                "serper_only backend has NO native fallback, so a run must not start "
+                "without the key (every WebSearch would return 'unavailable')."
+            )
+        from harnessx.tools.contrib.serper_search import (
+            serper_only_web_search_tool as swap_tool,
+        )
+    else:
+        from harnessx.tools.contrib.serper_search import (
+            serper_web_search_tool as swap_tool,
+        )
 
     registry = getattr(config, "tool_registry", None)
     tools = getattr(registry, "_tools", None)
     if isinstance(tools, dict) and "WebSearch" in tools:
         # In-place, replace=True: keeps the tool name "WebSearch" so the worker is
         # unaware and the lock's tool_registry name list is unchanged.
-        registry.register(serper_web_search_tool, replace=True)
+        registry.register(swap_tool, replace=True)
     else:
         logger.warning(
-            "--search-backend serper: no 'WebSearch' tool in the H0 registry to swap; "
-            "leaving the tool set unchanged"
+            "--search-backend %s: no 'WebSearch' tool in the H0 registry to swap; "
+            "leaving the tool set unchanged",
+            backend,
         )
     return config
 
@@ -8335,6 +9403,18 @@ def _search_backend_provenance(mode: str) -> "str | None":
     """
     if mode == DEFAULT_SEARCH_BACKEND:
         return None
+    if mode == "serper_only":
+        return (
+            f"search_backend={mode} ENABLED (W1): the deployed H0 WebSearch tool was "
+            "replaced by the Serper-ONLY drop-in "
+            "(harnessx.tools.contrib.serper_search.serper_only_web_search_tool) with NO "
+            "native fallback — the built-in SerpAPI->Tavily->Wikipedia+Bing->DuckDuckGo "
+            "chain never serves a query. Empty Serper results are returned honestly (the "
+            "built-in's own empty-result wording) and Serper errors surface as failed "
+            "tool results. The frozen h0.config_sha256 reflects WebSearch moving from "
+            "tool_registry.builtin to tool_registry.custom. The tool name/description/"
+            "schema are unchanged and a 'chain' run's config + lock stay byte-identical"
+        )
     return (
         f"search_backend={mode} ENABLED (W1): the deployed H0 WebSearch tool was "
         "replaced by the Serper-first drop-in (harnessx.tools.contrib.serper_search), "
@@ -8358,6 +9438,60 @@ def _evolve_commit_bounce_provenance(mode: str) -> "str | None":
         "failed. This adds meta-agent invocations (audited as bounce_used / "
         "bounce_outcome) and can turn an otherwise-failed attempt into a settled "
         "config.yaml, so it is not comparable byte-for-byte with an 'off' run"
+    )
+
+
+def _evolve_continuity_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--evolve-continuity`` (P1).
+
+    Returns ``None`` for the default ``off`` (the lock stays byte-identical); a
+    provenance warning otherwise.
+    """
+    if mode == DEFAULT_EVOLVE_CONTINUITY:
+        return None
+    return (
+        f"evolve_continuity={mode} ENABLED (P1): the no-config retry loop carries "
+        "working notes / closing analysis between attempts, spends one per-slot step "
+        "ledger (the configured evolve max_steps, floored), and GUARANTEES a terminal "
+        "outcome — an exhausted slot copies the parent config and auto-abstains "
+        "instead of raising. This changes how many attempts run and removes the "
+        "no-config death path, so it is not comparable byte-for-byte with an 'off' run"
+    )
+
+
+def _evolve_abstain_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--evolve-abstain`` (P2).
+
+    Returns ``None`` for the default ``error`` (the lock stays byte-identical); a
+    provenance warning otherwise.
+    """
+    if mode == DEFAULT_EVOLVE_ABSTAIN:
+        return None
+    return (
+        f"evolve_abstain={mode} ENABLED (P2): a byte-identical explicit no-op is "
+        "recorded as a first-class ABSTAIN (a PIPELINE_ABSTAIN ledger row, a "
+        "pool_state abstains counter, and last-round abstain feedback into the LLM "
+        "planner input) instead of raising a producer error. The slot arithmetic is "
+        "unchanged, but the classification and the planner input differ, so it is not "
+        "comparable byte-for-byte with an 'error' run"
+    )
+
+
+def _proposal_repair_retry_provenance(value: int) -> "str | None":
+    """Byte-safe lock record for ``--proposal-repair-retry`` (P3).
+
+    Returns ``None`` for the default ``0`` (the lock stays byte-identical); a
+    provenance warning otherwise.
+    """
+    if value == DEFAULT_PROPOSAL_REPAIR_RETRY:
+        return None
+    return (
+        f"proposal_repair_retry={value} ENABLED (P3): a produced (non-no-op) proposal "
+        "whose manifest/journal bucket is missing / illegal or whose predicted_impact "
+        "is empty gets ONE targeted repair evolve naming the offending field before it "
+        "is archived. This adds a meta-agent invocation and can turn an otherwise-"
+        "rejected proposal into a scored candidate, so it is not comparable byte-for-"
+        "byte with a '0' run"
     )
 
 
@@ -8503,6 +9637,29 @@ def _regression_baseline_provenance(mode: str) -> "str | None":
         "different variant no longer counts as a regression for this candidate. This "
         "changes which candidates apply/fork/reject, so it is not comparable "
         "byte-for-byte with a 'global' run"
+    )
+
+
+def _ship_confirmation_provenance(mode: str) -> "str | None":
+    """Byte-safe lock record for ``--ship-confirmation`` (routed-window fix, W1-style).
+
+    Returns ``None`` for the default ``off`` (the lock stays byte-identical); a
+    provenance warning otherwise. ``full_bed`` is not a taint — it is a stricter,
+    more honest ship rule — but it changes which candidates apply/fork/reject and
+    adds full-bed rollouts, so it must be recorded and is not comparable
+    byte-for-byte with an ``off`` run.
+    """
+    if mode == DEFAULT_SHIP_CONFIRMATION:
+        return None
+    return (
+        f"ship_confirmation={mode} ENABLED (routed-window fix): before a window "
+        "APPLY/FORK is enacted, the candidate is re-evaluated on the WHOLE task bed "
+        "(not just its routed window) and re-classified; the full-bed verdict "
+        "REPLACES the window decision, and a full-bed REJECT archives the candidate "
+        "under GateStage.SHIP_CONFIRM. Window REJECTs are never confirmed. This adds "
+        "full-bed confirmation rollouts (accounted separately as confirm_attempts, "
+        "outside the window gate and settled-active-pool scopes) and changes which "
+        "candidates ship, so it is not comparable byte-for-byte with an 'off' run"
     )
 
 
@@ -8857,6 +10014,27 @@ def _critic_portfolio_audit_provenance(enabled: bool) -> "str | None":
     )
 
 
+def _candidate_load_feedback_provenance(enabled: bool) -> "str | None":
+    """Byte-safe lock record for ``--candidate-load-feedback`` (§7.37); ``None`` off.
+
+    Same pattern as :func:`_epsilon_provenance`: ``Hyperparams`` is a frozen
+    dataclass we must not extend, so a non-default flag is recorded as a provenance
+    warning (persisted in the lock, surfaced by every reader). Off (default)
+    records nothing, so a default run's lock stays byte-identical.
+    """
+    if not enabled:
+        return None
+    return (
+        "candidate_load_feedback=on ENABLED (§7.37): a candidate whose evolved config "
+        "does not load through the evaluator's fail-closed net is (PART 1) fed the load "
+        "error back into the next continuity attempt and retried, and (PART 2) at eval "
+        "time downgraded to the infra-failure lane instead of crashing the run. This "
+        "adds retry attempts and changes which candidates are archived-for-infra rather "
+        "than aborting the run, so it is not comparable byte-for-byte with an 'off' run. "
+        "The active-pool raise is unchanged"
+    )
+
+
 def _task_reasoning_effort(args: Any) -> str | None:
     """Effective reasoning effort for the task (inner) agent, or ``None`` to omit.
 
@@ -8984,11 +10162,23 @@ def _build_experiment_lock(
         _evolve_commit_bounce_provenance(
             str(getattr(args, "evolve_commit_bounce", DEFAULT_EVOLVE_COMMIT_BOUNCE))
         ),
+        _evolve_continuity_provenance(
+            str(getattr(args, "evolve_continuity", DEFAULT_EVOLVE_CONTINUITY))
+        ),
+        _evolve_abstain_provenance(
+            str(getattr(args, "evolve_abstain", DEFAULT_EVOLVE_ABSTAIN))
+        ),
+        _proposal_repair_retry_provenance(
+            int(getattr(args, "proposal_repair_retry", DEFAULT_PROPOSAL_REPAIR_RETRY))
+        ),
         _regression_accountability_provenance(
             str(getattr(args, "regression_accountability", DEFAULT_REGRESSION_ACCOUNTABILITY))
         ),
         _regression_baseline_provenance(
             str(getattr(args, "regression_baseline", DEFAULT_REGRESSION_BASELINE))
+        ),
+        _ship_confirmation_provenance(
+            str(getattr(args, "ship_confirmation", DEFAULT_SHIP_CONFIRMATION))
         ),
         _actionability_mode_provenance(
             str(getattr(args, "actionability", DEFAULT_ACTIONABILITY_MODE))
@@ -9020,6 +10210,9 @@ def _build_experiment_lock(
         _structure_invariants_provenance(bool(getattr(args, "structure_invariants", False))),
         _critic_portfolio_audit_provenance(
             bool(getattr(args, "critic_portfolio_audit", False))
+        ),
+        _candidate_load_feedback_provenance(
+            bool(getattr(args, "candidate_load_feedback", DEFAULT_CANDIDATE_LOAD_FEEDBACK))
         ),
     ):
         if _flag_warn:
@@ -9567,6 +10760,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--ship-confirmation",
+        choices=SHIP_CONFIRMATION_MODES,
+        default=DEFAULT_SHIP_CONFIRMATION,
+        help=(
+            "Pre-ship full-bed gate (routed-window blindness fix). off (default) is "
+            "byte-identical. full_bed: any candidate about to apply/fork must first "
+            "pass a full-task-bed re-classification; rejects stay window-only. "
+            "(Modes next_round/eprocess are reserved by STATPOOL-DESIGN.md for a "
+            "post-ship probation mechanism and are not implemented here.)"
+        ),
+    )
+    parser.add_argument(
         "--aegis-digester",
         choices=AEGIS_DIGESTER_MODES,
         default=DEFAULT_AEGIS_DIGESTER,
@@ -9852,7 +11057,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "authored from it (W1). 'chain' (default) is byte-identical to the "
             "built-in SerpAPI->Tavily->Wikipedia+Bing->DuckDuckGo chain. 'serper' "
             "swaps in a Serper-first (serper.dev, SERPER_API_KEY) drop-in that "
-            "falls back to that same chain on a missing key / empty result / error."
+            "falls back to that same chain on a missing key / empty result / error. "
+            "'serper_only' is Serper with no native fallback — requires "
+            "SERPER_API_KEY, never uses the built-in chain."
         ),
     )
     parser.add_argument(
@@ -9866,6 +11073,63 @@ def build_arg_parser() -> argparse.ArgumentParser:
             f"bounded (<= {_BOUNCE_MAX_STEPS} steps) 'commit a decision now' bounce "
             "(write config.yaml or an explicit cp no-op) before failing. At most "
             "one bounce per attempt; bounce_used / bounce_outcome are audited."
+        ),
+    )
+    parser.add_argument(
+        "--evolve-continuity",
+        choices=EVOLVE_CONTINUITY_MODES,
+        default=DEFAULT_EVOLVE_CONTINUITY,
+        help=(
+            "P1: slot-scoped continuity for the no-config retry loop. 'off' (default) "
+            "is byte-identical. 'on' carries the previous attempt's NOTES.md (or its "
+            "closing transcript) into the next attempt, spends one per-slot step "
+            "ledger (the configured --evolve-steps, floored), and GUARANTEES a "
+            "terminal outcome: an exhausted slot copies the parent config and "
+            "auto-abstains instead of raising. Requires --evolve-abstain outcome and "
+            "is mutually exclusive with --evolve-commit-bounce on."
+        ),
+    )
+    parser.add_argument(
+        "--evolve-abstain",
+        choices=EVOLVE_ABSTAIN_MODES,
+        default=DEFAULT_EVOLVE_ABSTAIN,
+        help=(
+            "P2: how a byte-identical explicit no-op is recorded. 'error' (default) "
+            "is byte-identical: it raises and is archived as PIPELINE_PROPOSAL. "
+            "'outcome' makes it a first-class ABSTAIN — a PIPELINE_ABSTAIN ledger "
+            "row (reason from _meta_scratch/ABSTAIN.md), a per-round pool_state "
+            "abstains counter, and last-round abstain feedback into the LLM planner. "
+            "The slot still counts in the denominator; only its classification changes."
+        ),
+    )
+    parser.add_argument(
+        "--proposal-repair-retry",
+        type=int,
+        choices=PROPOSAL_REPAIR_RETRY_MODES,
+        default=DEFAULT_PROPOSAL_REPAIR_RETRY,
+        help=(
+            "P3: targeted schema-repair retries for a produced (non-no-op) proposal. "
+            "0 (default) is byte-identical. 1 runs ONE more evolve, naming the "
+            "offending field, when the manifest/journal bucket is missing / not in "
+            f"the legal enum {list(BUCKETS)} or predicted_impact is empty; a second "
+            "failure is archived exactly as today. Draws the P1 step ledger when "
+            "--evolve-continuity is on."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-load-feedback",
+        action="store_true",
+        help=(
+            "§7.37: teach the meta-agent when its own edit does not LOAD. Default off "
+            "is byte-identical. On: (PART 1) inside the --evolve-continuity retry loop, "
+            "a shipped config is validated through the SAME fail-closed artefact/tool "
+            "net the evaluator uses right after evolve returns; a config that does not "
+            "load feeds the load error into the next attempt (costing an attempt slot, "
+            "no step budget) and retries, ending in the terminal auto-abstain with the "
+            "load error as its reason. (PART 2, backstop) an eval-time load failure of "
+            "a CANDIDATE config (gate window / ship-confirm) is downgraded to the "
+            "infra-failure lane instead of crashing the run; the active-pool raise "
+            "stays loud regardless of the flag."
         ),
     )
     parser.add_argument(
@@ -10331,7 +11595,27 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
         async def _runner(*, instruction, variant_id, max_steps, subtask_id, subtask_type) -> "SessionResult":
             safe_tid = str(parent_task.task_id).replace("/", "_").replace("\\", "_").replace(":", "_")
             sess_dir = sessions_root / safe_tid / f"{subtask_id}-{variant_id}"
-            round_config = _prepare_round_config(variant_config[variant_id], _make_journal(sess_dir))
+            try:
+                round_config = _prepare_round_config(
+                    variant_config[variant_id], _make_journal(sess_dir)
+                )
+            except (FileNotFoundError, ValueError, RuntimeError) as exc:
+                # --candidate-load-feedback: decomp subtasks are candidate-side, so a
+                # config that does not load is downgraded to an empty-output subtask
+                # (noted in decomp_manifest.json) instead of crashing the run. Off =>
+                # re-raised exactly as today (byte-identical).
+                if not bool(
+                    getattr(args, "candidate_load_feedback", DEFAULT_CANDIDATE_LOAD_FEEDBACK)
+                ):
+                    raise
+                logger.warning(
+                    "[decomp-%s] subtask %s config does not load; treating as an "
+                    "empty-output subtask and continuing (--candidate-load-feedback): %s",
+                    variant_id,
+                    subtask_id,
+                    exc,
+                )
+                return SessionResult(output="", steps=0, cost_usd=0.0)
             # Non-empty sentinel ground truth: keeps the reused rollout path from
             # firing the empty-GT LLM judge on a subtask (its pass/score is unused;
             # only the deterministic task-level gate over the synthesis is scored).
@@ -10479,6 +11763,14 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
         "pool_source": pool_source,
         "profile_source": profile_source,
     }
+    # --candidate-load-feedback provenance for --decomp-eval (its manifest is this
+    # mode's only provenance surface, cf. M-33). Added ONLY when on, so a default
+    # run's manifest stays byte-identical.
+    if bool(getattr(args, "candidate_load_feedback", DEFAULT_CANDIDATE_LOAD_FEEDBACK)):
+        manifest["candidate_load_feedback"] = (
+            "on: candidate-side subtask config-load failures downgraded to "
+            "empty-output subtasks (not run-fatal)"
+        )
     summary = {
         "pass_at_k": pass_at_score,
         "k": pass_k,
@@ -10508,6 +11800,30 @@ def _run_decomp_eval(args: Any, run_dir: Path, deps: dict[str, Any]) -> None:
     )
 
 
+def _validate_evolve_continuity_args(args: Any) -> None:
+    """Argparse-time guard for --evolve-continuity's hard requirements (P1).
+
+    ``--evolve-continuity on`` (1) REQUIRES ``--evolve-abstain outcome`` — its
+    guaranteed terminal auto-abstain must be recorded as an ABSTAIN, not a
+    producer error — and (2) is mutually exclusive with ``--evolve-commit-bounce
+    on`` (continuity supersedes the one-shot bounce). Raises ``SystemExit`` with a
+    clear message, matching main()'s other argument checks. A no-op when
+    continuity is off.
+    """
+    if str(getattr(args, "evolve_continuity", DEFAULT_EVOLVE_CONTINUITY)) != "on":
+        return
+    if str(getattr(args, "evolve_abstain", DEFAULT_EVOLVE_ABSTAIN)) != "outcome":
+        raise SystemExit(
+            "--evolve-continuity on requires --evolve-abstain outcome (its "
+            "guaranteed auto-abstain must be recorded as an ABSTAIN, not an error)"
+        )
+    if str(getattr(args, "evolve_commit_bounce", DEFAULT_EVOLVE_COMMIT_BOUNCE)) == "on":
+        raise SystemExit(
+            "--evolve-continuity on is mutually exclusive with "
+            "--evolve-commit-bounce on (continuity supersedes the one-shot bounce)"
+        )
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
     if args.pass_k < 1:
@@ -10530,6 +11846,7 @@ def main() -> None:
         raise SystemExit(
             "--decomp-eval is an evaluation-only mode and cannot be combined with --resume"
         )
+    _validate_evolve_continuity_args(args)
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     # --resume (default off): validate + resolve the target dir and derive

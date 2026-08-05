@@ -284,3 +284,146 @@ def test_default_chain_registry_serialises_websearch_as_builtin():
     cfg = _runtime_registry_to_config(registry)
     assert "WebSearch" in cfg.builtin
     assert not cfg.custom
+
+
+# ===========================================================================
+# serper_only: Serper with NO native fallback (the built-in chain never runs)
+# ===========================================================================
+
+
+def _boom_builtin(reason):
+    """A built-in WebSearch stub whose ``fn`` fails the test if it is ever called."""
+
+    def _boom(*a, **k):
+        raise AssertionError(reason)
+
+    return SimpleNamespace(fn=_boom)
+
+
+@pytest.mark.asyncio
+async def test_serper_only_returns_formatted_results_on_success(monkeypatch):
+    monkeypatch.setenv("SERPER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        serper.httpx,
+        "AsyncClient",
+        _fake_httpx_client(organic=[{"title": "Hit", "link": "https://h.example", "snippet": "snip"}]),
+    )
+    monkeypatch.setattr(
+        serper, "_builtin_web_search", _boom_builtin("serper_only success must not call the built-in chain")
+    )
+
+    out = await serper._serper_only_web_search("q", 5)
+
+    assert "Hit" in out and "https://h.example" in out and "snip" in out
+
+
+@pytest.mark.asyncio
+async def test_serper_only_empty_returns_builtin_wording_without_fallback(monkeypatch):
+    monkeypatch.setenv("SERPER_API_KEY", "test-key")
+    monkeypatch.setattr(serper.httpx, "AsyncClient", _fake_httpx_client(organic=[]))
+    monkeypatch.setattr(
+        serper,
+        "_builtin_web_search",
+        _boom_builtin("serper_only empty result must NOT fall back to the built-in chain"),
+    )
+
+    out = await serper._serper_only_web_search("who won", 5)
+
+    # Honest empty answer: exact built-in empty-result wording, reused (NOT a fallback).
+    assert out == serper._builtin_empty_result_message("who won")
+    assert out.startswith("[SEARCH UNAVAILABLE] All search providers failed for query: who won")
+
+
+@pytest.mark.asyncio
+async def test_serper_only_retries_then_returns_failure_string(monkeypatch):
+    monkeypatch.setenv("SERPER_API_KEY", "test-key")
+    monkeypatch.setattr(serper.httpx, "AsyncClient", _fake_httpx_client(raise_post=True))
+    slept: list = []
+
+    async def _fake_sleep(secs):
+        slept.append(secs)
+
+    monkeypatch.setattr(serper.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(
+        serper,
+        "_builtin_web_search",
+        _boom_builtin("serper_only failure must NOT fall back to the built-in chain"),
+    )
+
+    out = await serper._serper_only_web_search("q", 4)
+
+    assert out.startswith("Web search failed (Serper):")
+    assert out.endswith(".")
+    assert "serper connection refused" in out
+    # 3 total attempts -> 2 backoffs between them (2s then 5s); no sleep after the last.
+    assert slept == [2, 5]
+
+
+@pytest.mark.asyncio
+async def test_serper_only_missing_key_returns_unavailable_without_fallback(monkeypatch):
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        serper,
+        "_builtin_web_search",
+        _boom_builtin("serper_only must NOT touch the built-in chain when the key is missing"),
+    )
+
+    out = await serper._serper_only_web_search("q", 3)
+
+    assert out == (
+        "Web search unavailable: SERPER_API_KEY is not set (serper_only backend, no fallback)."
+    )
+
+
+def test_serper_only_tool_matches_builtin_schema_and_is_round_trippable():
+    assert serper.serper_only_web_search_tool.name == web_search_tool.name == "WebSearch"
+    assert serper.serper_only_web_search_tool.description == web_search_tool.description
+    assert serper.serper_only_web_search_tool.input_schema == web_search_tool.input_schema
+    assert serper.serper_only_web_search_tool.tags == web_search_tool.tags
+    assert serper.serper_only_web_search_tool.execution_target == web_search_tool.execution_target
+    assert (
+        serper.serper_only_web_search_tool.__hx_target__
+        == "harnessx.tools.contrib.serper_search.serper_only_web_search_tool"
+    )
+
+
+def test_maybe_use_serper_backend_serper_only_requires_key(monkeypatch):
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    registry = InMemoryToolRegistry()
+    registry.register(web_search_tool)
+    config = SimpleNamespace(tool_registry=registry)
+
+    with pytest.raises(SystemExit):
+        rvp._maybe_use_serper_backend(config, "serper_only")
+
+    # fail-fast happened BEFORE any swap: the built-in WebSearch is untouched.
+    assert registry._tools["WebSearch"] is web_search_tool
+
+
+def test_maybe_use_serper_backend_serper_only_swaps_websearch_in_place(monkeypatch):
+    monkeypatch.setenv("SERPER_API_KEY", "test-key")
+    registry = InMemoryToolRegistry()
+    registry.register(web_search_tool)
+    other = registry.list_names()
+    config = SimpleNamespace(tool_registry=registry)
+
+    rvp._maybe_use_serper_backend(config, "serper_only")
+
+    swapped = registry._tools["WebSearch"]
+    assert swapped is serper.serper_only_web_search_tool
+    assert swapped.name == "WebSearch"  # worker sees the same tool name
+    assert swapped.__hx_target__ == "harnessx.tools.contrib.serper_search.serper_only_web_search_tool"
+    assert set(registry.list_names()) == set(other)
+
+
+def test_search_backend_flag_accepts_serper_only():
+    parser = rvp.build_arg_parser()
+    assert parser.parse_args(["--search-backend", "serper_only"]).search_backend == "serper_only"
+
+
+def test_search_backend_provenance_serper_only():
+    warn = rvp._search_backend_provenance("serper_only")
+    assert warn is not None
+    assert "serper_only" in warn
+    assert "W1" in warn
+    assert "no native fallback" in warn.lower()

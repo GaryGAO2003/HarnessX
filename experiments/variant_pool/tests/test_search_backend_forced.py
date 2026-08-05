@@ -50,7 +50,7 @@ def _config_with(tools):
 
 def test_defaults_and_choices_are_stable():
     assert DEFAULT_SEARCH_BACKEND == "chain"
-    assert SEARCH_BACKENDS == ("chain", "serper")
+    assert SEARCH_BACKENDS == ("chain", "serper", "serper_only")
 
 
 def test_chain_is_a_byte_identical_noop():

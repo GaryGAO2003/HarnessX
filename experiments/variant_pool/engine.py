@@ -84,6 +84,8 @@ from .gate import (
     GateResult,
     GateStage,
     TaskEval,
+    _classify,
+    _decide,
     run_gate,
 )
 from .ledger import ROLLUP_MODES
@@ -122,6 +124,45 @@ DEFAULT_MAX_CANDIDATES = 4
 #:   whole configs exists in the repo (M-17 Phase-1 finding).
 SHIP_POLICIES = ("first_wins", "bucket_disjoint")
 
+#: --ship-confirmation modes (the pre-ship full-bed gate).
+#:
+#: The problem this fixes: candidates are gated on the *routed window* ``T_k``
+#: (~12 of 103 tasks in e_pervar3), so an APPLY/FORK the window renders is blind
+#: to what the edit does to the ~90 tasks routed elsewhere. Improvements or
+#: regressions off-window are structurally invisible at decision time.
+#:
+#: * ``off`` (default) — byte-identical: the window seesaw's APPLY/FORK/REJECT is
+#:   enacted directly, exactly as before this feature. No full-bed evaluation, no
+#:   extra counters, no config/lock/report change. This is a hard guarantee,
+#:   mirrored on every emitted field (nothing new is written when ``off``).
+#: * ``full_bed`` — the window seesaw becomes a *cheap pre-filter*: any candidate
+#:   about to APPLY or FORK is first re-evaluated on the **whole** task bed (the
+#:   run's complete task list, same pass-k structure and the same
+#:   candidate-evaluation path the window used, only parameterised by task list),
+#:   re-classified with :func:`gate._classify` against the same
+#:   ledger/regression-baseline, and re-decided with :func:`gate._decide` under
+#:   the same ``min_fork``. **The full-bed decision REPLACES the window
+#:   decision**: APPLY/FORK on the full bed is enacted; REJECT on the full bed
+#:   overturns the window ship and the candidate is archived under
+#:   :attr:`GateStage.SHIP_CONFIRM`. A candidate the window already REJECTS is
+#:   *never* confirmed — rejects stay window-only, so no extra cost is spent on
+#:   anything that was not about to ship. The window is the pre-filter; the full
+#:   bed is the verdict.
+#:
+#: Modes ``next_round`` and ``eprocess`` are reserved by STATPOOL-DESIGN.md
+#: §6.2/§8 for a *post*-ship probation mechanism (provisional ship -> next
+#: round's fresh measurement -> rollback if a PROTECTED task drops) and are NOT
+#: implemented here; ``full_bed`` is the pre-ship, candidate-scope confirmation.
+SHIP_CONFIRMATION_OFF = "off"
+SHIP_CONFIRMATION_FULL_BED = "full_bed"
+SHIP_CONFIRMATION_MODES = (SHIP_CONFIRMATION_OFF, SHIP_CONFIRMATION_FULL_BED)
+DEFAULT_SHIP_CONFIRMATION = SHIP_CONFIRMATION_OFF
+
+#: The evaluate-callback ``phase`` the engine passes on a full-bed confirmation
+#: call (and never on a window call). It lets a recipe route confirmation
+#: rollouts into their own accounting bucket without forking a second evaluator.
+SHIP_CONFIRM_PHASE = "confirm"
+
 #: pass@2 attempt count used to encode the ledger-derived before-state of a task
 #: (SPEC §6.1 p.15). ``(2, 2)`` = the variant already solves it, ``(0, 2)`` = it
 #: does not; only ``before_passes == 0`` matters to the gate's improved check.
@@ -144,6 +185,15 @@ class CandidateDiagnostic:
     failed_stage: GateStage | None = None
     archive_reason: str = ""
     skipped_reason: str | None = None
+    #: Set only under ``--ship-confirmation full_bed`` when a window APPLY/FORK
+    #: was re-classified on the whole bed: ``{mode, window_decision,
+    #: full_decision, window_improved, window_regressed, full_improved,
+    #: full_regressed}``. ``None`` (the default) whenever confirmation did not run
+    #: — so an ``off`` run leaves this field untouched and every reader that only
+    #: emits it when non-``None`` stays byte-identical. ``evaluation`` always
+    #: stays the window ``T_k`` measurement; the confirmation's own rollouts are
+    #: accounted separately by the recipe, never folded in here.
+    ship_confirm: dict[str, Any] | None = None
 
 
 @dataclass
@@ -201,7 +251,10 @@ class VariantPoolEngine:
         ledger: SuccessLedger,
         router: Router,
         *,
-        evaluate: Callable[[Any, set[str], int], Mapping[str, tuple[int, int]]],
+        # A full-bed confirmation reuses this same callback, only parameterised by
+        # task list and marked with ``phase=SHIP_CONFIRM_PHASE`` (a keyword the
+        # window call never passes), so the callback stays a single evaluator.
+        evaluate: Callable[..., Mapping[str, tuple[int, int]]],
         evolve: Callable[[Any, int], Any],
         gate: Callable[..., GateResult] = run_gate,
         evidence: EvidenceStore | None = None,
@@ -212,6 +265,7 @@ class VariantPoolEngine:
         record_selected_results: bool = True,
         ship_policy: str = "first_wins",
         regression_baseline: str = REGRESSION_BASELINE_GLOBAL,
+        ship_confirmation: str = DEFAULT_SHIP_CONFIRMATION,
     ) -> None:
         if patience < 1:
             raise ValueError(f"patience must be >= 1, got {patience}")
@@ -234,6 +288,11 @@ class VariantPoolEngine:
             raise ValueError(
                 f"regression_baseline must be one of {REGRESSION_BASELINE_MODES}, "
                 f"got {regression_baseline!r}"
+            )
+        if ship_confirmation not in SHIP_CONFIRMATION_MODES:
+            raise ValueError(
+                f"ship_confirmation must be one of {SHIP_CONFIRMATION_MODES}, "
+                f"got {ship_confirmation!r}"
             )
         self.pool = pool
         self.ledger = ledger
@@ -259,6 +318,12 @@ class VariantPoolEngine:
         #: its own variant history. Forwarded to the gate only when non-default, so
         #: a ``global`` run's gate call stays byte-identical (see :meth:`run_round`).
         self.regression_baseline = regression_baseline
+        #: Pre-ship full-bed confirmation (the routed-window blindness fix).
+        #: ``off`` (default) is byte-identical — the window seesaw ships directly.
+        #: ``full_bed`` re-classifies every window APPLY/FORK on the whole task bed
+        #: before it is enacted (see :data:`SHIP_CONFIRMATION_MODES`). Rejects are
+        #: never confirmed, so a window REJECT never triggers a full-bed rollout.
+        self.ship_confirmation = ship_confirmation
         #: Global idle counter (SPEC §6.6: single idle, aligned with Algorithm 1).
         self._idle = 0
 
@@ -405,6 +470,43 @@ class VariantPoolEngine:
                         # candidate on an unclaimed bucket.
                         result.candidate_diagnostics[candidate_id].skipped_reason = skip_reason
                         continue
+
+                    # --ship-confirmation full_bed: the window gate is a cheap
+                    # pre-filter; nothing ships until the full task bed agrees. Only
+                    # candidates that reach here (window APPLY/FORK, not multiship-
+                    # skipped) are confirmed — a window REJECT never gets this far, so
+                    # rejects stay window-only. ``off`` skips the whole block, which is
+                    # why an ``off`` run is byte-identical.
+                    if self.ship_confirmation == SHIP_CONFIRMATION_FULL_BED:
+                        confirm_result, confirm_meta = self._run_ship_confirmation(
+                            candidate, variant_id, tasks, round_idx, gate_result
+                        )
+                        diagnostic = result.candidate_diagnostics[candidate_id]
+                        diagnostic.ship_confirm = confirm_meta
+                        if confirm_result.decision is Decision.REJECT:
+                            # Full bed overturns the window ship: archive under
+                            # SHIP_CONFIRM with both verdicts, enact nothing, and keep
+                            # scanning the queue exactly as a plain REJECT would.
+                            diagnostic.decision = Decision.REJECT
+                            diagnostic.failed_stage = GateStage.SHIP_CONFIRM
+                            diagnostic.archive_reason = confirm_result.archive_reason
+                            last_rejected_eval = tk_eval
+                            result.decisions[variant_id] = Decision.REJECT
+                            self._archive_rejection(
+                                variant_id,
+                                candidate,
+                                confirm_result,
+                                round_idx,
+                                downgraded=False,
+                                candidate_id=candidate_id,
+                            )
+                            continue
+                        # Full bed confirms (or flips) the ship: its decision and its
+                        # improved/regressed sets REPLACE the window's for settlement.
+                        diagnostic.decision = confirm_result.decision
+                        diagnostic.archive_reason = confirm_result.archive_reason
+                        gate_result = confirm_result
+
                     if variant_id not in result.selected_candidate_ids:
                         result.per_variant_pass[variant_id] = dict(tk_eval)
                         result.selected_candidate_ids[variant_id] = candidate_id
@@ -472,6 +574,95 @@ class VariantPoolEngine:
         result.idle = self._idle
         result.variant_count = len(self.pool)
         return result
+
+    # ------------------------------------------------------------------
+    # ship confirmation (--ship-confirmation full_bed)
+    # ------------------------------------------------------------------
+
+    def _run_ship_confirmation(
+        self,
+        candidate: Any,
+        variant_id: str,
+        tasks: set[str],
+        round_idx: int,
+        window_result: GateResult,
+    ) -> tuple[GateResult, dict[str, Any]]:
+        """Re-decide a window APPLY/FORK on the whole task bed (the verdict).
+
+        The candidate is re-evaluated on ``tasks`` — the run's complete task list,
+        not the routed window — through the *same* ``evaluate`` callback, marked
+        ``phase=SHIP_CONFIRM_PHASE`` so the caller can bill the extra rollouts to
+        their own bucket. The full-bed outcomes go through the same before/after
+        classification the window used (:func:`gate._classify`) against the same
+        ledger and regression baseline, and the same :func:`gate._decide` under
+        the same ``min_fork``.
+
+        Returns the full-bed :class:`GateResult` (whose ``decision`` and
+        ``improved``/``regressed`` sets REPLACE the window's for settlement, and
+        whose ``failed_stage`` is :attr:`GateStage.SHIP_CONFIRM` on an overturn)
+        plus the per-candidate ``ship_confirm`` meta. This never runs the manifest
+        / L2 / smoke stages again: those do not depend on the task set and already
+        passed in the window gate — only the seesaw is task-set-dependent.
+        """
+        full_eval_raw = self.evaluate(
+            candidate, set(tasks), round_idx, phase=SHIP_CONFIRM_PHASE
+        )
+        self._require_full_coverage(variant_id, tasks, full_eval_raw)
+        full_results = [
+            self._task_eval(variant_id, task, full_eval_raw[task])
+            for task in sorted(tasks)
+        ]
+        full_improved, full_regressed = _classify(
+            full_results, self.ledger, regression_baseline=self.regression_baseline
+        )
+        full_decision = _decide(full_improved, full_regressed, self.min_fork)
+
+        window_summary = (
+            f"improved={sorted(window_result.improved)} "
+            f"regressed={sorted(window_result.regressed)}"
+        )
+        full_summary = f"improved={sorted(full_improved)} regressed={sorted(full_regressed)}"
+        window_decision = window_result.decision
+
+        if full_decision is Decision.REJECT:
+            archive_reason = (
+                f"{GateStage.SHIP_CONFIRM.name}: window said "
+                f"{window_decision.value} ({window_summary}) but full bed said "
+                f"reject ({full_summary})"
+            )
+            confirm_result = GateResult(
+                passed=False,
+                failed_stage=GateStage.SHIP_CONFIRM,
+                decision=Decision.REJECT,
+                archive_reason=archive_reason,
+                improved=frozenset(full_improved),
+                regressed=frozenset(full_regressed),
+            )
+        else:
+            archive_reason = (
+                f"{full_decision.name}: {full_summary} "
+                f"(SHIP_CONFIRM full_bed confirmed; window said "
+                f"{window_decision.value} {window_summary})"
+            )
+            confirm_result = GateResult(
+                passed=True,
+                failed_stage=None,
+                decision=full_decision,
+                archive_reason=archive_reason,
+                improved=frozenset(full_improved),
+                regressed=frozenset(full_regressed),
+            )
+
+        meta = {
+            "mode": self.ship_confirmation,
+            "window_decision": window_decision.value,
+            "full_decision": full_decision.value,
+            "window_improved": len(window_result.improved),
+            "window_regressed": len(window_result.regressed),
+            "full_improved": len(full_improved),
+            "full_regressed": len(full_regressed),
+        }
+        return confirm_result, meta
 
     # ------------------------------------------------------------------
     # decision handling
