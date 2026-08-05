@@ -300,3 +300,59 @@ if __name__ == "__main__":
     print("E1b  s1k8b103 + e_pervar3 (10 variants; same bed sha, different H0)")
     print("=" * 74)
     run(["s1k8b103", "e_pervar3"], boots=boots)
+
+
+# --------------------------------------------------------------------------
+# E1-power -- what size of specialism COULD this data have detected?
+# --------------------------------------------------------------------------
+def power_curve(runs, s_grid=(0.0, 0.5, 1.0, 1.5, 2.0, 3.0), reps=20, seed=0,
+                attempt_mult=1):
+    """Inject a KNOWN specialism axis and see whether E1 finds it.
+
+    A null result only means something once you know what the design could have
+    detected. Synthetic truth = the fitted M1 (no interaction) plus s*u_v*w_t,
+    generated on the REAL attempt structure, so the answer is specific to this
+    matrix's sparsity -- not to some idealised design.
+
+    ``attempt_mult`` scales every cell's attempts, answering the separate
+    question "how much denser would a run have to be?".
+    """
+    vi, ti, K, N, vname, tname = build(runs)
+    V, T = len(vname), len(tname)
+    N = N * attempt_mult
+    rng = np.random.default_rng(seed)
+    f1 = fit(vi, ti, K * attempt_mult, N, V, T, 0, seed=seed)
+    mu, al, be, _, _ = f1
+    base_eta = mu + al[vi] + be[ti]
+
+    print(f"\n{'='*74}\nE1-POWER  runs={runs}  attempt_mult={attempt_mult}  reps={reps}")
+    print(f"{'='*74}")
+    print(f"{'s':>5}{'true VBS-SBS':>14}{'mean M2 gain':>14}{'detect rate':>13}"
+          f"{'(gain>0)':>10}")
+    for s in s_grid:
+        gains, vbsgap = [], []
+        for rep in range(reps):
+            r2 = np.random.default_rng(seed * 1000 + rep)
+            u = r2.normal(0, 1, V)
+            w = r2.normal(0, 1, T)
+            u = (u - u.mean()) / (u.std() + 1e-9)
+            w = (w - w.mean()) / (w.std() + 1e-9)
+            eta = base_eta + s * u[vi] * w[ti]
+            Ksyn = r2.binomial(N.astype(int), _sig(eta)).astype(float)
+            # true VBS-SBS of the synthetic ground truth
+            P = _sig(mu + al[:, None] + be[None, :] + s * np.outer(u, w))
+            v_, sb = vbs_sbs(P)
+            vbsgap.append(v_ - sb)
+            Ktr, Ntr, Kte, Nte = split(Ksyn, N, 0.30, r2)
+            ok = Nte > 0
+            g1 = fit(vi, ti, Ktr, Ntr, V, T, 0, seed=rep)
+            g2 = fit(vi, ti, Ktr, Ntr, V, T, 1, seed=rep)
+            h1 = nll_per_attempt(predict(*g1, vi[ok], ti[ok]), Kte[ok], Nte[ok])
+            h2 = nll_per_attempt(predict(*g2, vi[ok], ti[ok]), Kte[ok], Nte[ok])
+            gains.append((h1 - h2) * 1000)
+        gains = np.array(gains)
+        print(f"{s:>5.2f}{np.mean(vbsgap)*100:>13.2f}pp{gains.mean():>14.2f}"
+              f"{100*(gains>0).mean():>12.0f}%{'':>10}")
+    print("  detect rate = share of reps where M2 beat M1 out of sample.")
+    print("  Read the smallest s with a high rate: specialism below that VBS-SBS")
+    print("  is INVISIBLE to this design -- a null there means nothing.")
