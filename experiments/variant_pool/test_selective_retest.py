@@ -7,6 +7,7 @@ import pytest
 
 from experiments.variant_pool.selective_retest import (
     RetestDecision,
+    RetestMode,
     RetestReport,
     SelectiveRetestEngine,
 )
@@ -101,6 +102,57 @@ class TestSelectiveRetestEngine:
         # Heuristic ignores genotype mismatch for intersection check
         decision = engine.should_retest({"proc:a"}, set(), fp, "new_hash")
         assert decision == RetestDecision.CAN_INHERIT  # no intersection
+
+class TestFullModeToggle:
+    """Full mode = original HarnessX behaviour — every task retested."""
+
+    def test_is_active_false_in_full_mode(self):
+        engine = SelectiveRetestEngine(mode=RetestMode.FULL)
+        assert not engine.is_active
+
+    def test_is_active_true_in_heuristic(self):
+        base = Path(tempfile.mkdtemp(prefix="s5_"))
+        store = FootprintStore(base)
+        engine = SelectiveRetestEngine(mode=RetestMode.HEURISTIC, footprint_store=store)
+        assert engine.is_active
+
+    def test_is_active_false_without_store(self):
+        engine = SelectiveRetestEngine(mode=RetestMode.SAFE)
+        assert not engine.is_active  # no store → fallback to full
+
+    def test_full_mode_always_retest(self):
+        """FULL mode: every task MUST_RETEST unconditionally."""
+        engine = SelectiveRetestEngine(mode=RetestMode.FULL)
+        g = make_graph()
+        edit = GraphEdit(edit_type=GraphEditType.MUTATE_INACTIVE, target_node_id="proc:a", node_changes={"x": 1})
+        report = engine.decide([edit], g, ["t1", "t2", "t3"], "V0")
+        assert report.total_tasks == 3
+        assert report.must_retest == 3
+        assert report.can_inherit == 0
+        assert report.budget_saved_pct == 0.0
+        assert report.mode == "full"
+
+    def test_full_mode_ignores_footprint(self):
+        """FULL mode: ignores footprint even if available."""
+        base = Path(tempfile.mkdtemp(prefix="s5_"))
+        store = FootprintStore(base)
+        store.put(CoverageFootprint(
+            task_id="t1", variant_id="V0",
+            touched_node_ids={"proc:isolated"}, genotype_hash="abc123",
+        ))
+        engine = SelectiveRetestEngine(mode=RetestMode.FULL, footprint_store=store)
+        g = make_graph()
+        edit = GraphEdit(edit_type=GraphEditType.MUTATE_INACTIVE, target_node_id="proc:a", node_changes={"x": 1})
+        report = engine.decide([edit], g, ["t1"], "V0")
+        assert report.must_retest == 1  # full mode overrides
+
+    def test_string_mode_accepted(self):
+        engine = SelectiveRetestEngine(mode="full")
+        assert engine.mode == RetestMode.FULL
+
+    def test_default_is_full(self):
+        engine = SelectiveRetestEngine()
+        assert engine.mode == RetestMode.FULL
 
     def test_decide_with_footprint_store(self):
         base = Path(tempfile.mkdtemp(prefix="s5_retest_"))

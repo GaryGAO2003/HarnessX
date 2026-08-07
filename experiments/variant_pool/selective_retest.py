@@ -1,25 +1,33 @@
-"""S5 — Selective retest engine.
+"""S5 — Selective retest engine with full-vs-selective toggle.
 
 Replaces full-task-bed measurement with danger-edge ∩ footprint
 intersection checks.  Tasks whose footprint does not touch any
 danger edge inherit the parent variant's score — saving budget.
 
-Modes
------
-**safe** (deterministic replay)
-    Only skip if the footprint was computed under the same genotype
-    hash AND the danger-edge intersection is provably empty.
+Three retest modes (toggle via ``mode`` parameter)
+--------------------------------------------------
+**full**      Original HarnessX behaviour — every task re-evaluated.
+              Zero risk of missing a regression.  Zero budget saved.
+              Default when no graph IR or no footprints available.
 
-**heuristic** (footprint union)
-    Use the union of all historical footprints for a task as the
-    baseline.  Wider → fewer skips → safer but less budget saved.
+**safe**      Deterministic-replay selective retest.  Only skips when
+              the footprint was computed under the same genotype hash
+              AND the danger-edge intersection is provably empty.
+
+**heuristic** Footprint-union selective retest.  Uses union of
+              historical footprints as baseline.  Wider → fewer skips
+              → safer but less budget saved.
 
 Decision table (from S2 pre-check)
 -----------------------------------
 ============ ===== ==================================================
-④ stability  ≥0.7  safe mode
-④ stability  <0.5  heuristic mode (default when no data)
+S2 ④         ≥0.7  safe mode
+S2 ④         <0.5  heuristic mode  (default when no data)
 ============ ===== ==================================================
+
+The engine is designed as a drop-in: when mode="full" or
+footprint_store is None, behaviour is byte-identical to the
+original HarnessX full-retest path.
 """
 
 from __future__ import annotations
@@ -34,16 +42,24 @@ from harnessx.graph.edit import GraphEdit
 from harnessx.graph.types import GraphSnapshot
 
 
+class RetestMode(str, Enum):
+    """Global retest policy toggle."""
+    FULL = "full"            # always retest (original HarnessX)
+    SAFE = "safe"            # genotype-matched footprint skip
+    HEURISTIC = "heuristic"  # footprint-union skip
+
+
 class RetestDecision(str, Enum):
     MUST_RETEST = "must_retest"
     CAN_INHERIT = "can_inherit"
-    UNCERTAIN = "uncertain"  # stale footprint, force retest
+    UNCERTAIN = "uncertain"  # stale footprint or cold start — force retest
 
 
 @dataclass
 class RetestReport:
     """Per-candidate retest decision summary."""
 
+    mode: str = ""
     total_tasks: int = 0
     must_retest: int = 0
     can_inherit: int = 0
@@ -53,12 +69,13 @@ class RetestReport:
 
     def record(self, task_id: str, decision: RetestDecision) -> None:
         self.total_tasks += 1
-        if decision == RetestDecision.MUST_RETEST:
-            self.must_retest += 1
-        elif decision == RetestDecision.CAN_INHERIT:
-            self.can_inherit += 1
-        else:
-            self.uncertain += 1
+        task_decisions = {
+            RetestDecision.MUST_RETEST: "must_retest",
+            RetestDecision.CAN_INHERIT: "can_inherit",
+            RetestDecision.UNCERTAIN: "uncertain",
+        }
+        key = task_decisions[decision]
+        setattr(self, key, getattr(self, key) + 1)
         self.per_task[task_id] = decision
 
     def finalize(self) -> None:
@@ -69,22 +86,41 @@ class RetestReport:
 class SelectiveRetestEngine:
     """Decides which tasks need re-evaluation for a graph edit candidate.
 
+    Drop-in for VariantPoolEngine.evaluate(): when mode="full" or no
+    footprint_store, every task gets MUST_RETEST — identical to the
+    original full-measurement path.
+
     Usage::
 
-        engine = SelectiveRetestEngine(mode="heuristic", footprint_store=store)
+        # Full retest (original HarnessX behaviour)
+        engine = SelectiveRetestEngine(mode=RetestMode.FULL)
+
+        # Selective retest (graph-aware)
+        engine = SelectiveRetestEngine(mode=RetestMode.HEURISTIC,
+                                       footprint_store=store)
+
         report = engine.decide(edits, graph, task_ids, variant_id)
-        # → report.can_inherit tasks can skip measurement
+        must_retest = [t for t, d in report.per_task.items()
+                        if d != RetestDecision.CAN_INHERIT]
     """
 
     def __init__(
         self,
-        mode: str = "heuristic",
+        mode: RetestMode | str = RetestMode.FULL,
         footprint_store: FootprintStore | None = None,
         max_footprint_age: int = 3,
     ):
-        self.mode = mode  # "safe" | "heuristic"
+        if isinstance(mode, str):
+            mode = RetestMode(mode)
+        self.mode: RetestMode = mode
         self.footprint_store = footprint_store
         self.max_footprint_age = max_footprint_age
+
+    @property
+    def is_active(self) -> bool:
+        """True when selective retest is actually in use."""
+        return (self.mode != RetestMode.FULL
+                and self.footprint_store is not None)
 
     def should_retest(
         self,
@@ -95,21 +131,19 @@ class SelectiveRetestEngine:
     ) -> RetestDecision:
         """Decide whether one task needs re-evaluation.
 
-        Args:
-            danger_nodes: Nodes affected by the edit set.
-            danger_edges: Edge keys affected by the edit set.
-            footprint: The task's last coverage footprint (may be None).
-            current_genotype: The current config's genotype hash.
-
-        Returns:
-            RetestDecision — MUST_RETEST, CAN_INHERIT, or UNCERTAIN.
+        When ``footprint`` is None, always returns MUST_RETEST (cold start).
+        Otherwise applies the active mode's logic.
         """
+        # Full mode: always retest (original HarnessX)
+        if self.mode == RetestMode.FULL:
+            return RetestDecision.MUST_RETEST
+
         # No footprint → must retest (cold start)
         if footprint is None:
             return RetestDecision.MUST_RETEST
 
-        # Footprint was computed under a different config → uncertain
-        if self.mode == "safe" and footprint.genotype_hash != current_genotype:
+        # Safe mode: genotype must match
+        if self.mode == RetestMode.SAFE and footprint.genotype_hash != current_genotype:
             return RetestDecision.UNCERTAIN
 
         # Check intersection
@@ -128,24 +162,21 @@ class SelectiveRetestEngine:
         task_ids: list[str],
         variant_id: str,
     ) -> RetestReport:
-        """Decide retest for all tasks in a variant's T_k.
+        """Decide retest for all tasks in a variant's T_k."""
+        report = RetestReport(mode=self.mode.value)
 
-        Args:
-            edits: The proposed graph edits.
-            graph: The parent graph snapshot.
-            task_ids: Tasks routed to this variant (T_k).
-            variant_id: The variant being evolved.
+        if not self.is_active or self.mode == RetestMode.FULL:
+            # Full mode or no store: every task must retest — fast path
+            for task_id in task_ids:
+                report.record(task_id, RetestDecision.MUST_RETEST)
+            report.finalize()
+            return report
 
-        Returns:
-            RetestReport with per-task decisions.
-        """
+        # Selective modes with store available
         danger_nodes, danger_edges = danger_edge_set(edits, graph)
-        report = RetestReport()
 
         for task_id in task_ids:
-            fp = None
-            if self.footprint_store is not None:
-                fp = self.footprint_store.get(variant_id, task_id)
+            fp = self.footprint_store.get(variant_id, task_id)  # type: ignore[union-attr]
             decision = self.should_retest(
                 danger_nodes, danger_edges, fp, graph.genotype_hash,
             )
