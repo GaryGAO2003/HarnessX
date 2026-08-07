@@ -21,38 +21,50 @@ from __future__ import annotations
 from collections import deque
 
 from .edit import GraphEdit
-from .types import GraphSnapshot
+from .types import EdgeType, GraphSnapshot
 
 
 # ── forward slice ───────────────────────────────────────────────────────────
+
+
+# Edges that propagate *impact* (not just placement).
+# ATTACHED_TO is WHERE a processor runs, not WHAT it affects.
+# AFTER, WRITES_TO, READS_FROM carry semantic dependency.
+_IMPACT_EDGE_TYPES = frozenset({
+    EdgeType.AFTER,
+    EdgeType.WRITES_TO,
+    EdgeType.READS_FROM,
+    EdgeType.LOOP_BACK,
+})
 
 
 def forward_slice(
     snapshot: GraphSnapshot,
     start_node_ids: set[str],
 ) -> set[str]:
-    """Compute the forward reachable set from a set of start nodes.
+    """Compute the forward-reachable impact cone from start nodes.
 
-    Traverses ATTACHED_TO, AFTER, WRITES_TO, READS_FROM, and LOOP_BACK
-    edges — the declared structural edges that propagate effects.
+    Only traverses *semantic* edges (AFTER, WRITES_TO, READS_FROM).
+    ATTACHED_TO edges are structural placement — they say where a
+    processor is installed, not what it affects downstream.
 
     Args:
         snapshot: The declared graph.
         start_node_ids: Nodes whose forward reachable cone to compute.
 
     Returns:
-        Set of all node_ids reachable from any start node via
-        declared edges (including the start nodes themselves).
+        Node_ids reachable via semantic edges from any start node.
     """
     reachable: set[str] = set(start_node_ids)
     queue = deque(start_node_ids)
 
-    # Build adjacency list
+    # Build adjacency list — semantic edges only
     adj: dict[str, list[str]] = {}
     for edge in snapshot.edges:
         if edge.edge_type.value.startswith("observed_"):
             continue
-        adj.setdefault(edge.source_id, []).append(edge.target_id)
+        if edge.edge_type in _IMPACT_EDGE_TYPES:
+            adj.setdefault(edge.source_id, []).append(edge.target_id)
 
     while queue:
         current = queue.popleft()

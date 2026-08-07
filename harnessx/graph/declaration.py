@@ -43,22 +43,19 @@ class DeclarationSource(str, Enum):
 
 @dataclass
 class ComponentDecl:
-    """Declared metadata for one processor component.
+    """Declared metadata for one processor component."""
 
-    Maps to ``_ProcEntry`` fields plus data dependency declarations.
-    """
-
-    target: str  # qualified class path (_target_)
-    hook: str = ""  # which hook it fires on, "*" for MultiHook
-    order: int = 50  # NORMAL; PRE=0, POST=100
-    singleton_group: str = ""  # empty = no conflict group
-    after: tuple[str, ...] = ()  # singleton_groups that must precede this
-    writes_to: tuple[str, ...] = ()  # slot names written
-    reads_from: tuple[str, ...] = ()  # slot names read
+    target: str
+    hook: str = ""
+    order: int = 50
+    singleton_group: str = ""
+    after: tuple[str, ...] = ()
+    writes_to: tuple[str, ...] = ()
+    reads_from: tuple[str, ...] = ()
 
     source: DeclarationSource = DeclarationSource.UNKNOWN
     confidence: float = 0.0
-    llm_evidence: str = ""  # free-text rationale from LLM drafting
+    llm_evidence: str = ""
 
     def is_trusted(self) -> bool:
         return self.confidence >= 0.9
@@ -67,78 +64,112 @@ class ComponentDecl:
         return self.confidence >= 0.5
 
 
-# ── defaults for well-known components ──────────────────────────────────────
+# ── built-in declarations (source: code scan 2026-08-08) ────────────────────
 
-# Built-in processors whose hook/order/singleton_group are known from
-# code inspection.  These serve as the seed for declaration backfill.
 WELL_KNOWN_DECLARATIONS: dict[str, ComponentDecl] = {
-    # ── context bundle ──
+    # ═══ context bundle ═══
     "harnessx.processors.context.system_prompt.SystemPromptProcessor": ComponentDecl(
         target="harnessx.processors.context.system_prompt.SystemPromptProcessor",
-        hook="task_start",
-        singleton_group="system_prompt",
-        source=DeclarationSource.CODE_INTROSPECTION,
-        confidence=1.0,
+        order=1, singleton_group="context.system",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     "harnessx.processors.context.user_wrapper.UserWrapperProcessor": ComponentDecl(
         target="harnessx.processors.context.user_wrapper.UserWrapperProcessor",
-        hook="step_start",
-        singleton_group="user_wrapper",
-        source=DeclarationSource.CODE_INTROSPECTION,
-        confidence=1.0,
+        order=5, singleton_group="context.user_wrapper",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    # ── control bundle ──
+    # ═══ memory bundle ═══
+    "harnessx.processors.memory.memory_extraction.MemoryExtractionProcessor": ComponentDecl(
+        target="harnessx.processors.memory.memory_extraction.MemoryExtractionProcessor",
+        order=3, singleton_group="memory.extraction",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    "harnessx.processors.memory.memory_retrieval.MemoryRetrievalProcessor": ComponentDecl(
+        target="harnessx.processors.memory.memory_retrieval.MemoryRetrievalProcessor",
+        order=3, singleton_group="memory.retrieval",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    # ═══ control bundle ═══
     "harnessx.processors.control.loop_detection.LoopDetectionProcessor": ComponentDecl(
         target="harnessx.processors.control.loop_detection.LoopDetectionProcessor",
-        hook="step_end",
-        singleton_group="loop_detection",
-        source=DeclarationSource.CODE_INTROSPECTION,
-        confidence=1.0,
+        order=20, singleton_group="loop_detection",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     "harnessx.processors.control.compaction.CompactionProcessor": ComponentDecl(
         target="harnessx.processors.control.compaction.CompactionProcessor",
-        hook="step_end",
-        singleton_group="compaction",
-        source=DeclarationSource.CODE_INTROSPECTION,
-        confidence=1.0,
+        order=8, singleton_group="compaction",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     "harnessx.processors.control.cost_guard.CostGuardProcessor": ComponentDecl(
         target="harnessx.processors.control.cost_guard.CostGuardProcessor",
-        hook="before_model",
-        order=100,  # POST — runs last before model call
-        singleton_group="cost_guard",
+        order=10, singleton_group="cost_guard",
         reads_from=("cost",),
-        source=DeclarationSource.CODE_INTROSPECTION,
-        confidence=1.0,
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     "harnessx.processors.control.parse_retry.ParseRetryProcessor": ComponentDecl(
         target="harnessx.processors.control.parse_retry.ParseRetryProcessor",
-        hook="after_model",
-        singleton_group="parse_retry",
-        source=DeclarationSource.CODE_INTROSPECTION,
-        confidence=1.0,
-    ),
-    "harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer": ComponentDecl(
-        target="harnessx.processors.control.tool_call_correction.ToolCallCorrectionLayer",
-        hook="after_model",
-        singleton_group="tool_call_correction",
-        source=DeclarationSource.CODE_INTROSPECTION,
-        confidence=1.0,
-    ),
-    # ── tool bundle ──
-    "harnessx.processors.tools.skill_loader.ProgressiveSkillLoader": ComponentDecl(
-        target="harnessx.processors.tools.skill_loader.ProgressiveSkillLoader",
-        hook="step_start",
-        singleton_group="skill_loader",
-        source=DeclarationSource.CODE_INTROSPECTION,
-        confidence=1.0,
+        order=10, singleton_group="parse_retry",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     "harnessx.processors.control.self_verify.SelfVerifyProcessor": ComponentDecl(
         target="harnessx.processors.control.self_verify.SelfVerifyProcessor",
-        hook="after_tool",
-        singleton_group="self_verify",
-        source=DeclarationSource.CODE_INTROSPECTION,
-        confidence=1.0,
+        order=90, singleton_group="self_verify",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    "harnessx.processors.control.token_budget.TokenBudgetProcessor": ComponentDecl(
+        target="harnessx.processors.control.token_budget.TokenBudgetProcessor",
+        order=10, singleton_group="token_budget",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    "harnessx.processors.control.step_countdown.StepCountdownProcessor": ComponentDecl(
+        target="harnessx.processors.control.step_countdown.StepCountdownProcessor",
+        order=40, singleton_group="step_countdown",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    # ═══ tool bundle ═══
+    "harnessx.processors.tools.skill_loader.ProgressiveSkillLoader": ComponentDecl(
+        target="harnessx.processors.tools.skill_loader.ProgressiveSkillLoader",
+        singleton_group="skill_loader",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    "harnessx.processors.tools.tool_filter.ToolFilterProcessor": ComponentDecl(
+        target="harnessx.processors.tools.tool_filter.ToolFilterProcessor",
+        order=6, singleton_group="tools.filter",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    "harnessx.processors.tools.tool_whitelist.ToolWhitelistProcessor": ComponentDecl(
+        target="harnessx.processors.tools.tool_whitelist.ToolWhitelistProcessor",
+        order=10, singleton_group="tool_whitelist",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    # ═══ observability ═══
+    "harnessx.processors.observability.otel_proc.OTelProcessor": ComponentDecl(
+        target="harnessx.processors.observability.otel_proc.OTelProcessor",
+        order=30, singleton_group="otel",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    "harnessx.processors.observability.checkpoint.CheckpointProcessor": ComponentDecl(
+        target="harnessx.processors.observability.checkpoint.CheckpointProcessor",
+        order=10, singleton_group="checkpoint",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    # ═══ evaluation ═══
+    "harnessx.processors.evaluation.evaluation.EvaluationProcessor": ComponentDecl(
+        target="harnessx.processors.evaluation.evaluation.EvaluationProcessor",
+        singleton_group="evaluation",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    "harnessx.processors.evaluation.llm_judge.LLMJudgeProcessor": ComponentDecl(
+        target="harnessx.processors.evaluation.llm_judge.LLMJudgeProcessor",
+        singleton_group="llm_judge",
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
+    ),
+    # ═══ multi-model ═══
+    "harnessx.processors.multi_model.model_router.ModelRouterProcessor": ComponentDecl(
+        target="harnessx.processors.multi_model.model_router.ModelRouterProcessor",
+        order=20, singleton_group="model_router",
+        writes_to=("model_route",),
+        source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
 }
 
@@ -154,30 +185,18 @@ def backfill_declarations(
     """Produce the best available declaration for each target.
 
     Resolution order: code_introspection > observation_verified > llm_draft.
-
-    Args:
-        targets: List of ``_target_`` class paths.
-        hints: Optional LLM-drafted declarations keyed by target.
-
-    Returns:
-        ``{target: ComponentDecl}`` — every target gets at least an UNKNOWN entry.
     """
     result: dict[str, ComponentDecl] = {}
 
     for target in targets:
-        # 1. Check well-known declarations (code introspection)
         known = WELL_KNOWN_DECLARATIONS.get(target)
         if known is not None:
             result[target] = known
             continue
-
-        # 2. Check provided hints (LLM draft)
         hint = (hints or {}).get(target)
         if hint is not None:
             result[target] = hint
             continue
-
-        # 3. Unknown — opaque to graph validation
         result[target] = ComponentDecl(
             target=target,
             source=DeclarationSource.UNKNOWN,
@@ -191,58 +210,40 @@ def merge_declarations(
     declared: dict[str, ComponentDecl],
     observed: dict[str, ComponentDecl],
 ) -> dict[str, ComponentDecl]:
-    """Merge declared and observed metadata, resolving divergences.
-
-    Observation wins for ``hook``, ``writes_to``, ``reads_from`` (runtime truth).
-    Declaration wins for ``singleton_group``, ``after`` (design intent).
-    """
+    """Merge declared and observed metadata."""
     result: dict[str, ComponentDecl] = {}
-
     for target in set(declared) | set(observed):
         dec = declared.get(target)
         obs = observed.get(target)
-
         if dec is None:
             result[target] = obs  # type: ignore[assignment]
-            continue
-        if obs is None:
+        elif obs is None:
             result[target] = dec
-            continue
-
-        # Merge: observed hook/data deps, declared ordering
-        merged = ComponentDecl(
-            target=target,
-            hook=obs.hook or dec.hook,
-            order=dec.order,
-            singleton_group=dec.singleton_group,
-            after=dec.after,
-            writes_to=obs.writes_to or dec.writes_to,
-            reads_from=obs.reads_from or dec.reads_from,
-            source=DeclarationSource.OBSERVATION_VERIFIED if obs.is_trusted() else dec.source,
-            confidence=max(dec.confidence, obs.confidence),
-        )
-        result[target] = merged
-
+        else:
+            result[target] = ComponentDecl(
+                target=target,
+                hook=obs.hook or dec.hook,
+                order=dec.order,
+                singleton_group=dec.singleton_group,
+                after=dec.after,
+                writes_to=obs.writes_to or dec.writes_to,
+                reads_from=obs.reads_from or dec.reads_from,
+                source=DeclarationSource.OBSERVATION_VERIFIED if obs.is_trusted() else dec.source,
+                confidence=max(dec.confidence, obs.confidence),
+            )
     return result
 
 
 def validate_declarations(
     declarations: dict[str, ComponentDecl],
 ) -> list[str]:
-    """Check declarations for internal contradictions.
-
-    Returns a list of error messages (empty = valid).
-    """
+    """Check declarations for internal contradictions."""
     errors: list[str] = []
-
-    sg_targets: dict[str, str] = {}  # singleton_group → first target
-
+    sg_targets: dict[str, str] = {}
     for target, decl in declarations.items():
         sg = decl.singleton_group
         if not sg:
             continue
-
-        # Singleton conflict: two components with same singleton_group
         if sg in sg_targets and sg_targets[sg] != target:
             errors.append(
                 f"singleton_conflict: {target} and {sg_targets[sg]} "
@@ -250,11 +251,7 @@ def validate_declarations(
             )
         else:
             sg_targets[sg] = target
-
-        # After-dependency resolution
         for after_sg in decl.after:
             if after_sg not in sg_targets:
-                # The after target might not be in this config — soft dep
-                pass
-
+                pass  # soft dep — may be in another config
     return errors

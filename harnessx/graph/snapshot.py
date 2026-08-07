@@ -149,6 +149,22 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
             if val is not None:
                 extra[key] = val
 
+        # Inject declaration metadata from well-known processor classes
+        from .declaration import WELL_KNOWN_DECLARATIONS
+        decl = WELL_KNOWN_DECLARATIONS.get(target)
+        if decl is not None:
+            if decl.singleton_group and "_singleton_group_" not in extra:
+                extra["_singleton_group_"] = decl.singleton_group
+            if decl.order and "_order_" not in extra:
+                extra["_order_"] = decl.order
+            if decl.after and "_after_" not in extra:
+                extra["_after_"] = decl.after
+            # Store slot deps for edge creation later
+            if decl.writes_to:
+                extra["_writes_slots_"] = list(decl.writes_to)
+            if decl.reads_from:
+                extra["_reads_slots_"] = list(decl.reads_from)
+
         # Disambiguate duplicate targets (same class used multiple times)
         seen_targets[target] = seen_targets.get(target, 0) + 1
         index = seen_targets[target]
@@ -232,6 +248,28 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
 
     # 6. Slot nodes + read/write edges
     _add_slot_nodes(snapshot)
+
+    # 7. WRITES_TO / READS_FROM edges from declaration metadata
+    for node_id in proc_node_ids:
+        node = snapshot.nodes[node_id]
+        for slot_name in node.metadata.get("_writes_slots_", []):
+            slot_node_id = f"slot:{slot_name}"
+            if slot_node_id in snapshot.nodes:
+                snapshot.edges.append(Edge(
+                    source_id=node_id,
+                    target_id=slot_node_id,
+                    edge_type=EdgeType.WRITES_TO,
+                    metadata={"provenance": "declared"},
+                ))
+        for slot_name in node.metadata.get("_reads_slots_", []):
+            slot_node_id = f"slot:{slot_name}"
+            if slot_node_id in snapshot.nodes:
+                snapshot.edges.append(Edge(
+                    source_id=node_id,
+                    target_id=slot_node_id,
+                    edge_type=EdgeType.READS_FROM,
+                    metadata={"provenance": "declared"},
+                ))
 
     return snapshot
 
