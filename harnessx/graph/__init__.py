@@ -15,6 +15,14 @@ Core API
     ghash = genotype_hash(snapshot)
 """
 
+from .declaration import (
+    ComponentDecl,
+    DeclarationSource,
+    WELL_KNOWN_DECLARATIONS,
+    backfill_declarations,
+    merge_declarations,
+    validate_declarations,
+)
 from .identity import DedupRegistry, genotype_hash, phenotype_hash
 from .snapshot import to_graph
 from .types import (
@@ -40,4 +48,11 @@ __all__ = [
     "genotype_hash",
     "phenotype_hash",
     "DedupRegistry",
+    # declaration (S3)
+    "ComponentDecl",
+    "DeclarationSource",
+    "WELL_KNOWN_DECLARATIONS",
+    "backfill_declarations",
+    "merge_declarations",
+    "validate_declarations",
 ]

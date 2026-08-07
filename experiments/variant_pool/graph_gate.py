@@ -1,0 +1,241 @@
+"""S3 — Graph-aware gate stage for build() validation.
+
+Wires ``HarnessBuilder.build()`` validation into the deterministic gate
+pipeline so that illegal candidates (conflicts, cycles, interface
+mismatches) are intercepted *before* measurement budget is spent.
+
+This is a new gate stage that runs between MANIFEST_COMPLETE and
+SEESAW_REGRESSION.  It replaces the no-op CANONICALIZE and BUILD_SMOKE_L1
+stages for graph-aware candidates.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable
+
+from experiments.variant_pool.gate import GateStage
+from experiments.variant_pool.manifest import ChangeManifest
+
+
+# ── graph gate stage ───────────────────────────────────────────────────────
+
+
+class GraphGateStage(str, Enum):
+    """Graph-specific gate stages (extends the paper's 5-stage gate)."""
+
+    GRAPH_BUILD = "graph_build"  # validate candidate graph via build()
+    GRAPH_DEDUP = "graph_dedup"  # genotype hash duplicate check (S1)
+
+
+# ── result types ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class GraphValidationError:
+    """One graph validation error, with graph coordinates."""
+
+    error_type: str  # "singleton_conflict", "cycle", "unresolved_after", …
+    message: str
+    node_ids: list[str] = field(default_factory=list)
+    edge_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GraphValidationReport:
+    """Result of graph build validation."""
+
+    passed: bool
+    errors: list[GraphValidationError] = field(default_factory=list)
+    warnings: list[GraphValidationError] = field(default_factory=list)
+    genotype_hash: str = ""  # set when passed (S1)
+
+    def rejection_reason(self) -> str:
+        if self.passed:
+            return ""
+        lines = [f"[{e.error_type}] {e.message}" for e in self.errors]
+        return "; ".join(lines)
+
+
+# ── validation entry point ─────────────────────────────────────────────────
+
+
+def validate_candidate_graph(
+    candidate_config_path: Path,
+    parent_config_path: Path | None = None,
+    *,
+    declarations: dict[str, "ComponentDecl"] | None = None,
+) -> GraphValidationReport:
+    """Validate a candidate's graph before measurement.
+
+    1. Load the candidate's HarnessConfig from YAML.
+    2. Export to GraphSnapshot via ``to_graph()`` (S1).
+    3. Run structural validation: cycles, conflicts, interface mismatches.
+    4. Compute genotype hash for dedup (S1).
+    5. (Future S5) Validate graph edits against parent graph.
+
+    Args:
+        candidate_config_path: Path to the candidate's config.yaml.
+        parent_config_path: Optional path to parent variant's config.
+        declarations: Optional backfilled declaration metadata.
+
+    Returns:
+        GraphValidationReport — passed=True if the candidate is structurally valid.
+    """
+    from harnessx.core.builder import HarnessConflictError, build_from_config
+    from harnessx.core.harness import HarnessConfig
+    from harnessx.graph.declaration import backfill_declarations
+    from harnessx.graph.identity import genotype_hash
+    from harnessx.graph.snapshot import to_graph
+
+    errors: list[GraphValidationError] = []
+    warnings: list[GraphValidationError] = []
+
+    # 1. Load candidate config
+    try:
+        config = HarnessConfig.from_yaml_file(str(candidate_config_path))
+    except Exception as exc:
+        errors.append(GraphValidationError(
+            error_type="config_load",
+            message=f"Cannot load candidate config: {exc}",
+        ))
+        return GraphValidationReport(passed=False, errors=errors, warnings=warnings)
+
+    # 2. Try build_from_config (catches import errors, structural issues)
+    config_dict = _config_to_dict(config)
+    try:
+        build_from_config(config_dict)
+    except HarnessConflictError as exc:
+        for conflict in exc.conflicts:
+            errors.append(GraphValidationError(
+                error_type="build_conflict",
+                message=conflict,
+            ))
+    except ImportError as exc:
+        errors.append(GraphValidationError(
+            error_type="import_error",
+            message=f"Processor import failed: {exc}",
+        ))
+    except Exception as exc:
+        warnings.append(GraphValidationError(
+            error_type="build_warning",
+            message=f"Build validation produced unexpected: {exc}",
+        ))
+
+    if errors:
+        return GraphValidationReport(passed=False, errors=errors, warnings=warnings)
+
+    # 3. Export to graph and validate structure
+    try:
+        snapshot = to_graph(config)
+    except Exception as exc:
+        errors.append(GraphValidationError(
+            error_type="graph_export",
+            message=f"Cannot export to graph: {exc}",
+        ))
+        return GraphValidationReport(passed=False, errors=errors, warnings=warnings)
+
+    # 4. Check for duplicate singleton groups
+    sg_counts: dict[str, list[str]] = {}
+    for node_id, node in snapshot.nodes.items():
+        sg = node.metadata.get("_singleton_group_")
+        if sg:
+            sg_counts.setdefault(sg, []).append(node_id)
+    for sg, nids in sg_counts.items():
+        if len(nids) > 1:
+            errors.append(GraphValidationError(
+                error_type="singleton_conflict",
+                message=f"Singleton group '{sg}' claimed by {len(nids)} processors",
+                node_ids=list(nids),
+            ))
+
+    # 5. Check for unresolved AFTER dependencies
+    known_sgs = set(sg_counts)
+    for node_id, node in snapshot.nodes.items():
+        after_val = node.metadata.get("_after_")
+        if after_val:
+            after_list = [after_val] if isinstance(after_val, str) else list(after_val)
+            for after_sg in after_list:
+                if after_sg not in known_sgs:
+                    warnings.append(GraphValidationError(
+                        error_type="unresolved_after",
+                        message=f"AFTER reference to '{after_sg}' not in graph",
+                        node_ids=[node_id],
+                    ))
+
+    # 6. Compute genotype hash
+    gh = genotype_hash(snapshot)
+
+    passed = len(errors) == 0
+    return GraphValidationReport(
+        passed=passed,
+        errors=errors,
+        warnings=warnings,
+        genotype_hash=gh if passed else "",
+    )
+
+
+# ── gate integration ───────────────────────────────────────────────────────
+
+
+def make_graph_build_check(
+    declarations: dict[str, "ComponentDecl"] | None = None,
+) -> Callable[[Any, Path, Any, list[Any]], tuple[bool, str]]:
+    """Create an injectable graph-build gate check.
+
+    Returns a callable compatible with the gate's injection seam
+    (``check_canonicalize`` / ``check_smoke``).  The callable receives
+    ``(candidate, parent_config_path, ledger, tk_results)`` and returns
+    ``(passed, reason)``.
+    """
+
+    def _check(candidate, parent_config_path, ledger, tk_results) -> tuple[bool, str]:
+        # Extract config path from candidate
+        config_path = _config_path_from_candidate(candidate)
+        if config_path is None:
+            return False, "graph_build: no config path on candidate"
+
+        report = validate_candidate_graph(
+            config_path,
+            parent_config_path=parent_config_path,
+            declarations=declarations,
+        )
+
+        if report.passed:
+            return True, f"graph_build: OK (genotype={report.genotype_hash[:12]}…)"
+
+        return False, report.rejection_reason()
+
+    return _check
+
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _config_to_dict(config: "HarnessConfig") -> dict[str, Any]:
+    """Extract the flat dict representation from a HarnessConfig."""
+    return {
+        "processors": list(config.processors),
+        "plugins": list(config.plugins) if config.plugins else [],
+    }
+
+
+def _config_path_from_candidate(candidate: Any) -> Path | None:
+    """Extract config path from a candidate of unknown type."""
+    # CandidateArtifact (from manifest.py)
+    if hasattr(candidate, "config_path"):
+        return Path(candidate.config_path)
+    # ChangeManifest
+    if hasattr(candidate, "candidate_id"):
+        # No config path — candidate might be manifest-only
+        return None
+    # Raw Path
+    if isinstance(candidate, (str, Path)):
+        return Path(candidate)
+    return None
+
+
+# ── import for type hints ──────────────────────────────────────────────────
+from harnessx.graph.declaration import ComponentDecl  # noqa: E402
