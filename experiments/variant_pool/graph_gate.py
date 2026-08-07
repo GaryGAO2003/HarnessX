@@ -28,6 +28,7 @@ class GraphGateStage(str, Enum):
 
     GRAPH_BUILD = "graph_build"  # validate candidate graph via build()
     GRAPH_DEDUP = "graph_dedup"  # genotype hash duplicate check (S1)
+    GRAPH_METADATA = "graph_metadata"  # new processor nodes must carry metadata
 
 
 # ── result types ────────────────────────────────────────────────────────────
@@ -103,7 +104,35 @@ def validate_candidate_graph(
         ))
         return GraphValidationReport(passed=False, errors=errors, warnings=warnings)
 
-    # 2. Try build_from_config (catches import errors, structural issues)
+    # 2. Export to graph first (pure-read, no imports needed)
+    try:
+        snapshot = to_graph(config)
+    except Exception as exc:
+        errors.append(GraphValidationError(
+            error_type="graph_export",
+            message=f"Cannot export to graph: {exc}",
+        ))
+        return GraphValidationReport(passed=False, errors=errors, warnings=warnings)
+
+    # 2b. GRAPH_METADATA: new processor nodes must carry metadata
+    for node_id, node in snapshot.nodes.items():
+        if node.node_type.value != "processor":
+            continue
+        target = node.metadata.get("_target_", "")
+        sg = node.metadata.get("_singleton_group_", "")
+        from harnessx.graph.declaration import WELL_KNOWN_DECLARATIONS
+        if target not in WELL_KNOWN_DECLARATIONS and not sg:
+            warnings.append(GraphValidationError(
+                error_type="missing_metadata",
+                message=(
+                    f"New processor '{node.label}' has no _singleton_group_. "
+                    f"Without metadata, graph cannot model its impact — "
+                    f"selective retest will treat it as wildcard."
+                ),
+                node_ids=[node_id],
+            ))
+
+    # 3. Try build_from_config (catches import errors, structural issues)
     config_dict = _config_to_dict(config)
     try:
         build_from_config(config_dict)
@@ -114,9 +143,9 @@ def validate_candidate_graph(
                 message=conflict,
             ))
     except ImportError as exc:
-        errors.append(GraphValidationError(
-            error_type="import_error",
-            message=f"Processor import failed: {exc}",
+        warnings.append(GraphValidationError(
+            error_type="import_warning",
+            message=f"Processor not yet importable (may be co-located with candidate): {exc}",
         ))
     except Exception as exc:
         warnings.append(GraphValidationError(
@@ -125,16 +154,6 @@ def validate_candidate_graph(
         ))
 
     if errors:
-        return GraphValidationReport(passed=False, errors=errors, warnings=warnings)
-
-    # 3. Export to graph and validate structure
-    try:
-        snapshot = to_graph(config)
-    except Exception as exc:
-        errors.append(GraphValidationError(
-            error_type="graph_export",
-            message=f"Cannot export to graph: {exc}",
-        ))
         return GraphValidationReport(passed=False, errors=errors, warnings=warnings)
 
     # 4. Check for duplicate singleton groups

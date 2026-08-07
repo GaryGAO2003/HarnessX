@@ -116,6 +116,51 @@ processors:
         assert r1.genotype_hash == r2.genotype_hash
 
 
+class TestGraphMetadataGate:
+    """New processors without metadata should trigger warnings."""
+
+    def test_new_processor_without_sg_warns(self):
+        yaml_content = """\
+processors:
+  - _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+    _hook_: step_end
+  - _target_: totally.new.CustomProcessor
+    _hook_: before_model
+"""
+        path = make_config_yaml(yaml_content)
+        report = validate_candidate_graph(path)
+        # Passes (import error is a warning, metadata missing is a warning)
+        assert report.passed
+        assert any("missing_metadata" in w.error_type for w in report.warnings)
+        assert any("import_warning" in w.error_type for w in report.warnings)
+
+    def test_known_processor_no_warning(self):
+        yaml_content = """\
+processors:
+  - _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
+    _hook_: step_end
+"""
+        path = make_config_yaml(yaml_content)
+        report = validate_candidate_graph(path)
+        assert report.passed
+        missing = [w for w in report.warnings if w.error_type == "missing_metadata"]
+        assert len(missing) == 0
+
+    def test_new_processor_with_sg_passes(self):
+        yaml_content = """\
+processors:
+  - _target_: my.DeclaredProcessor
+    _hook_: step_end
+    _singleton_group_: my_group
+"""
+        path = make_config_yaml(yaml_content)
+        report = validate_candidate_graph(path)
+        # Passes (import error is a warning, not a block)
+        assert report.passed
+        missing = [w for w in report.warnings if w.error_type == "missing_metadata"]
+        assert len(missing) == 0  # sg declared, no metadata warning
+
+
 class TestGraphValidationError:
     def test_create_with_node_refs(self):
         e = GraphValidationError(
