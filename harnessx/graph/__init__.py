@@ -23,8 +23,10 @@ from .declaration import (
     merge_declarations,
     validate_declarations,
 )
+from .edit import GraphEdit, GraphEditType, apply_edits, diff_graphs
 from .footprint import CoverageFootprint, FootprintStore, compute_footprint
 from .identity import DedupRegistry, genotype_hash, phenotype_hash
+from .impact import danger_edge_set, forward_slice, influence_cone, intersects_footprint
 from .observer import HookObservation, ObservationProcessor, TaskTrace
 from .reconciliation import (
     ConvergenceReport,
@@ -33,6 +35,7 @@ from .reconciliation import (
     reconcile,
 )
 from .snapshot import to_graph
+from .transform import graph_to_config_dict
 from .types import (
     SKELETON_HOOK_NAMES,
     Edge,
@@ -76,4 +79,16 @@ __all__ = [
     "ReconciliationCategory",
     "ReconciledEdge",
     "reconcile",
+    # edit (S5)
+    "GraphEdit",
+    "GraphEditType",
+    "apply_edits",
+    "diff_graphs",
+    # impact (S5)
+    "forward_slice",
+    "danger_edge_set",
+    "influence_cone",
+    "intersects_footprint",
+    # transform (S5)
+    "graph_to_config_dict",
 ]
