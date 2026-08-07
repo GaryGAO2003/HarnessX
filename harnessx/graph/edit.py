@@ -68,6 +68,11 @@ class GraphEdit:
             ids.add(self.edge_source_id)
         if self.edge_target_id:
             ids.add(self.edge_target_id)
+        # INSERT_NODE: the new node's hook is the anchor for forward slicing
+        if self.edit_type == GraphEditType.INSERT_NODE and self.node_spec:
+            hook = self.node_spec.get("_hook_", "")
+            if hook:
+                ids.add(f"hook:{hook}")
         return ids
 
 
