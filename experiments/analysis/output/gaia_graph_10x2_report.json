@@ -1,0 +1,61 @@
+{
+  "run_id": "gaia_graph_10x2",
+  "task_ids": [
+    "cf106601-ab4f-4af9-b045-5295fe67b37d",
+    "5d0080cb-90d7-4712-bc33-848150e917d3",
+    "cabe07ed-9eca-40ea-8ead-410ef5e83f91",
+    "46719c30-f4c3-4cad-be07-d5cb21eee6bb",
+    "7a4a336d-dcfa-45a0-b014-824c7619e8de",
+    "b4cc024b-3f5e-480e-b96a-6656493255b5",
+    "a56f1527-3abf-41d6-91f8-7296d6336c3f",
+    "20194330-9976-4043-8632-f8485c6c71b2",
+    "7619a514-5fa8-43ef-9143-83b66a43d7a4",
+    "72c06643-a2fa-4186-aa5c-9ec33ae9b445"
+  ],
+  "rounds": 2,
+  "genotypes_seen": 3,
+  "duplicates_caught": 0,
+  "precheck": {
+    "retest_mode": "heuristic",
+    "dedup_investment": "worthwhile",
+    "illegal_rate": 0.0,
+    "duplicate_rate": 0.8
+  },
+  "known_declarations": 4,
+  "total_targets": 7,
+  "footprints_stored": 10,
+  "retest_reports": [
+    {
+      "round": 1,
+      "must_retest": 0,
+      "can_inherit": 10,
+      "uncertain": 0
+    },
+    {
+      "round": 2,
+      "must_retest": 0,
+      "can_inherit": 10,
+      "uncertain": 0
+    }
+  ],
+  "skill_count": 8,
+  "edge_faults_detected": 2,
+  "per_round": [
+    {
+      "round": 1,
+      "genotype": "e0a40d48f627",
+      "danger_nodes": 1,
+      "danger_edges": 7,
+      "retest_saved": 10,
+      "faults": 1
+    },
+    {
+      "round": 2,
+      "genotype": "cb8ae16a4a44",
+      "danger_nodes": 1,
+      "danger_edges": 8,
+      "retest_saved": 10,
+      "faults": 1
+    }
+  ]
+}
