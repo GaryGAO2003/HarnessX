@@ -24,7 +24,6 @@ from .declaration import (
     validate_declarations,
 )
 from .edit import GraphEdit, GraphEditType, apply_edits, diff_graphs
-from .fault import EdgeFault, EdgeFaultType, audit_skill_graph, classify_edge_faults
 from .footprint import CoverageFootprint, FootprintStore, compute_footprint
 from .identity import DedupRegistry, genotype_hash, phenotype_hash
 from .impact import danger_edge_set, forward_slice, influence_cone, intersects_footprint
@@ -34,13 +33,6 @@ from .reconciliation import (
     ReconciliationCategory,
     ReconciledEdge,
     reconcile,
-)
-from .skill_graph import SkillCategory, SkillEdge, SkillEdgeType, SkillGraph, SkillNode
-from .skill_invariants import (
-    InvariantViolation,
-    check_acyclicity,
-    check_append_only_reversible,
-    check_non_contradiction,
 )
 from .snapshot import to_graph
 from .transform import graph_to_config_dict
@@ -99,20 +91,4 @@ __all__ = [
     "intersects_footprint",
     # transform (S5)
     "graph_to_config_dict",
-    # skill_graph (S6)
-    "SkillNode",
-    "SkillEdge",
-    "SkillEdgeType",
-    "SkillCategory",
-    "SkillGraph",
-    # invariants (S6)
-    "InvariantViolation",
-    "check_acyclicity",
-    "check_non_contradiction",
-    "check_append_only_reversible",
-    # fault (S6)
-    "EdgeFault",
-    "EdgeFaultType",
-    "classify_edge_faults",
-    "audit_skill_graph",
 ]

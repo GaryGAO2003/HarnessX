@@ -63,6 +63,34 @@ P1-A = 截断感知门(Schmee-Hahn)· P1-B = racing 门(= ⑧ 的离线形态)·
 
 ---
 
+## 5′. `G1–G5` / `HL1–HL6` / `HX-1…HX-14` —— 架构问题图（Aug-06 deep-research session）
+
+载体：`14-HX-PROBLEM-MAP.md`。
+`G` = AEGIS 五缺口（代码坐实，行号见深研报告 artifact ④）；`HL` = high-level 六缺陷；
+`HX` = 架构问题 brainstorm 扩展。三套均为**问题编号**，非想法/方案编号，与 N-/①…⑫/P1-A/B/C 零重叠。
+⚠️ 08 台账内部另有 `P1…P8`（问题号，不带字母后缀），与 `P1-A/B/C`（离线批）同字母不同物——引用时带文档号。
+
+---
+
+## 6. `GS-A / GS-B / GS-C` —— 图基座三算法位（Aug-07 session）
+
+载体：`15-GRAPH-SUBSTRATE.md`。**设计编号**（融合设计，非问题号非想法池）：
+GS-A = 可达性驱逐序（上下文组装位）· GS-B = 转移图 SCC + 进展判据（循环闸门位）·
+GS-C = 终点反向切片 reward（回填位）。三位共享同一张运行时 def-use 依赖图。
+与 HL4/⑨ 的分界、对 HX-12/HL2/HX-8 的明确不占用，见 15 号文档 §4。状态：〔待证〕未实现。
+
+**Aug-07 融合**：`16-TWO-GRAPHS-ONE-TRACE.md` = GS × GraphHarnessX v2（artifact
+b62e5d1c…3691）的融合设计（"双图一迹"）。**不铸新前缀**——沿用 GS-A/B/C 与
+artifact 分期号 S1–S7；16 号新增期号 **S4G** 挂在 artifact 分期序列下。
+artifact 已升 v3（并入融合内容），v2 存于版本历史。
+`17-PAPER-REGISTRY.md` = 本线全部文献的唯一登记处（核验状态四档），无新编号。
+`18-READING-NOTES-DHG.md` = D/H/G 三簇 21 篇精读笔记（六并行批），无新编号；
+17 号该 21 篇状态以 18 号为准。
+**19 号已预留**给 S2 预检结果（`19-S2-RESULTS.md`，尚未创建）；S2 唯一规格源 =
+artifact 1aa28bc6…873eb（七量一率），阈值改动先改 artifact 再改脚本。
+
+---
+
 ## 5. 规矩
 
 1. 新清单**不得**使用 `N` 前缀。

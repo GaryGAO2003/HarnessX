@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,19 +32,7 @@ from harnessx.graph import (
     to_graph,
 )
 from harnessx.graph.declaration import WELL_KNOWN_DECLARATIONS
-from harnessx.graph.fault import classify_edge_faults
 from harnessx.graph.observer import HookObservation, TaskTrace
-from harnessx.graph.skill_graph import (
-    SkillCategory,
-    SkillEdge,
-    SkillEdgeType,
-    SkillGraph,
-    SkillNode,
-)
-from harnessx.graph.skill_invariants import (
-    check_acyclicity,
-    check_non_contradiction,
-)
 from experiments.variant_pool.engine import VariantPoolEngine
 from experiments.variant_pool.pool import Variant, VariantPool
 from experiments.variant_pool.ledger import SuccessLedger
@@ -93,10 +80,6 @@ class GraphRunReport:
 
     # S5
     retest_reports: list[dict] = field(default_factory=list)
-
-    # S6
-    skill_count: int = 0
-    edge_faults_detected: int = 0
 
     per_round: list[dict] = field(default_factory=list)
 
@@ -166,39 +149,7 @@ def run() -> GraphRunReport:
     # Register V0 genotype
     deduce.register(gh, "V0-R0-baseline")
 
-    # 6. Skill graph (S6)
-    print("Building skill graph (S6)...")
-    sg = SkillGraph()
-    # Emit skill nodes from known tool names in the harness
-    tool_skills = {
-        "WebSearch": "web_search",
-        "WebFetch": "web_fetch",
-        "Bash": "bash",
-        "Read": "read",
-        "Write": "write",
-        "Edit": "edit",
-        "Glob": "glob",
-        "Grep": "grep",
-    }
-    for tool_name, skill_id in tool_skills.items():
-        sg.add_skill(SkillNode(skill_id, tool_name, SkillCategory.TOOL))
-
-    # Cross-skill edges based on typical agent workflows
-    sg.add_edge(SkillEdge("web_search", "web_fetch", SkillEdgeType.SIMILAR_TO))
-    sg.add_edge(SkillEdge("read", "grep", SkillEdgeType.SIMILAR_TO))
-    sg.add_edge(SkillEdge("write", "edit", SkillEdgeType.SIMILAR_TO))
-    sg.add_edge(SkillEdge("bash", "read", SkillEdgeType.COMPOSES_WITH))
-
-    report.skill_count = len(sg.nodes)
-
-    # Check invariants
-    acyc = check_acyclicity(sg)
-    contra = check_non_contradiction(sg)
-    assert len(acyc) == 0, f"Skill graph cycles: {acyc}"
-    assert len(contra) == 0, f"Skill graph contradictions: {contra}"
-    print(f"  {report.skill_count} skills, invariants OK")
-
-    # 7. Simulated footprints (S4) — generate synthetic traces per task
+    # 6. Simulated footprints (S4) — generate synthetic traces per task
     print("Generating synthetic footprints (S4)...")
     footprint_base = Path(tempfile.mkdtemp(prefix="gaia_10x2_fp_"))
     fp_store = FootprintStore(footprint_base)
@@ -285,18 +236,6 @@ def run() -> GraphRunReport:
               f"diverg={rec_report.divergence_count} "
               f"absence={rec_report.absence_count}")
 
-        # Edge-fault classification (S6) on skill graph with synthetic data
-        obs_edges = [
-            ("web_search", "web_fetch", "similar_to"),
-            ("bash", "read", "composes_with"),
-            # Simulate a MISSING fault: web_search→read observed but undeclared
-            ("web_search", "read", "depends_on"),
-        ]
-        faults = classify_edge_faults(sg, obs_edges, current_round=round_idx)
-        report.edge_faults_detected += len(faults)
-        if faults:
-            print(f"    Edge faults: {Counter(f.fault_type.value for f in faults)}")
-
         # Advance state for next round
         current_snapshot = candidate_snapshot
         current_genotype = candidate_gh
@@ -307,7 +246,6 @@ def run() -> GraphRunReport:
             "danger_nodes": len(danger_nodes),
             "danger_edges": len(danger_edges),
             "retest_saved": rt_report.can_inherit,
-            "faults": len(faults),
         })
 
     # 9. Pre-check (S2) on the collected data
@@ -344,7 +282,6 @@ def run() -> GraphRunReport:
     print(f"  Round 2 genotypes:  {report.genotypes_seen - 1} new, {report.duplicates_caught} dup skipped")
     print(f"  Known declarations: {report.known_declarations}/{report.total_targets}")
     print(f"  Footprints stored:  {report.footprints_stored}")
-    print(f"  Skill graph:        {report.skill_count} skills, {report.edge_faults_detected} faults")
     if report.retest_reports:
         total_saved = sum(r["can_inherit"] for r in report.retest_reports)
         total_tasks = sum(

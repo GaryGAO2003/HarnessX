@@ -38,24 +38,20 @@
       "uncertain": 0
     }
   ],
-  "skill_count": 8,
-  "edge_faults_detected": 2,
   "per_round": [
     {
       "round": 1,
       "genotype": "e0a40d48f627",
       "danger_nodes": 1,
       "danger_edges": 7,
-      "retest_saved": 10,
-      "faults": 1
+      "retest_saved": 10
     },
     {
       "round": 2,
       "genotype": "cb8ae16a4a44",
       "danger_nodes": 1,
       "danger_edges": 8,
-      "retest_saved": 10,
-      "faults": 1
+      "retest_saved": 10
     }
   ]
 }

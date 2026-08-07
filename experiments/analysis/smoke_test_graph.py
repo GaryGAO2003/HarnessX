@@ -43,18 +43,6 @@ from harnessx.graph.declaration import WELL_KNOWN_DECLARATIONS
 from harnessx.graph.edit import diff_graphs
 from harnessx.graph.identity import DedupRegistry as Dedup
 from harnessx.graph.observer import HookObservation, TaskTrace
-from harnessx.graph.skill_graph import (
-    SkillCategory,
-    SkillEdge,
-    SkillEdgeType,
-    SkillGraph,
-    SkillNode,
-)
-from harnessx.graph.skill_invariants import (
-    check_acyclicity,
-    check_non_contradiction,
-)
-from harnessx.graph.fault import classify_edge_faults, EdgeFaultType
 from experiments.analysis.s2_precheck import (
     PreCheckMetrics,
     compute_duplicate_rate,
@@ -292,67 +280,6 @@ def run_smoke_test() -> dict:
     results["s5_retest_saved"] = retest_report.can_inherit
 
     # ══════════════════════════════════════════════════════════════════
-    banner("S6: SkillDAG + invariants + edge-fault classification")
-    # ══════════════════════════════════════════════════════════════════
-
-    # Build a skill graph with known tools
-    sg = SkillGraph()
-    for sid, name, cat in [
-        ("search", "WebSearch", SkillCategory.TOOL),
-        ("fetch", "WebFetch", SkillCategory.TOOL),
-        ("bash", "Bash", SkillCategory.TOOL),
-        ("read", "Read", SkillCategory.TOOL),
-        ("write", "Write", SkillCategory.TOOL),
-        ("code_agent", "CodeAgent", SkillCategory.COMPOSITE),
-        ("research_agent", "ResearchAgent", SkillCategory.COMPOSITE),
-    ]:
-        sg.add_skill(SkillNode(sid, name, cat))
-
-    # Add typed edges
-    sg.add_edge(SkillEdge("research_agent", "search", SkillEdgeType.DEPENDS_ON))
-    sg.add_edge(SkillEdge("research_agent", "fetch", SkillEdgeType.DEPENDS_ON))
-    sg.add_edge(SkillEdge("code_agent", "bash", SkillEdgeType.DEPENDS_ON))
-    sg.add_edge(SkillEdge("code_agent", "read", SkillEdgeType.DEPENDS_ON))
-    sg.add_edge(SkillEdge("code_agent", "write", SkillEdgeType.DEPENDS_ON))
-    sg.add_edge(SkillEdge("search", "fetch", SkillEdgeType.SIMILAR_TO))
-    sg.add_edge(SkillEdge("research_agent", "code_agent", SkillEdgeType.COMPOSES_WITH))
-
-    print(f"  Skills: {len(sg.nodes)}, Edges: {len(sg.edges)}")
-
-    # Invariants
-    acyc_violations = check_acyclicity(sg)
-    contra_violations = check_non_contradiction(sg)
-    print(f"  Acyclicity violations:   {len(acyc_violations)}")
-    print(f"  Contradiction violations:{len(contra_violations)}")
-    assert len(acyc_violations) == 0, f"Unexpected cycles: {acyc_violations}"
-    assert len(contra_violations) == 0, f"Unexpected contradictions: {contra_violations}"
-
-    # Edge-fault classification
-    observed_edges = [
-        ("research_agent", "search", "depends_on"),
-        ("research_agent", "fetch", "depends_on"),
-        ("code_agent", "bash", "depends_on"),
-        # "code_agent"→"read" is MISSING (not observed)
-        # "search"→"fetch" is WRONG (declared similar_to, but observed as depends_on at runtime)
-        ("search", "fetch", "depends_on"),
-    ]
-    faults = classify_edge_faults(sg, observed_edges, current_round=2)
-
-    by_type: dict[str, int] = {}
-    for f in faults:
-        by_type[f.fault_type.value] = by_type.get(f.fault_type.value, 0) + 1
-    print(f"  Edge faults: {by_type}")
-
-    # Detect transitive dependencies
-    deps = sg.get_dependencies("research_agent")
-    conflicts = sg.get_conflicts("research_agent")
-    print(f"  research_agent deps: {deps}")
-    print(f"  research_agent conflicts: {conflicts}")
-
-    results["s6_skills"] = len(sg.nodes)
-    results["s6_faults"] = len(faults)
-
-    # ══════════════════════════════════════════════════════════════════
     banner("S7: Experiment comparison (text vs graph)")
     # ══════════════════════════════════════════════════════════════════
 
@@ -389,8 +316,7 @@ def run_smoke_test() -> dict:
     print(f"  S3: {results['s3_known_decls']} known declarations")
     print(f"  S4: {results['s4_footprints']} footprints, erosion={results['s4_erosion_rate']:.0%}")
     print(f"  S5: {results['s5_danger_nodes']} danger nodes, {results['s5_retest_saved']} tasks saved")
-    print(f"  S6: {results['s6_skills']} skills, {results['s6_faults']} edge faults")
-    print(f"  S7: pass Δ={results['s7_pass_delta']:+.2%}, cost Δ=${results['s7_cost_delta']:+.2f}")
+    print(f"  S7: pass delta={results['s7_pass_delta']:+.2%}, cost delta=${results['s7_cost_delta']:+.2f}")
     print()
 
     return results
