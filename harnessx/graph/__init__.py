@@ -23,7 +23,15 @@ from .declaration import (
     merge_declarations,
     validate_declarations,
 )
+from .footprint import CoverageFootprint, FootprintStore, compute_footprint
 from .identity import DedupRegistry, genotype_hash, phenotype_hash
+from .observer import HookObservation, ObservationProcessor, TaskTrace
+from .reconciliation import (
+    ConvergenceReport,
+    ReconciliationCategory,
+    ReconciledEdge,
+    reconcile,
+)
 from .snapshot import to_graph
 from .types import (
     SKELETON_HOOK_NAMES,
@@ -55,4 +63,17 @@ __all__ = [
     "backfill_declarations",
     "merge_declarations",
     "validate_declarations",
+    # observer (S4)
+    "ObservationProcessor",
+    "HookObservation",
+    "TaskTrace",
+    # footprint (S4)
+    "CoverageFootprint",
+    "FootprintStore",
+    "compute_footprint",
+    # reconciliation (S4)
+    "ConvergenceReport",
+    "ReconciliationCategory",
+    "ReconciledEdge",
+    "reconcile",
 ]
