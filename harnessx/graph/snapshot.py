@@ -159,15 +159,11 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
                 extra["_order_"] = decl.order
             if decl.after and "_after_" not in extra:
                 extra["_after_"] = decl.after
-            if decl.hooks and decl.hooks != ("*",) and "_hook_" not in extra:
-                extra["_hook_"] = decl.hooks[0] if len(decl.hooks) == 1 else "*"
-            # Slot deps + event-field reads for edge creation later
+            # Store slot deps for edge creation later
             if decl.writes_to:
                 extra["_writes_slots_"] = list(decl.writes_to)
             if decl.reads_from:
                 extra["_reads_slots_"] = list(decl.reads_from)
-            if decl.reads_event_fields:
-                extra["_reads_event_fields_"] = list(decl.reads_event_fields)
 
         # Disambiguate duplicate targets (same class used multiple times)
         seen_targets[target] = seen_targets.get(target, 0) + 1
