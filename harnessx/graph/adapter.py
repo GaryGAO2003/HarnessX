@@ -48,15 +48,25 @@ class ComponentKind(str, Enum):
 
 @dataclass
 class ProcessorSpec:
-    """Metadata a new processor MUST provide for graph registration."""
+    """Metadata a new processor MUST provide for graph registration.
 
-    target: str                           # qualified class path
-    hook: str = "*"                       # single hook or wildcard
-    singleton_group: str = ""             # unique within config
-    order: int = 50                       # within-hook priority
-    after: tuple[str, ...] = ()           # singleton_groups to run after
-    writes_slots: tuple[str, ...] = ()    # slot names written
-    reads_slots: tuple[str, ...] = ()     # slot names read
+    Separates two data channels:
+      - ``writes_slots`` / ``reads_slots`` — State slot keys (kv store).
+      - ``reads_event_fields`` — event-channel data the processor
+        reads from lifecycle events (e.g. ``cumulative_cost_usd``).
+
+    The ``hook`` field accepts ``\"*\"`` for wildcard.  Single-hook
+    processors should set it to a specific hook name.
+    """
+
+    target: str
+    hook: str = "*"
+    singleton_group: str = ""
+    order: int = 50
+    after: tuple[str, ...] = ()
+    writes_slots: tuple[str, ...] = ()       # State slot keys
+    reads_slots: tuple[str, ...] = ()        # State slot keys
+    reads_event_fields: tuple[str, ...] = ()  # Event-channel fields
 
     def validate(self) -> list[str]:
         """Return list of missing required fields."""
@@ -81,6 +91,8 @@ class ProcessorSpec:
             spec["_writes_slots_"] = list(self.writes_slots)
         if self.reads_slots:
             spec["_reads_slots_"] = list(self.reads_slots)
+        if self.reads_event_fields:
+            spec["_reads_event_fields_"] = list(self.reads_event_fields)
         return spec
 
 

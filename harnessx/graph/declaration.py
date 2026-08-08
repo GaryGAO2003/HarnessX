@@ -43,19 +43,77 @@ class DeclarationSource(str, Enum):
 
 @dataclass
 class ComponentDecl:
-    """Declared metadata for one processor component."""
+    """Declared metadata for one processor component.
+
+    Distinguishes two data channels:
+      - **writes_to / reads_from**: State ``slots`` (key-value store).
+        These are the declared slot keys the processor writes/reads.
+      - **reads_event_fields**: Event-channel data.  Fields read from
+        lifecycle events (e.g. ``cumulative_cost_usd`` on StepEndEvent).
+        Not backed by State slots — they come from the event pipeline.
+
+    The ``hooks`` field is a tuple to express MultiHookProcessor
+    coverage.  A single-hook processor uses ``hooks=(\"before_model\",)``;
+    a wildcard uses ``hooks=(\"*\",)``.  Backward compatibility: the
+    constructor also accepts the legacy ``hook: str`` keyword; it is
+    normalized to ``hooks``.
+    """
 
     target: str
-    hook: str = ""
+    hooks: tuple[str, ...] = ("*",)
     order: int = 50
     singleton_group: str = ""
     after: tuple[str, ...] = ()
-    writes_to: tuple[str, ...] = ()
-    reads_from: tuple[str, ...] = ()
+    writes_to: tuple[str, ...] = ()       # State slot keys
+    reads_from: tuple[str, ...] = ()      # State slot keys
+    reads_event_fields: tuple[str, ...] = ()  # Event-channel fields
 
     source: DeclarationSource = DeclarationSource.UNKNOWN
     confidence: float = 0.0
     llm_evidence: str = ""
+
+    def __post_init__(self) -> None:
+        """Normalize legacy ``hook`` kwarg to ``hooks``."""
+        pass  # handled by classmethod constructor below
+
+    @classmethod
+    def create(
+        cls,
+        target: str,
+        *,
+        hook: str = "",
+        hooks: tuple[str, ...] | None = None,
+        order: int = 50,
+        singleton_group: str = "",
+        after: tuple[str, ...] = (),
+        writes_to: tuple[str, ...] = (),
+        reads_from: tuple[str, ...] = (),
+        reads_event_fields: tuple[str, ...] = (),
+        source: DeclarationSource = DeclarationSource.UNKNOWN,
+        confidence: float = 0.0,
+        llm_evidence: str = "",
+    ) -> "ComponentDecl":
+        """Factory with backward-compatible ``hook=`` support."""
+        if hooks is None:
+            hooks = (hook,) if hook else ("*",)
+        return cls(
+            target=target,
+            hooks=hooks,
+            order=order,
+            singleton_group=singleton_group,
+            after=after,
+            writes_to=writes_to,
+            reads_from=reads_from,
+            reads_event_fields=reads_event_fields,
+            source=source,
+            confidence=confidence,
+            llm_evidence=llm_evidence,
+        )
+
+    @property
+    def hook(self) -> str:
+        """Legacy accessor — first hook in the tuple."""
+        return self.hooks[0] if self.hooks else "*"
 
     def is_trusted(self) -> bool:
         return self.confidence >= 0.9
@@ -68,104 +126,105 @@ class ComponentDecl:
 
 WELL_KNOWN_DECLARATIONS: dict[str, ComponentDecl] = {
     # ═══ context bundle ═══
-    "harnessx.processors.context.system_prompt.SystemPromptProcessor": ComponentDecl(
+    "harnessx.processors.context.system_prompt.SystemPromptProcessor": ComponentDecl.create(
         target="harnessx.processors.context.system_prompt.SystemPromptProcessor",
         order=1, singleton_group="context.system",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.context.user_wrapper.UserWrapperProcessor": ComponentDecl(
+    "harnessx.processors.context.user_wrapper.UserWrapperProcessor": ComponentDecl.create(
         target="harnessx.processors.context.user_wrapper.UserWrapperProcessor",
         order=5, singleton_group="context.user_wrapper",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     # ═══ memory bundle ═══
-    "harnessx.processors.memory.memory_extraction.MemoryExtractionProcessor": ComponentDecl(
+    "harnessx.processors.memory.memory_extraction.MemoryExtractionProcessor": ComponentDecl.create(
         target="harnessx.processors.memory.memory_extraction.MemoryExtractionProcessor",
         order=3, singleton_group="memory.extraction",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.memory.memory_retrieval.MemoryRetrievalProcessor": ComponentDecl(
+    "harnessx.processors.memory.memory_retrieval.MemoryRetrievalProcessor": ComponentDecl.create(
         target="harnessx.processors.memory.memory_retrieval.MemoryRetrievalProcessor",
         order=3, singleton_group="memory.retrieval",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     # ═══ control bundle ═══
-    "harnessx.processors.control.loop_detection.LoopDetectionProcessor": ComponentDecl(
+    "harnessx.processors.control.loop_detection.LoopDetectionProcessor": ComponentDecl.create(
         target="harnessx.processors.control.loop_detection.LoopDetectionProcessor",
         order=20, singleton_group="loop_detection",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.control.compaction.CompactionProcessor": ComponentDecl(
+    "harnessx.processors.control.compaction.CompactionProcessor": ComponentDecl.create(
         target="harnessx.processors.control.compaction.CompactionProcessor",
         order=8, singleton_group="compaction",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.control.cost_guard.CostGuardProcessor": ComponentDecl(
+    "harnessx.processors.control.cost_guard.CostGuardProcessor": ComponentDecl.create(
         target="harnessx.processors.control.cost_guard.CostGuardProcessor",
         order=10, singleton_group="cost_guard",
         reads_from=("cost",),
+        reads_event_fields=("cumulative_cost_usd",),
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.control.parse_retry.ParseRetryProcessor": ComponentDecl(
+    "harnessx.processors.control.parse_retry.ParseRetryProcessor": ComponentDecl.create(
         target="harnessx.processors.control.parse_retry.ParseRetryProcessor",
         order=10, singleton_group="parse_retry",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.control.self_verify.SelfVerifyProcessor": ComponentDecl(
+    "harnessx.processors.control.self_verify.SelfVerifyProcessor": ComponentDecl.create(
         target="harnessx.processors.control.self_verify.SelfVerifyProcessor",
         order=90, singleton_group="self_verify",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.control.token_budget.TokenBudgetProcessor": ComponentDecl(
+    "harnessx.processors.control.token_budget.TokenBudgetProcessor": ComponentDecl.create(
         target="harnessx.processors.control.token_budget.TokenBudgetProcessor",
         order=10, singleton_group="token_budget",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.control.step_countdown.StepCountdownProcessor": ComponentDecl(
+    "harnessx.processors.control.step_countdown.StepCountdownProcessor": ComponentDecl.create(
         target="harnessx.processors.control.step_countdown.StepCountdownProcessor",
         order=40, singleton_group="step_countdown",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     # ═══ tool bundle ═══
-    "harnessx.processors.tools.skill_loader.ProgressiveSkillLoader": ComponentDecl(
+    "harnessx.processors.tools.skill_loader.ProgressiveSkillLoader": ComponentDecl.create(
         target="harnessx.processors.tools.skill_loader.ProgressiveSkillLoader",
         singleton_group="skill_loader",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.tools.tool_filter.ToolFilterProcessor": ComponentDecl(
+    "harnessx.processors.tools.tool_filter.ToolFilterProcessor": ComponentDecl.create(
         target="harnessx.processors.tools.tool_filter.ToolFilterProcessor",
         order=6, singleton_group="tools.filter",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.tools.tool_whitelist.ToolWhitelistProcessor": ComponentDecl(
+    "harnessx.processors.tools.tool_whitelist.ToolWhitelistProcessor": ComponentDecl.create(
         target="harnessx.processors.tools.tool_whitelist.ToolWhitelistProcessor",
         order=10, singleton_group="tool_whitelist",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     # ═══ observability ═══
-    "harnessx.processors.observability.otel_proc.OTelProcessor": ComponentDecl(
+    "harnessx.processors.observability.otel_proc.OTelProcessor": ComponentDecl.create(
         target="harnessx.processors.observability.otel_proc.OTelProcessor",
         order=30, singleton_group="otel",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.observability.checkpoint.CheckpointProcessor": ComponentDecl(
+    "harnessx.processors.observability.checkpoint.CheckpointProcessor": ComponentDecl.create(
         target="harnessx.processors.observability.checkpoint.CheckpointProcessor",
         order=10, singleton_group="checkpoint",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     # ═══ evaluation ═══
-    "harnessx.processors.evaluation.evaluation.EvaluationProcessor": ComponentDecl(
+    "harnessx.processors.evaluation.evaluation.EvaluationProcessor": ComponentDecl.create(
         target="harnessx.processors.evaluation.evaluation.EvaluationProcessor",
         singleton_group="evaluation",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
-    "harnessx.processors.evaluation.llm_judge.LLMJudgeProcessor": ComponentDecl(
+    "harnessx.processors.evaluation.llm_judge.LLMJudgeProcessor": ComponentDecl.create(
         target="harnessx.processors.evaluation.llm_judge.LLMJudgeProcessor",
         singleton_group="llm_judge",
         source=DeclarationSource.CODE_INTROSPECTION, confidence=1.0,
     ),
     # ═══ multi-model ═══
-    "harnessx.processors.multi_model.model_router.ModelRouterProcessor": ComponentDecl(
+    "harnessx.processors.multi_model.model_router.ModelRouterProcessor": ComponentDecl.create(
         target="harnessx.processors.multi_model.model_router.ModelRouterProcessor",
         order=20, singleton_group="model_router",
         writes_to=("model_route",),
