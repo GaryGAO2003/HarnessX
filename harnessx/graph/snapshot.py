@@ -334,3 +334,49 @@ def _add_slot_nodes(snapshot: GraphSnapshot) -> None:
             label=name,
             metadata={"slot_name": name, "slot_type": stype},
         )
+
+
+# ── EXECUTES_BEFORE bucket/order resolution (L4.6) ──────────────────────────
+
+
+def _bucket(proc_dict: dict, target: str) -> str:
+    """Resolve a serialized processor's registration bucket (hook).
+
+    Fallback chain (L4.6): dict key ``_hook_`` → WKD.hook (the class's natural
+    bucket) → string inference.  Never uses the declaration's ``hooks[0]``
+    (coverage first element) — for multi-hook / no-``_hook`` classes the
+    natural bucket differs from coverage, and using it would make the
+    EXECUTES_BEFORE chain diverge from the runtime execution order (I7).
+    """
+    if "_hook_" in proc_dict and isinstance(proc_dict["_hook_"], str):
+        return proc_dict["_hook_"]
+    from .declaration import WELL_KNOWN_DECLARATIONS
+
+    decl = WELL_KNOWN_DECLARATIONS.get(target)
+    if decl is not None and decl.hook:
+        return decl.hook
+    inferred = _infer_hook_from_target(target)
+    return inferred if inferred else "*"
+
+
+def _order_parse(proc_dict: dict, target: str) -> int:
+    """Resolve a serialized processor's order for EXECUTES_BEFORE sorting.
+
+    Fallback chain (L4.6): dict key ``_order_`` → WKD.order → 0 (class default).
+
+    Does NOT use the ComponentDecl 50 sentinel — the declaration fallback is 50
+    while the runtime natural fallback is the class default 0; sorting with 50
+    in a bucket mixing WKD and non-WKD classes would reverse the chain vs the
+    runtime order (breaks I7).
+    """
+    if "_order_" in proc_dict:
+        try:
+            return int(proc_dict["_order_"])
+        except (TypeError, ValueError):
+            pass
+    from .declaration import WELL_KNOWN_DECLARATIONS
+
+    decl = WELL_KNOWN_DECLARATIONS.get(target)
+    if decl is not None and decl.order != 50:
+        return decl.order
+    return 0

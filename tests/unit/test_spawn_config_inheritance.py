@@ -38,9 +38,12 @@ def _proc_instances(config, cls=None):
     """Return all processor instances from _rt_procs (and any dicts skipped).
 
     After the processors-gate refactor, runtime processor instances live in
-    config._rt_procs, not config.processors (which holds only _target_ dicts).
+    config._rt_procs (a derived RuntimeReg view), not config.processors
+    (which holds only _target_ dicts).
     """
-    all_instances = list(getattr(config, "_rt_procs", None) or [])
+    from harnessx.core.runtime import unwrap_runtime_proc
+
+    all_instances = [unwrap_runtime_proc(p) for p in (config._rt_procs or ())]
     if cls is None:
         return all_instances
     return [p for p in all_instances if isinstance(p, cls)]

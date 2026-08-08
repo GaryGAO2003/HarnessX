@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,10 @@ class TestWorkspaceHome:
         assert home.exists()
         assert ws.home == home
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows expanduser uses USERPROFILE, not HOME; ~/ resolves to the real home",
+    )
     def test_workspace_home_resolves_tilde(self, tmp_path, monkeypatch):
         """home accepts ~-prefixed paths and resolves them."""
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -151,6 +156,10 @@ class TestWorkspaceHome:
 
     # ── None mode: no jail ────────────────────────────────────────────────────────
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows Path('/etc/passwd') resolves to C:/etc/passwd, not /etc/passwd",
+    )
     def test_no_mode_allows_any_path(self, tmp_path):
         ws = Workspace(agent_id="a", root=tmp_path / "root", mode=None)
         resolved = ws.resolve("/etc/passwd")

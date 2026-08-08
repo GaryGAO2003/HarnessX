@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import pytest
 from pathlib import Path
 
@@ -219,6 +220,10 @@ class TestSandbox:
     # ---------------------------------------------------------------------------
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows create_subprocess_shell emits POSIX-style /tmp/... paths from pwd",
+    )
     async def test_bash_tool_uses_sandbox_cwd(self, tmp_path):
         """bash_tool uses sandbox.workspace_path as cwd when ContextVar is set."""
         from harnessx.tools.builtin.bash import bash_tool
@@ -262,6 +267,10 @@ class TestSandbox:
         assert "fallback" in result
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows create_subprocess_shell emits POSIX-style /tmp/... paths from pwd",
+    )
     async def test_sandbox_ctx_controls_tool_cwd(self, tmp_path):
         """Swapping the ContextVar sandbox immediately changes where bash runs."""
         from harnessx.tools.builtin.bash import bash_tool

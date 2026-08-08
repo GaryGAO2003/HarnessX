@@ -72,10 +72,12 @@ class TestBuilderPlugin:
             .build()
         )
         # Serializable processors become _target_ dicts in config.processors;
-        # non-serializable instances go to config._rt_procs.
+        # non-serializable instances go to config._rt_procs (as RuntimeRegs).
+        from harnessx.core.runtime import unwrap_runtime_proc
+
         rt_procs = getattr(config, "_rt_procs", [])
         proc_cls = type(counting.proc).__qualname__
-        in_rt = counting.proc in rt_procs
+        in_rt = any(unwrap_runtime_proc(p) is counting.proc for p in rt_procs)
         in_procs = any(isinstance(p, dict) and proc_cls in p.get("_target_", "") for p in config.processors)
         assert in_rt or in_procs, "Plugin processor must appear in config._rt_procs or config.processors"
 

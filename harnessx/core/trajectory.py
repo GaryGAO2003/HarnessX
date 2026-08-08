@@ -14,6 +14,7 @@ from ..core.events import (
     ToolResultEvent,
     message_to_dict,
 )
+from .runtime import RuntimeReg
 
 if TYPE_CHECKING:
     from ..core.state import State
@@ -433,8 +434,12 @@ class StatefulTrajectory:
             elif isinstance(raw_procs, list):
                 # Current shape on HarnessConfig: list[dict] of _target_ entries.
                 proc_iter.extend(raw_procs)
-            # Runtime-only processors (e.g. MCP hot-reload) live on _rt_procs.
-            proc_iter.extend(getattr(config, "_rt_procs", None) or [])
+            # Runtime-only processors (e.g. MCP hot-reload) live on _rt_procs;
+            # unwrap RuntimeReg records so label/type reads see the processor.
+            proc_iter.extend(
+                p.proc if isinstance(p, RuntimeReg) else p
+                for p in (getattr(config, "_rt_procs", None) or [])
+            )
             for p in proc_iter:
                 if isinstance(p, dict):
                     target = p.get("_target_") or ""

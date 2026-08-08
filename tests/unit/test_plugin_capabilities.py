@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -165,6 +166,10 @@ class TestShellHookProcessor:
         assert (tmp_path / "ran.txt").exists()
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows shell (cmd) does not expand $CLAUDE_PLUGIN_ROOT",
+    )
     async def test_plugin_root_env_var_set(self, tmp_path):
         env_log = tmp_path / "env.txt"
         hooks = {"Stop": [{"type": "command", "command": f"echo $CLAUDE_PLUGIN_ROOT > {env_log}"}]}

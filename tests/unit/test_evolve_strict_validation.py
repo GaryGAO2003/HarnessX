@@ -53,7 +53,7 @@ def _cfg_with_broken_processor():
     # Override __module__ so dry_fire doesn't skip it (it skips "harnessx.*"
     # and "__main__" as known-safe).
     _BrokenProcessor.__module__ = "authored.custom_processor"
-    cfg._rt_procs = [_BrokenProcessor()]
+    cfg.add_runtime_reg(_BrokenProcessor())  # write API (L2.3c); _rt_procs is read-only
     return cfg
 
 

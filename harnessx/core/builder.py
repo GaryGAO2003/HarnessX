@@ -54,17 +54,7 @@ class _ProcEntry:
 # ---------------------------------------------------------------------------
 
 
-class HarnessConflictError(Exception):
-    """Raised by HarnessBuilder.merge() when incompatible builders are combined.
-
-    ``error.conflicts`` is the full list of conflict descriptions so callers
-    can programmatically inspect or log them.
-    """
-
-    def __init__(self, conflicts: list[str]) -> None:
-        self.conflicts = list(conflicts)
-        lines = "\n".join(f"  [{i + 1}] {c}" for i, c in enumerate(conflicts))
-        super().__init__(f"{len(conflicts)} conflict(s) detected:\n{lines}")
+from .runtime import HarnessConflictError  # noqa: F401  # re-exported (block 5)
 
 
 # ---------------------------------------------------------------------------

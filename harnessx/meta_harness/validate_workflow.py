@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .replay import run_replay_gate_strict
+from ..core.runtime import unwrap_runtime_proc
 
 if TYPE_CHECKING:
     from ..core.harness import HarnessConfig
@@ -97,7 +98,7 @@ def _eager_check_system_prompt_builders(cfg: "HarnessConfig") -> int:
     found (missing / empty / broken-Jinja template file).
     """
     checked = 0
-    rt_procs = getattr(cfg, "_rt_procs", None) or []
+    rt_procs = [unwrap_runtime_proc(p) for p in (getattr(cfg, "_rt_procs", None) or [])]
 
     try:
         from ..processors.context.strategies.system_prompt.template import (
@@ -270,7 +271,7 @@ async def run_processor_dry_fire(
     notes: list[str] = []
     seen: set[tuple[str, str]] = set()
 
-    rt_procs = getattr(cfg, "_rt_procs", None) or []
+    rt_procs = [unwrap_runtime_proc(p) for p in (getattr(cfg, "_rt_procs", None) or [])]
     for p in rt_procs:
         cls = type(p)
         mod = cls.__module__ or ""
@@ -485,7 +486,7 @@ async def run_contract_check(
     seen: set[tuple[str, str]] = set()
 
     # Collect processors: already-instantiated (_rt_procs) + from config dicts.
-    candidates: list = list(getattr(cfg, "_rt_procs", None) or [])
+    candidates: list = [unwrap_runtime_proc(p) for p in (getattr(cfg, "_rt_procs", None) or [])]
     for p in cfg.processors or []:
         if isinstance(p, dict) and "_target_" in p:
             target = p.get("_target_", "")

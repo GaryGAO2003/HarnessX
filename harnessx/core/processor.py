@@ -23,6 +23,27 @@ from .events import (
 _logger = logging.getLogger(__name__)
 _contract_logger = logging.getLogger("harnessx.contract")
 
+# ─── Hook constants (L1.1 minimal set) ───────────────────────────────────────
+
+_EVENT_TO_HOOK_NAME: dict[type, str] = {
+    TaskStartEvent: "task_start",
+    StepStartEvent: "step_start",
+    BeforeModelEvent: "before_model",
+    ModelResponseEvent: "after_model",
+    ToolCallEvent: "before_tool",
+    ToolResultEvent: "after_tool",
+    StepEndEvent: "step_end",
+    TaskEndEvent: "task_end",
+}
+
+_HOOK_LIFECYCLE_ORDER: tuple[str, ...] = (
+    "task_start", "step_start", "before_model", "after_model",
+    "before_tool", "after_tool", "step_end", "task_end",
+)
+
+# Canonical 8-hook tuple (L1.1a) — single source; consumers import from core.
+PROCESSOR_HOOK_NAMES: tuple[str, ...] = _HOOK_LIFECYCLE_ORDER
+
 # ─── Hook Contract Enforcement ────────────────────────────────────────────────
 
 
@@ -842,3 +863,99 @@ def on_step_end(fn: Callable) -> Processor:
 def on_task_end(fn: Callable) -> Processor:
     """Decorator: wrap async generator into TaskEndEvent processor."""
     return _make_hook_processor(fn, TaskEndEvent)
+
+
+# ── graph metadata (L1.4) ───────────────────────────────────────────────────
+
+
+def _find_class_hook(cls: type) -> "str | None":
+    """Nearest non-empty class ``_hook`` down the MRO; ``None`` if none.
+
+    - ``"_hook" in base.__dict__`` presence check: a subclass explicitly sets
+      ``_hook=None`` / ``""`` → stops the walk (no inheritance of the parent's
+      hook; that subclass derives its bucket from dispatch instead).
+    - Empty value found and not found both return ``None`` (L1.3 R0 semantics).
+    """
+    for base in cls.__mro__:
+        if base is MultiHookProcessor:
+            break  # base class itself has no _hook
+        if "_hook" in base.__dict__:
+            hook = base.__dict__["_hook"]
+            return hook if hook else None  # non-empty → hook; empty → None (stop)
+    return None
+
+
+def get_graph_metadata(cls_or_instance) -> dict:
+    """Read graph metadata from a class, type, or instance.
+
+    Returns a dict for Builder or ``to_graph()`` to use.  Accepts classes or
+    instances — ``to_graph()`` may pass runtime instances.  Safely handles
+    non-MultiHookProcessor types (e.g. function-based processors).
+
+    ``_hook_`` vs ``_hooks_`` semantics:
+      - ``_hook_`` = registration bucket; ``"*"`` means MultiHookProcessor.
+      - ``_hooks_`` = handler coverage; drives graph ATTACHED_TO edges.
+      - Only an explicit concrete hook shrinks ``_hooks_``; ``"*"`` keeps the
+        dispatch-derived result.
+    """
+    is_instance = not isinstance(cls_or_instance, type)
+    cls = cls_or_instance if isinstance(cls_or_instance, type) else type(cls_or_instance)
+
+    def _read(name: str, default):
+        """Instance ``__dict__`` first (if present), else class attribute."""
+        if is_instance and name in getattr(cls_or_instance, "__dict__", {}):
+            return getattr(cls_or_instance, "__dict__", {})[name]
+        return getattr(cls, name, default)
+        # getattr(..., "__dict__", {}) defends __slots__ instances (no instance
+        # __dict__ — direct access would AttributeError); __slots__ classes
+        # still work via the class-attribute fallback.
+
+    # ── hook derivation ──
+    if hasattr(cls, "_DISPATCH"):
+        # MultiHookProcessor: _hook_ = nearest non-empty class _hook; else "*"
+        class_hook = _find_class_hook(cls)
+        hook = class_hook if class_hook else "*"
+        hooks_list = [hook] if hook != "*" else _dispatch_hooks(cls)
+    else:
+        # single-hook / function-based processor
+        hook = _read("_hook", None) or ""
+        if hook == "*":
+            # explicit wildcard bucket: runloop runs on all 8 processor hooks
+            hooks_list = list(PROCESSOR_HOOK_NAMES)
+        else:
+            hooks_list = [hook] if hook else []
+        hook = hook  # bucket
+
+    # ── unified output (both branches use the same _read()) ──
+    return {
+        "_hook_": hook,
+        "_hooks_": hooks_list,
+        "_order_": _read("_order", 0),
+        "_singleton_group_": _read("_singleton_group", None) or "",
+        "_after_": list(_read("_after", ())),
+        "_writes_slots_": list(_read("_writes_slot_keys", ())),
+        "_reads_slots_": list(_read("_reads_slot_keys", ())),
+        "_reads_event_fields_": list(_read("_reads_event_fields", ())),
+        "_writes_event_fields_": list(_read("_writes_event_fields", ())),
+    }
+
+
+def _dispatch_hooks(cls: type) -> list:
+    """L1.3 compute_effective_hooks: derive coverage hooks from dispatch/on().
+
+    Minimal subset for L1.4: collect overridden handler events from
+    ``_DISPATCH`` (a ``{EventType: method_name}`` table), map to hook names in
+    lifecycle order, and drop model/tool.  Full MRO/@on inheritance is added
+    in the L1.3 block; this stands in until then.
+    """
+    covered: list[str] = []
+    for event_type, method_name in cls._DISPATCH.items():
+        # skip handlers defined only on MultiHookProcessor (not overridden)
+        for base in cls.__mro__:
+            if method_name in base.__dict__:
+                if base is not MultiHookProcessor:
+                    covered.append(_EVENT_TO_HOOK_NAME.get(event_type, ""))
+                break
+    order = {name: i for i, name in enumerate(PROCESSOR_HOOK_NAMES)}
+    return [h for h in sorted((h for h in covered if h), key=lambda h: order.get(h, 999))
+            if h not in ("model", "tool")]

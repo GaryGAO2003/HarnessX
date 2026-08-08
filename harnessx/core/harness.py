@@ -24,6 +24,12 @@ from .config_schema import (
 from .events import make_run_id
 from .file_uri import normalize_file_uri
 from .processor import Processor
+from .runtime import (
+    RuntimeReg,
+    SerializedReg,
+    normalize_processor_reg,
+    release_owners,
+)
 from .runloop import run_loop
 from .state import State
 
@@ -619,9 +625,10 @@ def _instantiate_runtime(config: "HarnessConfig") -> _HarnessRuntime:
                     "will NOT include it",
                     p.get("_target_"),
                 )
-    # _rt_procs holds runtime-only processor instances that cannot be serialized.
+    # _rt_procs is a derived view of canonical RuntimeRegs; unwrap to instances
+    # so the route/output surface stays bare processors (I5).
     for p in getattr(config, "_rt_procs", None) or []:
-        flat.append(p)
+        flat.append(p.proc if isinstance(p, RuntimeReg) else p)
     proc_dict = _route_processors(flat)
 
     # ── Workspace ────────────────────────────────────────────────────────────
@@ -845,18 +852,59 @@ class HarnessConfig:
         elif not hasattr(self, "_rt_sandbox"):
             self._rt_sandbox = None
 
-        # processors: separate serializable dicts from runtime-only instances.
-        # Runtime instances live in the non-dataclass attribute _rt_procs so
-        # OmegaConf / to_yaml() never sees them.
-        existing_rt: list = [] if not hasattr(self, "_rt_procs") else list(self._rt_procs)
-        dicts: list = []
-        for p in self.processors:
-            if isinstance(p, dict):
-                dicts.append(p)
-            else:
-                existing_rt.append(p)
-        self.processors = dicts
-        self._rt_procs: list = existing_rt
+        # ── Single source of truth (L2.3c rule 1) ────────────────────────────
+        # _processor_regs is the only writable registration sequence; dicts,
+        # bare instances, records all normalize into SerializedReg / RuntimeReg.
+        # processors is then a read-only view (dict_refs of SerializedRegs).
+        raw = getattr(self, "_processor_regs", None)
+        if raw is None:
+            self._processor_regs: tuple = tuple(
+                normalize_processor_reg(p) for p in self.processors
+            )
+        self._refresh_processors_view()
+
+    # ── Registration view + write API (L2.3c rules 2-3) ─────────────────────
+
+    @property
+    def _rt_procs(self) -> tuple:
+        """Read-only derived view — the RuntimeRegs in the canonical sequence.
+
+        tuple (not list): a list view's ``.append()`` would silently no-op;
+        a tuple raises AttributeError, forcing writes through the write API.
+        Only available after ``__post_init__`` (depends on ``_processor_regs``).
+        """
+        return tuple(r for r in getattr(self, "_processor_regs", ())
+                     if isinstance(r, RuntimeReg))
+
+    def _refresh_processors_view(self) -> None:
+        """Rebuild the processors view from the canonical sequence.
+
+        Shared by ``__post_init__`` and both write APIs — without it, a write
+        to ``_processor_regs`` leaves ``config.processors`` exposing stale
+        dict_refs (e.g. a SerializedReg replaced by a RuntimeReg would still
+        graph as a persistent node → double representation).
+        """
+        self.processors = [r.dict_ref for r in self._processor_regs
+                           if isinstance(r, SerializedReg)]
+
+    def add_runtime_reg(self, reg: Any) -> None:
+        """Append a registration at the tail (seq = len).
+
+        Bare instances auto-coerce to RuntimeReg via normalize; dicts append as
+        SerializedReg.  All write paths go through ``normalize_processor_reg``.
+        """
+        self._processor_regs = (*self._processor_regs, normalize_processor_reg(reg))
+        self._refresh_processors_view()
+
+    def replace_processor_regs(self, regs: Iterable) -> None:
+        """Replace the canonical sequence — must pass the FULL mixed sequence.
+
+        (Digester scenario: map over the whole ``_processor_regs`` then write
+        back; passing only the runtime subsequence drops serialized positions.)
+        Each item is normalized via ``normalize_processor_reg``.
+        """
+        self._processor_regs = tuple(normalize_processor_reg(r) for r in regs)
+        self._refresh_processors_view()
 
     # ── Introspection ─────────────────────────────────────────────────────────
 
@@ -864,6 +912,7 @@ class HarnessConfig:
     def required_model_keys(self) -> frozenset:
         required: set = set()
         for proc in getattr(self, "_rt_procs", None) or []:
+            proc = proc.proc if isinstance(proc, RuntimeReg) else proc  # unwrap record
             rk = getattr(type(proc), "required_model_keys", None)
             if rk:
                 required.update(rk)
@@ -958,13 +1007,18 @@ class HarnessConfig:
         return cls.from_yaml(Path(path).read_text(encoding="utf-8"))
 
     def copy(self, **kwargs: Any) -> "HarnessConfig":
-        """Return a shallow copy with slot overrides applied."""
+        """Return a shallow copy with slot overrides applied.
+
+        Without a ``processors=`` override the canonical sequence is preserved
+        (shallow-copied with the object) and ``__post_init__`` only rebuilds the
+        view.  With an override the old canonical is discarded and rebuilt from
+        the new mixed sequence via ``normalize_processor_reg``.
+        """
         new = copy.copy(self)
-        new.processors = list(self.processors)
         new.plugins = list(self.plugins)
-        # Copy non-dataclass attributes so the two objects are independent.
-        new._rt_procs = list(getattr(self, "_rt_procs", []))
         new._rt_sandbox = getattr(self, "_rt_sandbox", None)
+        if "processors" in kwargs:
+            new._processor_regs = None  # rebuild canonical from the override
         for key, value in kwargs.items():
             setattr(new, key, value)
         # Re-run gate normalization so any runtime objects passed via kwargs
@@ -977,18 +1031,24 @@ class HarnessConfig:
 
         :func:`harnessx.meta_harness.evolve` calls this after
         ``HarnessConfig.from_yaml_file`` to validate a candidate config.
-        Deduplicate identical processor dict entries (order-preserving, first wins).
+        Deduplicate identical processor dict entries (order-preserving, first
+        wins; dedup key is order-insensitive — ``repr(dict)`` is insertion-order
+        sensitive).  RuntimeRegs pass through untouched.
         """
-        new = self.copy()
-        seen: set[str] = set()
+        new = copy.copy(self)
+        new.plugins = list(self.plugins)
+        new._rt_sandbox = getattr(self, "_rt_sandbox", None)
+        seen: set = set()
         out: list = []
-        for p in new.processors:
-            key = repr(p)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(p)
-        new.processors = out
+        for r in new._processor_regs:
+            if isinstance(r, SerializedReg):
+                key = repr(sorted(r.dict_ref.items(), key=lambda kv: repr(kv[0])))
+                if key in seen:
+                    continue
+                seen.add(key)
+            out.append(r)
+        new._processor_regs = tuple(out)
+        new.__post_init__()
         return new
 
 
@@ -1024,6 +1084,9 @@ class Harness:
         self.child_harness_config: "HarnessConfig | None" = None
         self._closed = False
         self._sandbox = None
+        # Single-owner token (L2.3b rule 2): object() is never reused by GC
+        # (id() can be) — the owner registry keys on this token.
+        self.__hx_owner_token = object()
         _ACTIVE_HARNESSES.add(self)
 
         # Instantiate all runtime objects from config
@@ -1093,6 +1156,11 @@ class Harness:
                     "The plugin's runtime initialisation was skipped.",
                     stacklevel=2,
                 )
+
+        # Cleanup state machine (L2.3b rule 4): first cleanup() call starts the
+        # shielded impl task; cancellation of the caller does NOT cancel the impl,
+        # and a retry awaits the SAME task to completion.
+        self._cleanup_task: "asyncio.Task | None" = None
 
     async def run(
         self,
@@ -1364,11 +1432,29 @@ class Harness:
             _sandbox_ctx.reset(_sandbox_token)
 
     async def cleanup(self) -> None:
-        """Release harness-scoped resources (plugins, sandbox, sub-harnesses)."""
+        """Release harness-scoped resources (plugins, sandbox, sub-harnesses).
+
+        Idempotent shielded state machine (L2.3b rule 4): the first call starts
+        the underlying cleanup task; a caller cancellation cancels only this
+        await — the impl task keeps running, and a retry awaits the SAME task
+        to completion.  Resources (e.g. ``_sandbox``) are cleared only inside
+        the impl's finally, so cancellation never drops the reference before
+        release.  Single-event-loop use; cross-loop concurrency is undefined.
+        """
         if self._closed:
             return
-        self._closed = True
+        if self._cleanup_task is None or self._cleanup_task.done():
+            # done() branch: task-level death (loop closing / impl exception) →
+            # rebuild and re-run.  Normal completion is short-circuited above by
+            # _closed.  Re-run is safe: sub.cleanup / plugin.stop are idempotent
+            # and the sandbox is cleared once released.
+            self._cleanup_task = asyncio.ensure_future(self._cleanup_impl())
+        await asyncio.shield(self._cleanup_task)
+        # Caller cancellation cancels only this await (CancelledError to the
+        # caller); the impl task itself is NOT cancelled and keeps running →
+        # retry awaits the same task to completion.
 
+    async def _cleanup_impl(self) -> None:
         # Sub-harnesses are internal helpers for non-main model roles.
         for sub in reversed(list(getattr(self, "_sub_harnesses", {}).values())):
             try:
@@ -1388,7 +1474,6 @@ class Harness:
                 )
 
         sandbox = self._sandbox
-        self._sandbox = None
         if sandbox is not None:
             try:
                 await self._rt.sandbox_provider.release(sandbox)
@@ -1397,4 +1482,16 @@ class Harness:
                     f"Sandbox release raised {type(exc).__name__}: {exc}.",
                     stacklevel=2,
                 )
-        _ACTIVE_HARNESSES.discard(self)
+            finally:
+                # Resource reference cleared only after the release await ends —
+                # a cancellation at ③ never drops the reference before release.
+                self._sandbox = None
+
+        # Tail isolation: even if release_owners raises (internal-bug level),
+        # _closed / _ACTIVE_HARNESSES.discard still run — otherwise _closed is
+        # set with the owner never released (leak, unrecoverable on retry).
+        try:
+            release_owners(self.__hx_owner_token)
+        finally:
+            self._closed = True
+            _ACTIVE_HARNESSES.discard(self)

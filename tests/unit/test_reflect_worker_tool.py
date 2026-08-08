@@ -202,11 +202,14 @@ def test_child_system_prompt_is_worker_specific() -> None:
         parent_run_id="parent-run",
     )
 
-    # Find the SystemPromptProcessor in _rt_procs.
+    # Find the SystemPromptProcessor in _rt_procs (RuntimeRegs unwrapped).
+    from harnessx.core.runtime import unwrap_runtime_proc
+
     found = None
     for p in getattr(child, "_rt_procs", []):
-        if isinstance(p, SystemPromptProcessor):
-            found = p
+        proc = unwrap_runtime_proc(p)
+        if isinstance(proc, SystemPromptProcessor):
+            found = proc
             break
     assert found is not None
     built = asyncio.run(found.system_builder.build())

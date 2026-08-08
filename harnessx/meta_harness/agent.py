@@ -51,6 +51,8 @@ if TYPE_CHECKING:
     from ..core.harness import HarnessConfig
     from ..core.model_config import ModelConfig
 
+from ..core.runtime import unwrap_runtime_proc
+
 logger = logging.getLogger(__name__)
 
 
@@ -370,6 +372,7 @@ def _iter_processor_entries(cfg: "HarnessConfig"):
             target = entry.get("_target_", "") or ""
             yield _label_from_target(target), entry
     for p in getattr(cfg, "_rt_procs", None) or []:
+        p = unwrap_runtime_proc(p)  # RuntimeReg → proc instance (L2.3a)
         label = getattr(p, "_singleton_group", "") or type(p).__name__
         entry = {"_target_": type(p).__module__ + "." + type(p).__name__}
         yield label, entry
@@ -420,6 +423,7 @@ def _collect_template_paths(cfg: "HarnessConfig") -> set[str]:
     if processors is not None:
         _visit(processors)
     for p in getattr(cfg, "_rt_procs", None) or []:
+        p = unwrap_runtime_proc(p)  # RuntimeReg → proc instance (L2.3a)
         builder = getattr(p, "system_builder", None) or getattr(p, "builder", None) or p
         tpath = getattr(builder, "template_path", None)
         if isinstance(tpath, str) and tpath:

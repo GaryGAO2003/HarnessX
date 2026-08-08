@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
+from ..core.runtime import RuntimeReg
 from ..logging import logger
 
 if TYPE_CHECKING:
@@ -548,7 +549,7 @@ def _patch_processors_for_child(
                 new_procs.append(p)
                 continue
         else:
-            inst = p
+            inst = p.proc if isinstance(p, RuntimeReg) else p  # unwrap record
 
         if isinstance(inst, SystemPromptProcessor):
             if system_prompt_override:
@@ -566,7 +567,9 @@ def _patch_processors_for_child(
         else:
             new_procs.append(p)
 
-    return config.copy(processors=new_procs, _rt_procs=[])
+    # No `_rt_procs=` override: _rt_procs is a read-only derived view (L2.3c).
+    # RuntimeReg entries already in new_procs pass through normalize on rebuild.
+    return config.copy(processors=new_procs)
 
 
 class _StaticSystemPromptBuilder:

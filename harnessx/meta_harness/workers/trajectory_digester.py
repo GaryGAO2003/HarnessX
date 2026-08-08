@@ -145,19 +145,29 @@ def _make_worker_child_config_fn(
         # Overwrite SystemPromptProcessor's builder with a static one so the
         # worker can't see the reflect agent's guide — it uses only its
         # narrower prompt.
+        from dataclasses import replace as _dc_replace
+
+        from harnessx.core.runtime import RuntimeReg, unwrap_runtime_proc
+
         static_builder = _StaticSystemPromptBuilder(spec.system_prompt)
         replaced = False
-        new_rt: list = []
-        for proc in getattr(child_cfg, "_rt_procs", []):
-            if isinstance(proc, SystemPromptProcessor):
-                new_rt.append(SystemPromptProcessor(static_builder))
+        new_regs: list = []
+        # Map over the FULL canonical sequence (L2.3a): SerializedRegs and
+        # unrelated RuntimeRegs pass through untouched — building only a runtime
+        # subsequence would drop serialized positions.  RuntimeReg replacement
+        # keeps the four-tuple via dataclasses.replace.
+        for reg in child_cfg._processor_regs:
+            if isinstance(reg, RuntimeReg) and isinstance(
+                unwrap_runtime_proc(reg), SystemPromptProcessor
+            ):
+                new_regs.append(_dc_replace(reg, proc=SystemPromptProcessor(static_builder)))
                 replaced = True
             else:
-                new_rt.append(proc)
+                new_regs.append(reg)
         if not replaced:
-            new_rt.append(SystemPromptProcessor(static_builder))
+            new_regs.append(RuntimeReg(proc=SystemPromptProcessor(static_builder)))
         child_cfg = child_cfg.copy()
-        child_cfg._rt_procs = new_rt
+        child_cfg.replace_processor_regs(new_regs)
 
         return child_cfg
 
