@@ -132,7 +132,29 @@ def validate_candidate_graph(
                 node_ids=[node_id],
             ))
 
-    # 3. Try build_from_config (catches import errors, structural issues)
+    # 3. Static S0–S3 validation (P3 fail-closed validator) — subsumes the old
+    #    ad-hoc singleton/after checks and adds schema/kind/order layers.
+    from harnessx.graph.validate import validate_snapshot
+
+    static = validate_snapshot(snapshot)
+    for issue in static.issues:
+        errors.append(GraphValidationError(
+            error_type=issue.error_type,
+            message=f"[{issue.layer}] {issue.message}",
+            node_ids=list(issue.node_ids),
+            edge_ids=list(issue.edge_ids),
+        ))
+    for w in static.warnings:
+        warnings.append(GraphValidationError(
+            error_type=w.error_type,
+            message=f"[{w.layer}] {w.message}",
+            node_ids=list(w.node_ids),
+            edge_ids=list(w.edge_ids),
+        ))
+
+    # 4. build_from_config — FAIL-CLOSED (P3 exit criterion / I9): a candidate
+    #    whose build() raises is REJECTED.  ImportError is no longer downgraded
+    #    to a warning — co-located processors must be importable before gating.
     config_dict = _config_to_dict(config)
     try:
         build_from_config(config_dict)
@@ -142,49 +164,16 @@ def validate_candidate_graph(
                 error_type="build_conflict",
                 message=conflict,
             ))
-    except ImportError as exc:
-        warnings.append(GraphValidationError(
-            error_type="import_warning",
-            message=f"Processor not yet importable (may be co-located with candidate): {exc}",
-        ))
-    except Exception as exc:
-        warnings.append(GraphValidationError(
-            error_type="build_warning",
-            message=f"Build validation produced unexpected: {exc}",
+    except Exception as exc:  # noqa: BLE001 — ImportError included, fail closed
+        errors.append(GraphValidationError(
+            error_type="build_failed",
+            message=f"build() raised {type(exc).__name__}: {exc}",
         ))
 
     if errors:
         return GraphValidationReport(passed=False, errors=errors, warnings=warnings)
 
-    # 4. Check for duplicate singleton groups
-    sg_counts: dict[str, list[str]] = {}
-    for node_id, node in snapshot.nodes.items():
-        sg = node.metadata.get("_singleton_group_")
-        if sg:
-            sg_counts.setdefault(sg, []).append(node_id)
-    for sg, nids in sg_counts.items():
-        if len(nids) > 1:
-            errors.append(GraphValidationError(
-                error_type="singleton_conflict",
-                message=f"Singleton group '{sg}' claimed by {len(nids)} processors",
-                node_ids=list(nids),
-            ))
-
-    # 5. Check for unresolved AFTER dependencies
-    known_sgs = set(sg_counts)
-    for node_id, node in snapshot.nodes.items():
-        after_val = node.metadata.get("_after_")
-        if after_val:
-            after_list = [after_val] if isinstance(after_val, str) else list(after_val)
-            for after_sg in after_list:
-                if after_sg not in known_sgs:
-                    warnings.append(GraphValidationError(
-                        error_type="unresolved_after",
-                        message=f"AFTER reference to '{after_sg}' not in graph",
-                        node_ids=[node_id],
-                    ))
-
-    # 6. Compute genotype hash
+    # 5. Compute genotype hash
     gh = genotype_hash(snapshot)
 
     passed = len(errors) == 0

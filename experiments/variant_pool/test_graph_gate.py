@@ -117,9 +117,9 @@ processors:
 
 
 class TestGraphMetadataGate:
-    """New processors without metadata should trigger warnings."""
+    """Metadata warnings + P3 fail-closed build (unimportable → REJECT)."""
 
-    def test_new_processor_without_sg_warns(self):
+    def test_new_processor_unimportable_fails_closed(self):
         yaml_content = """\
 processors:
   - _target_: harnessx.processors.control.loop_detection.LoopDetectionProcessor
@@ -129,10 +129,12 @@ processors:
 """
         path = make_config_yaml(yaml_content)
         report = validate_candidate_graph(path)
-        # Passes (import error is a warning, metadata missing is a warning)
-        assert report.passed
+        # P3: build failures (ImportError included) are no longer downgraded
+        assert not report.passed
+        assert any(e.error_type == "build_failed" for e in report.errors)
+        assert report.genotype_hash == ""  # rejected → no identity minted
+        # the metadata warning still surfaces alongside the rejection
         assert any("missing_metadata" in w.error_type for w in report.warnings)
-        assert any("import_warning" in w.error_type for w in report.warnings)
 
     def test_known_processor_no_warning(self):
         yaml_content = """\
@@ -146,7 +148,7 @@ processors:
         missing = [w for w in report.warnings if w.error_type == "missing_metadata"]
         assert len(missing) == 0
 
-    def test_new_processor_with_sg_passes(self):
+    def test_new_processor_with_sg_still_fails_build(self):
         yaml_content = """\
 processors:
   - _target_: my.DeclaredProcessor
@@ -155,10 +157,12 @@ processors:
 """
         path = make_config_yaml(yaml_content)
         report = validate_candidate_graph(path)
-        # Passes (import error is a warning, not a block)
-        assert report.passed
+        # sg declared → no metadata warning, but the target still cannot
+        # build — fail-closed rejects regardless of declared metadata
+        assert not report.passed
+        assert any(e.error_type == "build_failed" for e in report.errors)
         missing = [w for w in report.warnings if w.error_type == "missing_metadata"]
-        assert len(missing) == 0  # sg declared, no metadata warning
+        assert len(missing) == 0
 
 
 class TestGraphValidationError:

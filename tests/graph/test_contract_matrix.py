@@ -7,14 +7,14 @@ tests name the P1/P2/P3 work item that must land before the invariant is
 fully checkable.  ``docs/graph-hardening-v5.3-P0-freeze.md`` records the full
 disposition and the code realities behind each choice.
 
-Disposition (2026-08-09, updated after block 15 landed):
-    REAL  — I1, I2, I3, I4, I5, I6, I7, I8, I10
-    SKIP  — I9 (P3 fail-closed gate)
+Disposition (2026-08-09, updated after blocks 15 + 17-19 landed):
+    REAL  — I1 through I10, no skips left.
 
 I5/I7 were unblocked by the block-15 rewiring (_instantiate_runtime consumes
 _processor_regs once; _route_processors buckets envelopes via the shared
-stable_topological_sort) — their former skip reasons are preserved in git
-history.
+stable_topological_sort); I9 by the P3 fail-closed gate (build failures
+reject — the ImportError/Exception → warning downgrade is gone).  Former
+skip reasons are preserved in git history.
 """
 
 from __future__ import annotations
@@ -304,18 +304,39 @@ def test_i8_apply_edits_failure_leaves_snapshot_unchanged():
     assert genotype_hash(snap) == geno_before
 
 
-# ── I9 — rejected candidate never enters active (SKIP: P3 fail-closed) ────────
+# ── I9 — rejected candidate never enters active (REAL since P3 gate) ──────────
 
 
-@pytest.mark.skip(reason=(
-    "I9 blocked on P3 fail-closed gate: the graph gate currently fails OPEN — "
-    "graph_gate.py:145-154 downgrades ImportError and generic build() "
-    "Exceptions to warnings, so a candidate whose build() raises still passes "
-    "(only HarnessConflictError is fail-closed). P3 must make build failures "
-    "reject the candidate; proper check is a candidate-gate integration test."
-))
-def test_i9_rejected_candidate_never_enters_active():
-    """rejected candidate 不得进入 executor、ledger 或 active config."""
+def test_i9_rejected_candidate_never_enters_active(tmp_path):
+    """rejected candidate 不得进入 executor、ledger 或 active config.
+
+    The graph gate is the admission point: a candidate whose build() raises
+    is REJECTED (P3 removed the ImportError/Exception → warning downgrade),
+    no genotype identity is minted for dedup/ledger, and the injectable gate
+    check returns (False, reason) so the pipeline never promotes it.
+    """
+    from experiments.variant_pool.graph_gate import (
+        make_graph_build_check,
+        validate_candidate_graph,
+    )
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "processors:\n"
+        "  - _target_: nonexistent.mod.Klass\n"
+        "    _hook_: task_start\n",
+        encoding="utf-8",
+    )
+
+    report = validate_candidate_graph(cfg)
+    assert not report.passed                       # fail-closed, not a warning
+    assert any(e.error_type == "build_failed" for e in report.errors)
+    assert report.genotype_hash == ""              # no identity for the ledger
+
+    check = make_graph_build_check()
+    passed, reason = check(cfg, None, None, [])
+    assert passed is False                         # gate never promotes it
+    assert reason                                  # concrete rejection reason
 
 
 # ── I10 — observed trace does not rewrite the genotype (REAL) ─────────────────
