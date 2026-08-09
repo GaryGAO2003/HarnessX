@@ -926,24 +926,38 @@ def _extract_declaration(proc_dict: dict, target: str) -> ComponentDecl:
     hooks = tuple(h for h in hooks_raw if h)  # 保留 "*"（truthy，L4.1 通配展开）
 
     if "_order_" in proc_dict:
-        order = int(proc_dict["_order_"])
+        try:
+            order = int(proc_dict["_order_"])
+        except (TypeError, ValueError):
+            pass                        # 手工 YAML 异型值 → 保持 50（未知），不崩溃
 
     if "_singleton_group_" in proc_dict:
-        singleton_group = str(proc_dict["_singleton_group_"])
+        v = proc_dict["_singleton_group_"]
+        singleton_group = v if isinstance(v, str) else ""
+        # 非 str（含 None）→ ""：str(None)="None" 会造出幻影 singleton 组
+        # （两个 _singleton_group_: None 的处理器互相 CONFLICTS）；
+        # 与 SerializedReg.singleton_group 的 isinstance 守卫一致。
 
     if "_after_" in proc_dict:
         v = proc_dict["_after_"]
-        after = tuple(v) if v else ()
+        after = tuple(v) if isinstance(v, (list, tuple)) else ()
+        # isinstance 守卫（与 SerializedReg.after 同款）：`tuple(v) if v else ()`
+        # 对 _after_: 7 抛 TypeError、对 "ab" char-split — 均安全降级 ()。
 
+    # 列表型字段统一 isinstance (list, tuple) 守卫（异型值 → ()），下同：
     if "_writes_slots_" in proc_dict:
-        writes_to = tuple(proc_dict["_writes_slots_"])
+        v = proc_dict["_writes_slots_"]
+        writes_to = tuple(v) if isinstance(v, (list, tuple)) else ()
     if "_reads_slots_" in proc_dict:
-        reads_from = tuple(proc_dict["_reads_slots_"])
+        v = proc_dict["_reads_slots_"]
+        reads_from = tuple(v) if isinstance(v, (list, tuple)) else ()
 
     if "_reads_event_fields_" in proc_dict:
-        reads_event_fields = tuple(proc_dict["_reads_event_fields_"])
+        v = proc_dict["_reads_event_fields_"]
+        reads_event_fields = tuple(v) if isinstance(v, (list, tuple)) else ()
     if "_writes_event_fields_" in proc_dict:
-        writes_event_fields = tuple(proc_dict["_writes_event_fields_"])
+        v = proc_dict["_writes_event_fields_"]
+        writes_event_fields = tuple(v) if isinstance(v, (list, tuple)) else ()
 
     # ── 步骤 2：WKD 回退（仅填充 dict 中键完全缺失的字段）──
     wkd = WELL_KNOWN_DECLARATIONS.get(target)
@@ -977,8 +991,23 @@ def _extract_declaration(proc_dict: dict, target: str) -> ComponentDecl:
             hooks = (inferred,)
 
     # ── 步骤 4：一次性构造（__post_init__ 处理 hook↔hooks 同步 + 生命周期排序）──
+    # 注册桶读回（VM5 "*" 识别）：桶解析链与 `_bucket` 同源（dict `_hook_` →
+    # WKD.hook）。仅 "*" 需显式传入（L3.2 豁免保留）；具体桶 = hooks[0] 由
+    # __post_init__ 派生，天然一致，传 "" 即可。
+    # **显式空 coverage 抑制读回**：hooks_present 且 hooks=() 时传 hook=""——
+    # 否则 hook="*" + hooks=() 触发 __post_init__ 规则 1（单参数兼容展开），
+    # 空 coverage 被展开成 ("*",)，破坏 VM14 "显式 `_hooks_=[]` → 0 边"。
+    bucket = ""
+    if "_hook_" in proc_dict:
+        v = proc_dict["_hook_"]
+        bucket = v if isinstance(v, str) else ""
+    elif wkd is not None and wkd.hook:
+        bucket = wkd.hook
+    explicit_empty_coverage = hooks_present and not hooks
     return ComponentDecl(
-        target=target, hooks=hooks, order=order,
+        target=target,
+        hook=("*" if bucket == "*" and not explicit_empty_coverage else ""),
+        hooks=hooks, order=order,
         singleton_group=singleton_group, after=after,
         writes_to=writes_to, reads_from=reads_from,
         reads_event_fields=reads_event_fields,

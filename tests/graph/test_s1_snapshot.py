@@ -74,15 +74,17 @@ class TestToGraph:
         assert len(s1.edges) == len(s2.edges)
 
     def test_wildcard_hook_creates_edges_to_all_hooks(self, simple_config):
-        """Processors with hook='*' should have ATTACHED_TO edges to all 10 hooks."""
+        """hook='*' expands to the 8 processor hooks (L4.1) — never model/tool."""
         snapshot = to_graph(simple_config)
         # Count edges per wildcard processor
         attached = snapshot.edges_by_type(EdgeType.ATTACHED_TO)
-        # Each wildcard processor should have 10 edges (one per hook)
         edge_counts: dict[str, int] = {}
         for e in attached:
             edge_counts[e.source_id] = edge_counts.get(e.source_id, 0) + 1
-        # At least some processors should have 10 edges
-        assert any(c == 10 for c in edge_counts.values()), (
-            f"Expected some processors with 10 ATTACHED_TO edges, got counts: {edge_counts}"
+        # At least some processors should have exactly 8 edges (PROCESSOR_HOOK_NAMES)
+        assert any(c == 8 for c in edge_counts.values()), (
+            f"Expected some processors with 8 ATTACHED_TO edges, got counts: {edge_counts}"
+        )
+        assert all(c <= 8 for c in edge_counts.values()), (
+            f"No processor may attach to more than 8 hooks: {edge_counts}"
         )

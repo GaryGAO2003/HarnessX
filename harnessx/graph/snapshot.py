@@ -8,6 +8,7 @@ existing behaviour (pure read).
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from ..core.processor import PROCESSOR_HOOK_NAMES
@@ -75,11 +76,162 @@ def _compute_slug(target: str) -> str:
     return slug
 
 
-def _slug_from_target(target: str, index: int) -> str:
-    """Derive a stable, human-readable node id from a _target_ class path."""
-    # e.g. "harnessx.processors.memory.strategies.sliding_window.SlidingWindowMemory"
-    # → "proc:sliding_window_memory"
-    return f"proc:{_compute_slug(target)}"
+def _extract_declaration(proc_dict: dict, target: str) -> "ComponentDecl":
+    """dict metadata → ComponentDecl (L3.1). Fallback chain: dict → WKD → infer.
+
+    Every field resolves independently via key presence (P2).  All fields are
+    accumulated first and the ComponentDecl is constructed ONCE at the end, so
+    ``__post_init__`` (hook↔hooks sync + lifecycle sort) fires correctly —
+    never construct-then-mutate.
+    """
+    from .declaration import ComponentDecl, DeclarationSource, WELL_KNOWN_DECLARATIONS
+
+    hooks: tuple = ()
+    order = 50  # sentinel: "unknown" (L3.3)
+    singleton_group = ""
+    after: tuple = ()
+    writes_to: tuple = ()
+    reads_from: tuple = ()
+    reads_event_fields: tuple = ()
+    writes_event_fields: tuple = ()
+    source = DeclarationSource.UNKNOWN
+    confidence = 0.0
+
+    # ── step 1: accumulate from the dict ──
+    hooks_present = "_hooks_" in proc_dict or "_hook_" in proc_dict
+
+    hooks_raw: tuple = ()
+    if "_hooks_" in proc_dict:
+        v = proc_dict["_hooks_"]
+        hooks_raw = tuple(v) if isinstance(v, (list, tuple)) else ()
+    elif "_hook_" in proc_dict:
+        hooks_raw = (proc_dict["_hook_"],)
+    # drop empty strings / non-str: legacy `_hook_=""` must yield hooks=()
+    # (hooks_present stays True → WKD fallback and inference both forbidden →
+    # 0 ATTACHED_TO edges).  "*" is truthy and survives (L4.1 expands it).
+    hooks = tuple(h for h in hooks_raw if isinstance(h, str) and h)
+
+    if "_order_" in proc_dict:
+        try:
+            order = int(proc_dict["_order_"])
+        except (TypeError, ValueError):
+            pass  # malformed hand-written YAML → stays "unknown", no crash
+
+    if "_singleton_group_" in proc_dict:
+        v = proc_dict["_singleton_group_"]
+        # non-str (incl. None) → "": str(None) would mint a phantom "None"
+        # singleton group (two such processors would CONFLICT with each other)
+        singleton_group = v if isinstance(v, str) else ""
+
+    if "_after_" in proc_dict:
+        v = proc_dict["_after_"]
+        # isinstance guard (same as SerializedReg.after): bare truthiness would
+        # TypeError on `_after_: 7` and char-split on `_after_: "ab"`
+        after = tuple(v) if isinstance(v, (list, tuple)) else ()
+
+    if "_writes_slots_" in proc_dict:
+        v = proc_dict["_writes_slots_"]
+        writes_to = tuple(v) if isinstance(v, (list, tuple)) else ()
+    if "_reads_slots_" in proc_dict:
+        v = proc_dict["_reads_slots_"]
+        reads_from = tuple(v) if isinstance(v, (list, tuple)) else ()
+    if "_reads_event_fields_" in proc_dict:
+        v = proc_dict["_reads_event_fields_"]
+        reads_event_fields = tuple(v) if isinstance(v, (list, tuple)) else ()
+    if "_writes_event_fields_" in proc_dict:
+        v = proc_dict["_writes_event_fields_"]
+        writes_event_fields = tuple(v) if isinstance(v, (list, tuple)) else ()
+
+    # ── step 2: WKD fallback (only for keys entirely missing from the dict) ──
+    wkd = WELL_KNOWN_DECLARATIONS.get(target)
+    if wkd is not None:
+        if not hooks_present and wkd.hooks:
+            # key-presence, not truthiness: `_hooks_=[]` is explicit-empty
+            hooks = wkd.hooks
+        if "_order_" not in proc_dict:
+            order = wkd.order
+        if "_singleton_group_" not in proc_dict and wkd.singleton_group:
+            singleton_group = wkd.singleton_group
+        if "_after_" not in proc_dict and wkd.after:
+            after = wkd.after
+        if "_writes_slots_" not in proc_dict and wkd.writes_to:
+            writes_to = wkd.writes_to
+        if "_reads_slots_" not in proc_dict and wkd.reads_from:
+            reads_from = wkd.reads_from
+        if "_reads_event_fields_" not in proc_dict and wkd.reads_event_fields:
+            reads_event_fields = wkd.reads_event_fields
+        if "_writes_event_fields_" not in proc_dict and wkd.writes_event_fields:
+            writes_event_fields = wkd.writes_event_fields
+        if source == DeclarationSource.UNKNOWN:
+            source = wkd.source
+        if confidence < wkd.confidence:
+            confidence = wkd.confidence
+
+    # ── step 3: string inference (only when hooks are entirely undeclared) ──
+    if not hooks_present and not hooks:
+        inferred = _infer_hook_from_target(target)
+        if inferred and inferred != "unknown":
+            hooks = (inferred,)
+
+    # ── step 4: construct once (__post_init__ syncs hook↔hooks + sorts) ──
+    # Bucket read-back (VM5 "*" recognition): same chain as `_bucket`
+    # (dict `_hook_` → WKD.hook).  Only "*" needs explicit passing (L3.2
+    # exemption keeps it); a concrete bucket == hooks[0] derives naturally.
+    # Explicit-empty coverage suppresses the read-back: passing hook="*" with
+    # hooks=() would trip __post_init__ rule 1 and expand coverage to ("*",),
+    # breaking VM14's "explicit `_hooks_=[]` → 0 edges".
+    bucket = ""
+    if "_hook_" in proc_dict:
+        v = proc_dict["_hook_"]
+        bucket = v if isinstance(v, str) else ""
+    elif wkd is not None and wkd.hook:
+        bucket = wkd.hook
+    explicit_empty_coverage = hooks_present and not hooks
+    return ComponentDecl(
+        target=target,
+        hook=("*" if bucket == "*" and not explicit_empty_coverage else ""),
+        hooks=hooks,
+        order=order,
+        singleton_group=singleton_group,
+        after=after,
+        writes_to=writes_to,
+        reads_from=reads_from,
+        reads_event_fields=reads_event_fields,
+        writes_event_fields=writes_event_fields,
+        source=source,
+        confidence=confidence,
+    )
+
+
+def _warn_wkd_drift(proc_dict: dict, target: str, wkd) -> None:
+    """Warn when dict metadata contradicts WELL_KNOWN_DECLARATIONS (约束 #6).
+
+    Builder-serialized values are class ground truth at build time; a mismatch
+    usually means the class changed and the WKD table was not updated — stale
+    WKD silently diverges the L4.6/L5.6 chain order from the runtime execution
+    order (I7).  Explicit registration overrides also trip this: it is a
+    diagnostic warning, not an error.  ``_hook_`` is skipped — the builder
+    writes it precisely on registration overrides, which are legitimate.
+    """
+    drifted: list[str] = []
+    if "_hooks_" in proc_dict and isinstance(proc_dict["_hooks_"], (list, tuple)) \
+            and tuple(proc_dict["_hooks_"]) != wkd.hooks:
+        drifted.append("_hooks_")
+    if "_order_" in proc_dict:
+        try:
+            if int(proc_dict["_order_"]) != wkd.order:
+                drifted.append("_order_")
+        except (TypeError, ValueError):
+            pass
+    if "_singleton_group_" in proc_dict and isinstance(proc_dict["_singleton_group_"], str) \
+            and proc_dict["_singleton_group_"] != wkd.singleton_group:
+        drifted.append("_singleton_group_")
+    if drifted:
+        _log.warning(
+            "WKD drift for %s: dict keys %s differ from WELL_KNOWN_DECLARATIONS "
+            "(class metadata may have changed without a WKD update)",
+            target, drifted,
+        )
 
 
 # ── runtime overlay (L5.1 / L5.1b / L5.3) ────────────────────────────────────
@@ -224,28 +376,6 @@ def _add_runtime_slots(snapshot: GraphSnapshot) -> None:
             ))
 
 
-def _make_processor_node(
-    target: str,
-    hook: str,
-    index: int,
-    extra: dict | None = None,
-) -> Node:
-    """Create a processor node from its _target_ dict."""
-    node_id = _slug_from_target(target, index)
-    metadata: dict = {
-        "_target_": target,
-        "_hook_": hook,
-    }
-    if extra:
-        metadata.update(extra)
-    return Node(
-        node_id=node_id,
-        node_type=NodeType.PROCESSOR,
-        label=target.rsplit(".", 1)[-1] if "." in target else target,
-        metadata=metadata,
-    )
-
-
 # ── main export ─────────────────────────────────────────────────────────────
 
 
@@ -272,13 +402,15 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
     # 2. loop-back
     snapshot.edges.append(_make_loop_back_edge())
 
-    # 3. processor nodes + ATTACHED_TO edges
+    # 3. processor nodes + ATTACHED_TO edges (decl-driven — L3.1 / L4.1)
+    from .declaration import WELL_KNOWN_DECLARATIONS
+
     seen_targets: dict[str, int] = {}  # target → count for disambiguation
     proc_node_ids: list[str] = []
 
-    for i, proc_dict in enumerate(config.processors):
-        # proc_dict may be a _target_ dict or a runtime-only instance (MultiHookProcessor etc.)
-        # Runtime-only instances are not dicts — skip them for graph export.
+    for proc_dict in config.processors:
+        # proc_dict may be a _target_ dict or a runtime-only instance —
+        # instances are represented by the runtime overlay, not here.
         if not isinstance(proc_dict, dict):
             continue
 
@@ -286,75 +418,89 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
         if not target:
             continue
 
-        # Determine hook
-        hook = proc_dict.get("_hook_", "")
-        if not hook:
-            # Try to infer from the target class's _hook attribute
-            hook = _infer_hook_from_target(target)
+        wkd = WELL_KNOWN_DECLARATIONS.get(target)
+        decl = _extract_declaration(proc_dict, target)
+        if wkd is not None:
+            _warn_wkd_drift(proc_dict, target, wkd)
 
-        if not hook:
-            hook = "unknown"
+        # Node metadata carries RESOLVED decl values, but a key is written only
+        # when the extraction actually resolved it (dict key / WKD / inference).
+        # The 50/""/() "unknown" sentinels are never pinned into the graph, so
+        # a round-trip cannot turn "undeclared" into "explicitly declared" (P2)
+        # — pinning `_order_=50` or `_singleton_group_=""` would replace the
+        # runtime's natural class-default fallback with a wrong explicit value.
+        meta: dict[str, object] = {"_target_": target}
+        if "_code_hash" in proc_dict:
+            meta["_code_hash"] = proc_dict["_code_hash"]
 
-        extra: dict[str, object] = {}
-        for key in ("_order_", "_singleton_group_", "_code_hash"):
-            if key in proc_dict:
-                extra[key] = proc_dict[key]
-        for key in ("_after_",):
-            val = proc_dict.get(key)
-            if val is not None:
-                extra[key] = val
+        hooks_present = "_hooks_" in proc_dict or "_hook_" in proc_dict
+        if "_hook_" in proc_dict:
+            v = proc_dict["_hook_"]
+            meta["_hook_"] = v if isinstance(v, str) else ""  # bucket: dict wins
+        elif wkd is not None and wkd.hook:
+            meta["_hook_"] = wkd.hook                          # natural bucket
+        elif not hooks_present and decl.hooks:
+            meta["_hook_"] = decl.hooks[0]                     # inference hit
+        # `_hooks_`-only dicts get no `_hook_`: fabricating a bucket from
+        # coverage[0] would reroute the processor on round-trip (natural "*"
+        # bucket → concrete hook).
+        if hooks_present or wkd is not None or decl.hooks:
+            meta["_hooks_"] = list(decl.hooks)
+        if "_order_" in proc_dict or wkd is not None:
+            meta["_order_"] = decl.order
+        if "_singleton_group_" in proc_dict or (wkd is not None and wkd.singleton_group):
+            meta["_singleton_group_"] = decl.singleton_group
+        if "_after_" in proc_dict or (wkd is not None and wkd.after):
+            meta["_after_"] = list(decl.after)
+        if "_writes_slots_" in proc_dict or (wkd is not None and wkd.writes_to):
+            meta["_writes_slots_"] = list(decl.writes_to)
+        if "_reads_slots_" in proc_dict or (wkd is not None and wkd.reads_from):
+            meta["_reads_slots_"] = list(decl.reads_from)
+        if "_reads_event_fields_" in proc_dict or (wkd is not None and wkd.reads_event_fields):
+            meta["_reads_event_fields_"] = list(decl.reads_event_fields)
+        if "_writes_event_fields_" in proc_dict or (wkd is not None and wkd.writes_event_fields):
+            meta["_writes_event_fields_"] = list(decl.writes_event_fields)
 
-        # Inject declaration metadata from well-known processor classes
-        from .declaration import WELL_KNOWN_DECLARATIONS
-        decl = WELL_KNOWN_DECLARATIONS.get(target)
-        if decl is not None:
-            if decl.singleton_group and "_singleton_group_" not in extra:
-                extra["_singleton_group_"] = decl.singleton_group
-            if decl.order and "_order_" not in extra:
-                extra["_order_"] = decl.order
-            if decl.after and "_after_" not in extra:
-                extra["_after_"] = decl.after
-            # Store slot deps for edge creation later
-            if decl.writes_to:
-                extra["_writes_slots_"] = list(decl.writes_to)
-            if decl.reads_from:
-                extra["_reads_slots_"] = list(decl.reads_from)
+        # L4.4: constructor kwargs (non-underscore keys), deepcopied so later
+        # mutation of the source dict never leaks into the graph (VM12g)
+        ctor_kwargs = deepcopy({k: v for k, v in proc_dict.items()
+                                if not k.startswith("_")})
+        if ctor_kwargs:
+            meta["_ctor_kwargs_"] = ctor_kwargs
 
         # Disambiguate duplicate targets (same class used multiple times)
         seen_targets[target] = seen_targets.get(target, 0) + 1
         index = seen_targets[target]
-        node = _make_processor_node(target, hook, index, extra if extra else None)
-        node_id = node.node_id
+        node_id = f"proc:{_compute_slug(target)}"
         if index > 1:
             node_id = f"{node_id}__{index}"
 
-        # Replace with disambiguated id if needed
-        if node_id != node.node_id:
-            node = Node(
-                node_id=node_id,
-                node_type=node.node_type,
-                label=node.label,
-                metadata=dict(node.metadata),
-            )
-
-        snapshot.nodes[node_id] = node
+        snapshot.nodes[node_id] = Node(
+            node_id=node_id,
+            node_type=NodeType.PROCESSOR,
+            label=target.rsplit(".", 1)[-1] if "." in target else target,
+            metadata=meta,
+        )
         proc_node_ids.append(node_id)
 
-        # ATTACHED_TO edge: processor → its hook(s)
-        # "*" means MultiHookProcessor — fires on every hook
-        if hook == "*":
-            target_hooks = SKELETON_HOOK_NAMES
-        else:
-            target_hooks = [hook] if hook in SKELETON_HOOK_NAMES else []
-        for hook_name in target_hooks:
-            hook_node_id = f"hook:{hook_name}"
-            if hook_node_id in snapshot.nodes:
-                snapshot.edges.append(Edge(
-                    source_id=node_id,
-                    target_id=hook_node_id,
-                    edge_type=EdgeType.ATTACHED_TO,
-                    metadata={},
-                ))
+        # L4.1: ATTACHED_TO edges from decl.hooks. "*" expands to the 8
+        # processor hooks (PROCESSOR_HOOK_NAMES) — never model/tool.
+        for hook_name in decl.hooks:
+            if hook_name == "*":
+                target_hooks = list(PROCESSOR_HOOK_NAMES)
+            elif hook_name in SKELETON_HOOK_NAMES:
+                target_hooks = [hook_name]
+            else:
+                target_hooks = []
+            for t in target_hooks:
+                hook_node_id = f"hook:{t}"
+                if hook_node_id in snapshot.nodes:
+                    snapshot.edges.append(Edge(
+                        source_id=node_id,
+                        target_id=hook_node_id,
+                        edge_type=EdgeType.ATTACHED_TO,
+                        metadata={},
+                    ))
 
     # 4. AFTER edges (soft ordering dependencies within same hook)
     # Build group → node_id mapping from declared singleton_groups
@@ -473,12 +619,12 @@ def _infer_hook_from_target(target: str) -> str:
 
 
 def _add_slot_nodes(snapshot: GraphSnapshot) -> None:
-    """Add slot nodes for known data channels and any WRITES_TO/READS_FROM edges.
+    """Add slot nodes: 6 fixed baseline channels + dynamic declared slots (L4.3).
 
-    Slot nodes represent typed data channels that processors read from or
-    write to.  The three canonical slots are memory, plan, and cost.
-    Additional slots (tool_registry, workspace, sandbox) are added as
-    infrastructure slots.
+    Baseline slots (memory, plan, cost, tool_registry, workspace, sandbox) are
+    always created.  On top, every slot key declared by a processor node's
+    ``_writes_slots_`` / ``_reads_slots_`` gets a ``slot:{key}`` node so the
+    WRITES_TO / READS_FROM edges have endpoints (e.g. ``slot:model.route``).
     """
     slot_names = [
         ("slot:memory", "memory", "SharedMemory"),
@@ -495,6 +641,25 @@ def _add_slot_nodes(snapshot: GraphSnapshot) -> None:
             label=name,
             metadata={"slot_name": name, "slot_type": stype},
         )
+
+    # L4.3: dynamic slots collected from processor declarations
+    dyn_keys: set[str] = set()
+    for node in snapshot.nodes.values():
+        if node.node_type != NodeType.PROCESSOR:
+            continue
+        for key in node.metadata.get("_writes_slots_", []):
+            dyn_keys.add(key)
+        for key in node.metadata.get("_reads_slots_", []):
+            dyn_keys.add(key)
+    for key in sorted(dyn_keys):  # sorted for determinism
+        slot_id = f"slot:{key}"
+        if slot_id not in snapshot.nodes:
+            snapshot.nodes[slot_id] = Node(
+                node_id=slot_id,
+                node_type=NodeType.SLOT,
+                label=key,
+                metadata={"slot_name": key, "slot_type": "dynamic"},
+            )
 
 
 # ── EXECUTES_BEFORE bucket/order resolution (L4.6) ──────────────────────────
