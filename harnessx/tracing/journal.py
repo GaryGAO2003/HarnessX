@@ -97,6 +97,7 @@ class HarnessJournal:
         self._trace_file: Any = None
         self._last_uuid: str | None = None
         self._last_system_prompt: str = ""
+        # NOTE: `last_uuid` (property below) is the public Δ11 backlink anchor.
         self._last_tools_hash: str = ""
         self._segment_has_context_snapshot: bool = False
 
@@ -248,6 +249,16 @@ class HarnessJournal:
         self._before_model_raw_msgs = ()
 
     # ── Write helpers ─────────────────────────────────────────────────────────
+
+    @property
+    def last_uuid(self) -> "str | None":
+        """Most recent session-line uuid — the Δ11 graph↔journal backlink anchor.
+
+        An observation captured at hook time stores this value, so a graph
+        element can later be resolved back to the exact JSONL line (and vice
+        versa) via :mod:`harnessx.graph.backlink`.
+        """
+        return self._last_uuid
 
     def _write_session(self, data: dict) -> None:
         if not self._session_file:

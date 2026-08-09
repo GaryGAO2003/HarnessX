@@ -23,6 +23,13 @@ from .declaration import (
     merge_declarations,
     validate_declarations,
 )
+from .backlink import (
+    BacklinkIndex,
+    BacklinkRef,
+    observation_node_id,
+    resolve_journal_line,
+    uuid_at_line,
+)
 from .dfa import DfaReport, DfaWitness, lifecycle_dfa_check
 from .edit import GraphEdit, GraphEditType, apply_edits, diff_graphs
 from .footprint import CoverageFootprint, FootprintStore, compute_footprint
@@ -120,6 +127,12 @@ __all__ = [
     "DfaReport",
     "DfaWitness",
     "lifecycle_dfa_check",
+    # backlink (Δ11)
+    "BacklinkIndex",
+    "BacklinkRef",
+    "observation_node_id",
+    "resolve_journal_line",
+    "uuid_at_line",
     # operators (P3)
     "OperatorError",
     "MutateProcessorParams",

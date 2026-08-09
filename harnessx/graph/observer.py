@@ -31,6 +31,10 @@ class HookObservation:
     # tool invocations observed
     tools_called: list[str] = field(default_factory=list)
 
+    # Δ11 backlink anchor: the journal session-line uuid current at capture
+    # time ("" when no journal is bound — e.g. NullTracer)
+    journal_uuid: str = ""
+
 
 @dataclass
 class TaskTrace:
@@ -106,12 +110,18 @@ class ObservationProcessor(MultiHookProcessor):
         self._record("before_model")
         yield event
 
+    def _journal_uuid(self) -> str:
+        """Current journal line uuid from the bound tracer (Δ11 anchor)."""
+        rt = getattr(self, "_harness_runtime", None)
+        return getattr(getattr(rt, "tracer", None), "last_uuid", None) or ""
+
     async def on_after_model(self, event):
         obs = HookObservation(
             step_id=self._current_step,
             hook_name="after_model",
             processor_label="model",
             processor_target="",
+            journal_uuid=self._journal_uuid(),
         )
         # Record tool calls the model requested
         tool_calls = getattr(event, "tool_calls", None) or []
@@ -128,6 +138,7 @@ class ObservationProcessor(MultiHookProcessor):
             step_id=self._current_step,
             hook_name="before_tool",
             processor_label=f"tool:{tool_name}" if tool_name else "before_tool",
+            journal_uuid=self._journal_uuid(),
         )
         if tool_name:
             obs.tools_called.append(tool_name)
@@ -151,5 +162,6 @@ class ObservationProcessor(MultiHookProcessor):
             step_id=self._current_step,
             hook_name=hook_name,
             processor_label=label or hook_name,
+            journal_uuid=self._journal_uuid(),
         )
         self._trace.record(obs)
