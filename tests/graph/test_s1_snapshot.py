@@ -73,18 +73,27 @@ class TestToGraph:
         assert len(s1.nodes) == len(s2.nodes)
         assert len(s1.edges) == len(s2.edges)
 
-    def test_wildcard_hook_creates_edges_to_all_hooks(self, simple_config):
-        """hook='*' expands to the 8 processor hooks (L4.1) — never model/tool."""
+    def test_attached_edges_match_declared_coverage(self, simple_config):
+        """ATTACHED_TO edges == declared handler coverage (L2.2/L4.1).
+
+        Builder now serializes precise ``_hooks_`` coverage, so a '*'-bucket
+        MHP attaches only to the hooks it actually handles — capped at the 8
+        processor hooks, never model/tool (the old 10-edge wildcard is gone).
+        """
         snapshot = to_graph(simple_config)
-        # Count edges per wildcard processor
         attached = snapshot.edges_by_type(EdgeType.ATTACHED_TO)
         edge_counts: dict[str, int] = {}
         for e in attached:
             edge_counts[e.source_id] = edge_counts.get(e.source_id, 0) + 1
-        # At least some processors should have exactly 8 edges (PROCESSOR_HOOK_NAMES)
-        assert any(c == 8 for c in edge_counts.values()), (
-            f"Expected some processors with 8 ATTACHED_TO edges, got counts: {edge_counts}"
-        )
+        assert edge_counts, "expected at least one processor with coverage"
+        for nid, node in snapshot.nodes.items():
+            if node.node_type != NodeType.PROCESSOR:
+                continue
+            hooks = node.metadata.get("_hooks_", [])
+            expected = 8 if "*" in hooks else len(hooks)
+            assert edge_counts.get(nid, 0) == expected, (
+                f"{nid}: {edge_counts.get(nid, 0)} edges != coverage {hooks}"
+            )
         assert all(c <= 8 for c in edge_counts.values()), (
             f"No processor may attach to more than 8 hooks: {edge_counts}"
         )

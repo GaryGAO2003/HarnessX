@@ -287,14 +287,39 @@ class HarnessBuilder:
         hook_entries: dict[str, list[_ProcEntry]] = {}
         for entry in self._entries:
             hook_entries.setdefault(entry.hook, []).append(entry)
+        from .processor import (
+            MultiHookProcessor,
+            PROCESSOR_HOOK_NAMES,
+            get_graph_metadata,
+        )
+
         for hook, entries in hook_entries.items():
             for entry in _topological_sort_entries(entries):
                 proc = entry.processor
                 serialized = _serialize_processor(proc)
                 if serialized is not None:
-                    natural = getattr(proc, "_hook", None) or getattr(type(proc), "_hook", None)
-                    if natural != hook:
-                        serialized["_hook_"] = hook
+                    # L2.1: full metadata from class/instance introspection —
+                    # always write every key (empty lists included, VM6):
+                    # key presence == "declared" for the graph layer (P2).
+                    for k, v in get_graph_metadata(proc).items():
+                        serialized[k] = v
+                    # L2.2: _ProcEntry resolved values are ground truth —
+                    # unconditional overwrite, no comparisons, no flags.
+                    serialized["_order_"] = entry.order
+                    serialized["_singleton_group_"] = entry.singleton_group or ""
+                    serialized["_after_"] = list(entry.after)
+                    # _hook_ is the registration bucket — always entry.hook,
+                    # including "*".
+                    serialized["_hook_"] = entry.hook
+                    # _hooks_ three-state (closed against the runloop's "*"
+                    # bucket behaviour):
+                    #   concrete hook       → shrink to that single hook
+                    #   MHP + "*"           → keep dispatch-derived coverage
+                    #   non-MHP + "*"       → all 8 processor hooks
+                    if entry.hook and entry.hook != "*":
+                        serialized["_hooks_"] = [entry.hook]
+                    elif entry.hook == "*" and not isinstance(proc, MultiHookProcessor):
+                        serialized["_hooks_"] = list(PROCESSOR_HOOK_NAMES)
                     processors.append(serialized)
                 else:
                     if not hasattr(proc, "__hx_hook_override__"):
