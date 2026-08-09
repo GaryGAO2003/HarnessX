@@ -34,6 +34,16 @@ from .reconciliation import (
     ReconciledEdge,
     reconcile,
 )
+from .operators import (
+    InsertProcessor,
+    MutateProcessorParams,
+    OperatorError,
+    RemoveProcessor,
+    ReplaceSameSingletonGroup,
+    RewireOrdering,
+    SwapBundle,
+    apply_operator,
+)
 from .snapshot import to_graph
 from .transform import graph_to_config_dict
 from .validate import (
@@ -105,4 +115,13 @@ __all__ = [
     "validate_snapshot",
     "validate_edit_preconditions",
     "transactional_apply",
+    # operators (P3)
+    "OperatorError",
+    "MutateProcessorParams",
+    "InsertProcessor",
+    "RemoveProcessor",
+    "ReplaceSameSingletonGroup",
+    "RewireOrdering",
+    "SwapBundle",
+    "apply_operator",
 ]
