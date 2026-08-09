@@ -624,11 +624,27 @@ class MultiHookProcessor:
 
         cls._DISPATCH = dispatch
 
-    # Ordering hints — set on subclasses, read by HarnessBuilder.
+    # ── formalized class attributes (L1.2) ──────────────────────────────────
+    # Registration metadata — set on subclasses, read by HarnessBuilder and
+    # get_graph_metadata().  _find_class_hook() stops its MRO walk at
+    # MultiHookProcessor itself, so `_hook = None` here never shadows a
+    # subclass declaration.
+    # _hook:   nearest non-empty class hook = natural registration bucket;
+    #          None/"" means "derive coverage from dispatch" (bucket "*").
     # _order:  use PRE / NORMAL / POST constants (or fine-grained int offsets).
-    # _after:  list of _singleton_group names that must run before this processor
+    # _after:  singleton_group names that must run before this processor
     #          within the same hook.  Soft: unregistered groups are silently ignored.
-    _after: list[str] = []
+    _hook: "str | None" = None
+    _order: int = 0
+    _singleton_group: "str | None" = None
+    _after: tuple[str, ...] = ()
+
+    # Graph data-dependency declarations (L8 channels) — read by
+    # get_graph_metadata() with instance-__dict__ override (VM7 bridge).
+    _writes_slot_keys: tuple[str, ...] = ()
+    _reads_slot_keys: tuple[str, ...] = ()
+    _reads_event_fields: tuple[str, ...] = ()
+    _writes_event_fields: tuple[str, ...] = ()
 
     # Sub-harness registry: populated at Harness.__init__() time via _bind_sub_harnesses().
     # Each entry is a minimal Harness configured for that provider key.
@@ -915,7 +931,7 @@ def get_graph_metadata(cls_or_instance) -> dict:
         # MultiHookProcessor: _hook_ = nearest non-empty class _hook; else "*"
         class_hook = _find_class_hook(cls)
         hook = class_hook if class_hook else "*"
-        hooks_list = [hook] if hook != "*" else _dispatch_hooks(cls)
+        hooks_list = list(compute_effective_hooks(cls))  # R1 hit → [class_hook]
     else:
         # single-hook / function-based processor
         hook = _read("_hook", None) or ""
@@ -940,22 +956,45 @@ def get_graph_metadata(cls_or_instance) -> dict:
     }
 
 
-def _dispatch_hooks(cls: type) -> list:
-    """L1.3 compute_effective_hooks: derive coverage hooks from dispatch/on().
+def compute_effective_hooks(cls: type) -> "tuple[str, ...]":
+    """Effective handler coverage for a MultiHookProcessor class (L1.3 R0–R7).
 
-    Minimal subset for L1.4: collect overridden handler events from
-    ``_DISPATCH`` (a ``{EventType: method_name}`` table), map to hook names in
-    lifecycle order, and drop model/tool.  Full MRO/@on inheritance is added
-    in the L1.3 block; this stands in until then.
+    R1  A non-empty class ``_hook`` (nearest in MRO, via ``_find_class_hook``)
+        short-circuits: coverage is exactly that hook.
+    R2  Otherwise collect every ``_DISPATCH`` handler that some ancestor BELOW
+        ``MultiHookProcessor`` defines — MRO walk, not ``vars(cls)``, so
+        handlers inherited from a Parent count for the Child too.
+    R3  Scan ``@on()``-decorated attributes down the MRO (set-dedup vs R2;
+        ``__init_subclass__`` already merged them into ``_DISPATCH``, so this
+        is a safety net for exotic subclassing).
+    R4  Nothing overridden → the processor inherits all 8 base handlers:
+        coverage = every ``_DISPATCH`` event.
+    R5  Map events → hook names (skip unknown event types).
+    R6  Lifecycle order (``_HOOK_LIFECYCLE_ORDER``), never alphabetical.
+    R7  model/tool never appear (not processor hooks).
     """
-    covered: list[str] = []
-    for event_type, method_name in cls._DISPATCH.items():
-        # skip handlers defined only on MultiHookProcessor (not overridden)
+    h = _find_class_hook(cls)
+    if h:
+        return (h,)
+
+    covered: set = set()
+    # R2: overridden dispatch handlers (MRO — first definition wins)
+    for event_class, method_name in cls._DISPATCH.items():
         for base in cls.__mro__:
             if method_name in base.__dict__:
                 if base is not MultiHookProcessor:
-                    covered.append(_EVENT_TO_HOOK_NAME.get(event_type, ""))
+                    covered.add(event_class)
                 break
-    order = {name: i for i, name in enumerate(PROCESSOR_HOOK_NAMES)}
-    return [h for h in sorted((h for h in covered if h), key=lambda h: order.get(h, 999))
-            if h not in ("model", "tool")]
+    # R3: @on()-decorated attributes down the MRO (stop at the base class)
+    for base in cls.__mro__:
+        if base is MultiHookProcessor:
+            break
+        for v in vars(base).values():
+            if callable(v) and hasattr(v, "_on_event_type"):
+                covered.add(v._on_event_type)
+    # R4: no overrides → full inherited coverage
+    if not covered:
+        covered = set(cls._DISPATCH.keys())
+    # R5–R7: map, lifecycle-sort, drop non-processor hooks
+    names = {_EVENT_TO_HOOK_NAME[e] for e in covered if e in _EVENT_TO_HOOK_NAME}
+    return tuple(n for n in _HOOK_LIFECYCLE_ORDER if n in names)
