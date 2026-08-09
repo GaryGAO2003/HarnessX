@@ -36,6 +36,13 @@ from .reconciliation import (
 )
 from .snapshot import to_graph
 from .transform import graph_to_config_dict
+from .validate import (
+    ValidationIssue,
+    ValidationReport,
+    transactional_apply,
+    validate_edit_preconditions,
+    validate_snapshot,
+)
 from .types import (
     SKELETON_HOOK_NAMES,
     Edge,
@@ -92,4 +99,10 @@ __all__ = [
     "intersects_footprint",
     # transform (S5)
     "graph_to_config_dict",
+    # validate (P3)
+    "ValidationIssue",
+    "ValidationReport",
+    "validate_snapshot",
+    "validate_edit_preconditions",
+    "transactional_apply",
 ]
