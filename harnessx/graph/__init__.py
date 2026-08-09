@@ -33,6 +33,7 @@ from .backlink import (
     resolve_journal_line,
     uuid_at_line,
 )
+from .bom import graph_bom
 from .bootstrap import bootstrap_declaration, bootstrap_well_known
 from .dfa import DfaReport, DfaWitness, lifecycle_dfa_check
 from .edit import GraphEdit, GraphEditType, apply_edits, diff_graphs
@@ -67,11 +68,14 @@ from .validate import (
 )
 from .types import (
     SKELETON_HOOK_NAMES,
+    DataChannel,
     Edge,
+    EdgeFamily,
     EdgeType,
     GraphSnapshot,
     Node,
     NodeType,
+    edge_family,
 )
 
 __all__ = [
@@ -82,6 +86,11 @@ __all__ = [
     "Edge",
     "GraphSnapshot",
     "SKELETON_HOOK_NAMES",
+    # edge vocabulary (Δ7)
+    "EdgeFamily",
+    "DataChannel",
+    "edge_family",
+    "graph_bom",
     # snapshot
     "to_graph",
     # identity

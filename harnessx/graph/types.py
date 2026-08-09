@@ -57,6 +57,59 @@ class EdgeType(str, enum.Enum):
     OBSERVED_DATA = "observed_data"  # runtime data flow between processors / slots
 
 
+# ── Δ7: edge vocabulary (families + data-flow channels) ─────────────────────
+#
+# Absorbed from the ADG/AgentFlow EDGE vocabulary only — their node
+# vocabulary (Agent/Model/Memory/Policy) mismatches the composition layer
+# and is deliberately NOT imported.  The three families let validators treat
+# control edges (topology/ordering checks) and data edges (declaration-backed
+# interface checks) differently.
+
+
+class EdgeFamily(str, enum.Enum):
+    """Edge family (Δ7 三族 + our structural bucket)."""
+
+    CONTROL_FLOW = "control_flow"  # ACFG: execution attachment / chains / loop
+    CONTROL_DEP = "control_dep"    # ACDG: ordering & exclusion dependences
+    DATA_FLOW = "data_flow"        # ADFG: slot / data movement
+    STRUCTURAL = "structural"      # membership & refinement (ours, not ADG's)
+
+
+class DataChannel(str, enum.Enum):
+    """Δ7 five-way data-flow split (ADFG).
+
+    Declared slot edges are STATE by construction (``state.slots`` is the
+    composition layer's data plane); the other channels exist for observed
+    data flow and future IR refinement.
+    """
+
+    PROMPT = "prompt"
+    ARGUMENT = "argument"
+    RETURN = "return"
+    MESSAGE = "message"
+    STATE = "state"
+
+
+EDGE_FAMILY: "dict[EdgeType, EdgeFamily]" = {
+    EdgeType.ATTACHED_TO: EdgeFamily.CONTROL_FLOW,
+    EdgeType.LOOP_BACK: EdgeFamily.CONTROL_FLOW,
+    EdgeType.EXECUTES_BEFORE: EdgeFamily.CONTROL_FLOW,
+    EdgeType.AFTER: EdgeFamily.CONTROL_DEP,
+    EdgeType.CONFLICTS_WITH: EdgeFamily.CONTROL_DEP,
+    EdgeType.OBSERVED_CONTROL: EdgeFamily.CONTROL_DEP,
+    EdgeType.WRITES_TO: EdgeFamily.DATA_FLOW,
+    EdgeType.READS_FROM: EdgeFamily.DATA_FLOW,
+    EdgeType.OBSERVED_DATA: EdgeFamily.DATA_FLOW,
+    EdgeType.COMPOSES_WITH: EdgeFamily.STRUCTURAL,
+    EdgeType.SPECIALIZES: EdgeFamily.STRUCTURAL,
+}
+
+
+def edge_family(edge_type: EdgeType) -> EdgeFamily:
+    """Family of an edge type (unknown/custom types default to STRUCTURAL)."""
+    return EDGE_FAMILY.get(edge_type, EdgeFamily.STRUCTURAL)
+
+
 # ── node ────────────────────────────────────────────────────────────────────
 
 

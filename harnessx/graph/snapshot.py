@@ -365,14 +365,14 @@ def _add_runtime_slots(snapshot: GraphSnapshot) -> None:
             snapshot.runtime_edges.append(Edge(
                 source_id=node_id, target_id=target,
                 edge_type=EdgeType.WRITES_TO,
-                metadata={"provenance": "runtime_only"},
+                metadata={"provenance": "runtime_only", "data_channel": "state"},
             ))
         for slot_name in node.metadata.get("_reads_slots_", []):
             target = f"slot:{slot_name}" if f"slot:{slot_name}" in snapshot.nodes else f"rt:slot:{slot_name}"
             snapshot.runtime_edges.append(Edge(
                 source_id=node_id, target_id=target,
                 edge_type=EdgeType.READS_FROM,
-                metadata={"provenance": "runtime_only"},
+                metadata={"provenance": "runtime_only", "data_channel": "state"},
             ))
 
 
@@ -550,7 +550,8 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
     # 6. Slot nodes + read/write edges
     _add_slot_nodes(snapshot)
 
-    # 7. WRITES_TO / READS_FROM edges from declaration metadata
+    # 7. WRITES_TO / READS_FROM edges from declaration metadata.
+    # Slot edges are ADFG "state"-channel data flow by construction (Δ7).
     for node_id in proc_node_ids:
         node = snapshot.nodes[node_id]
         for slot_name in node.metadata.get("_writes_slots_", []):
@@ -560,7 +561,7 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
                     source_id=node_id,
                     target_id=slot_node_id,
                     edge_type=EdgeType.WRITES_TO,
-                    metadata={"provenance": "declared"},
+                    metadata={"provenance": "declared", "data_channel": "state"},
                 ))
         for slot_name in node.metadata.get("_reads_slots_", []):
             slot_node_id = f"slot:{slot_name}"
@@ -569,7 +570,7 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
                     source_id=node_id,
                     target_id=slot_node_id,
                     edge_type=EdgeType.READS_FROM,
-                    metadata={"provenance": "declared"},
+                    metadata={"provenance": "declared", "data_channel": "state"},
                 ))
 
     # ── Runtime overlay (L5.1 / L5.1b / L5.3) ──────────────────────────────

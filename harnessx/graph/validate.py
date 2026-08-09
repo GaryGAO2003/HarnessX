@@ -349,12 +349,29 @@ def _s2_hooks_groups_order(snapshot: GraphSnapshot, issues: list, warnings: list
 
 
 def _s3_interfaces(snapshot: GraphSnapshot, issues: list, warnings: list) -> None:
-    """S3: slot edges must be declaration-backed; event fields well-formed."""
+    """S3: slot edges must be declaration-backed; event fields well-formed.
+
+    Family-differential treatment (Δ7): only DATA_FLOW edges carry interface
+    obligations — control edges are checked by topology/ordering layers
+    (S1/S2), never by declaration backing.  A ``data_channel`` tag, when
+    present, must be one of the five ADFG channels.
+    """
+    from .types import DataChannel
+
     all_nodes: dict = {**snapshot.nodes, **snapshot.runtime_nodes}
+    valid_channels = {c.value for c in DataChannel}
 
     for container, edges in (("edges", snapshot.edges),
                              ("runtime_edges", snapshot.runtime_edges)):
         for edge in edges:
+            channel = edge.metadata.get("data_channel")
+            if channel is not None and channel not in valid_channels:
+                issues.append(ValidationIssue(
+                    "S3", "bad_data_channel",
+                    f"{container}: {_edge_key(edge)} carries unknown "
+                    f"data_channel {channel!r} (ADFG five-way: "
+                    f"{sorted(valid_channels)})",
+                    edge_ids=[_edge_key(edge)]))
             if edge.edge_type not in (EdgeType.WRITES_TO, EdgeType.READS_FROM):
                 continue
             src = all_nodes.get(edge.source_id)
