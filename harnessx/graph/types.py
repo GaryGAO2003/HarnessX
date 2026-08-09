@@ -50,6 +50,7 @@ class EdgeType(str, enum.Enum):
     CONFLICTS_WITH = "conflicts_with"  # singleton_group mutual exclusion
     SPECIALIZES = "specializes"  # S6: skill refinement / inheritance
     LOOP_BACK = "loop_back"  # task_end → step_start (the only cycle)
+    EXECUTES_BEFORE = "executes_before"  # derived execution order within a bucket (L4.6/L5.6)
 
     # observed / runtime (S4)
     OBSERVED_CONTROL = "observed_control"  # processor A triggered → processor B triggered
@@ -108,11 +109,13 @@ class GraphSnapshot:
 
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: list[Edge] = field(default_factory=list)
+    runtime_nodes: dict[str, Node] = field(default_factory=dict)   # runtime-only processors/slots
+    runtime_edges: list[Edge] = field(default_factory=list)        # runtime overlay + EXECUTES_BEFORE chains
 
     # content-addressed identity (S1)
     genotype_hash: str = ""
-    # GS-graph-normalized identity, incorporates observation edges (S4+)
-    phenotype_hash: str = ""
+    deployment_hash: str = ""  # genotype + runtime overlay (L6.3)
+    phenotype_hash: str = ""  # deployment + observed edges (L6.5)
 
     # source provenance
     source_config_hash: str = ""  # hash of the YAML config this was derived from

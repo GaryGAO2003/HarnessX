@@ -25,7 +25,7 @@ from .declaration import (
 )
 from .edit import GraphEdit, GraphEditType, apply_edits, diff_graphs
 from .footprint import CoverageFootprint, FootprintStore, compute_footprint
-from .identity import DedupRegistry, genotype_hash, phenotype_hash
+from .identity import DedupRegistry, deployment_hash, genotype_hash, phenotype_hash
 from .impact import danger_edge_set, forward_slice, influence_cone, intersects_footprint
 from .observer import HookObservation, ObservationProcessor, TaskTrace
 from .reconciliation import (
@@ -57,6 +57,7 @@ __all__ = [
     "to_graph",
     # identity
     "genotype_hash",
+    "deployment_hash",
     "phenotype_hash",
     "DedupRegistry",
     # declaration (S3)

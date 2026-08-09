@@ -112,6 +112,21 @@ class SerializedReg:
         return "_after_" in self.dict_ref
 
 
+@dataclass(frozen=True)
+class RoutingEnvelope:
+    """Routing envelope — global registration seq + ordering metadata.
+
+    - ``seq``: global registration index (``config._processor_regs`` subscript)
+      — stable tiebreak.
+    - In-bucket ordering reuses the Builder rule: order first, then ``_after_``
+      topo within the same order, seq stable tiebreak (hand-written configs
+      cannot assume ``_after_`` is encoded in registration order).
+    """
+
+    reg: RuntimeReg
+    seq: int
+
+
 def coerce_runtime_reg(x) -> "RuntimeReg | None":
     """Normalize a registration input: RuntimeReg → itself; dict / None → None;
     bare processor → record.

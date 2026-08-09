@@ -7,8 +7,11 @@ existing behaviour (pure read).
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
+from ..core.processor import PROCESSOR_HOOK_NAMES
+from ..core.runtime import RuntimeReg, SerializedReg, coerce_runtime_reg
 from .types import (
     SKELETON_HOOK_NAMES,
     Edge,
@@ -17,6 +20,8 @@ from .types import (
     Node,
     NodeType,
 )
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from harnessx.core.harness import HarnessConfig
@@ -55,18 +60,168 @@ def _make_loop_back_edge() -> Edge:
 # ── processor extraction ───────────────────────────────────────────────────
 
 
-def _slug_from_target(target: str, index: int) -> str:
-    """Derive a stable, human-readable node id from a _target_ class path."""
-    # e.g. "harnessx.processors.memory.strategies.sliding_window.SlidingWindowMemory"
-    # → "proc:sliding_window_memory"
+def _compute_slug(target: str) -> str:
+    """CamelCase → snake_case, without any prefix (L4.0).
+
+    Persistent nodes use ``f"proc:{_compute_slug(...)}"``; runtime nodes use
+    ``f"rt:{_compute_slug(...)}"`` — both share this slug computation.
+    """
     short = target.rsplit(".", 1)[-1] if "." in target else target
-    # CamelCase → snake_case
     slug = ""
     for i, ch in enumerate(short):
         if ch.isupper() and i > 0 and (short[i - 1].islower() or (i + 1 < len(short) and short[i + 1].islower())):
             slug += "_"
         slug += ch.lower()
-    return f"proc:{slug}"
+    return slug
+
+
+def _slug_from_target(target: str, index: int) -> str:
+    """Derive a stable, human-readable node id from a _target_ class path."""
+    # e.g. "harnessx.processors.memory.strategies.sliding_window.SlidingWindowMemory"
+    # → "proc:sliding_window_memory"
+    return f"proc:{_compute_slug(target)}"
+
+
+# ── runtime overlay (L5.1 / L5.1b / L5.3) ────────────────────────────────────
+
+
+def _add_runtime_overlay(
+    snapshot: GraphSnapshot, config: "HarnessConfig",
+) -> "dict[int, str]":
+    """Add runtime-only processor nodes + plugin processors + runtime slots.
+
+    Runtime nodes live in ``snapshot.runtime_nodes`` (never ``nodes``) so the
+    genotype hash stays isolated from the runtime overlay (I6).  ATTACHED_TO
+    edges point at the main-graph hook skeleton (cross runtime_nodes → nodes).
+
+    Returns ``{id(proc): node_id}`` — the L5.6 EXECUTES_BEFORE chain uses this
+    to reference the SAME node ids the overlay allocated.
+    """
+    from ..core.processor import MultiHookProcessor
+    from ..core.processor import get_graph_metadata
+
+    node_id_seen: set[str] = set(snapshot.nodes) | set(snapshot.runtime_nodes)
+    canonical_ids: set[int] = set()
+    proc_id_to_node: "dict[int, str]" = {}
+
+    def _add_runtime_node(reg: RuntimeReg) -> None:
+        proc = reg.proc
+        meta = get_graph_metadata(proc)  # class-level metadata (slots, events, dispatch)
+        cls = type(proc)
+        target = getattr(proc, "__hx_target__", "") or f"{cls.__module__}.{cls.__qualname__}"
+
+        # RuntimeReg registration values override class defaults (no instance mutation)
+        meta["_hook_"] = reg.hook
+        meta["_order_"] = reg.order
+        meta["_singleton_group_"] = reg.singleton_group or ""
+        meta["_after_"] = list(reg.after) if reg.after else []
+        # _hooks_ four-state coverage (L2.2 / runloop "*" bucket closure):
+        if reg.hook == "":
+            meta["_hooks_"] = []                      # empty bucket: never executes
+        elif reg.hook and reg.hook != "*":
+            meta["_hooks_"] = [reg.hook]              # concrete hook → single
+        elif reg.hook == "*" and not isinstance(proc, MultiHookProcessor):
+            meta["_hooks_"] = list(PROCESSOR_HOOK_NAMES)  # bare "*" → all 8
+        # else: keep dispatch-derived _hooks_ (MHP + "*")
+
+        node_id = f"rt:{_compute_slug(target)}"
+        suffix = 0
+        base_id = node_id
+        while node_id in node_id_seen:
+            suffix += 1
+            node_id = f"{base_id}__rt{suffix}"
+        node_id_seen.add(node_id)
+
+        extra = dict(meta)
+        extra["_runtime_only"] = True
+        extra["_target_"] = target
+        node = Node(
+            node_id=node_id, node_type=NodeType.PROCESSOR,
+            label=target.rsplit(".", 1)[-1], metadata=extra,
+        )
+        snapshot.runtime_nodes[node_id] = node
+        proc_id_to_node[id(reg.proc)] = node_id
+
+        for hook_name in meta["_hooks_"]:
+            if hook_name in SKELETON_HOOK_NAMES:
+                snapshot.runtime_edges.append(Edge(
+                    source_id=node_id, target_id=f"hook:{hook_name}",
+                    edge_type=EdgeType.ATTACHED_TO,
+                    metadata={"provenance": "runtime_only"},
+                ))
+
+    # L5.1: canonical RuntimeRegs
+    for reg in (coerce_runtime_reg(p) for p in config._rt_procs):
+        if reg is None:
+            continue  # defensive: dict should not appear in _rt_procs
+        canonical_ids.add(id(reg.proc))
+        _add_runtime_node(reg)
+
+    # L5.1b: instance plugins' processors (id-dedup vs canonical)
+    for plugin in config.plugins or []:
+        if isinstance(plugin, dict):
+            # dict plugin (YAML): pure read can't enumerate its processors (L4.5)
+            _log.warning(
+                "dict 插件不进 deployment 表示（纯读取不可枚举）— %s",
+                str(plugin)[:80],
+            )
+            continue
+        for proc in getattr(plugin, "processors", []) or []:
+            if id(proc) in canonical_ids:
+                continue  # same instance also in _rt_procs (harness.py:700-706 semantics)
+            reg = coerce_runtime_reg(proc)
+            if reg is None:
+                continue
+            _add_runtime_node(reg)
+
+    # L5.3: runtime-only slot nodes + WRITES_TO / READS_FROM edges
+    _add_runtime_slots(snapshot)
+    return proc_id_to_node
+
+
+def _add_runtime_slots(snapshot: GraphSnapshot) -> None:
+    """Runtime slot nodes (never in snapshot.nodes) + read/write edges.
+
+    If a same-named persistent slot already exists, the edge points at the
+    main-graph node; otherwise a ``rt:slot:{key}`` node is created in
+    runtime_nodes (genotype stays isolated).
+    """
+    rt_slot_keys: set[str] = set()
+    for node_id, node in snapshot.runtime_nodes.items():
+        if node.node_type != NodeType.PROCESSOR:
+            continue
+        for slot_name in node.metadata.get("_writes_slots_", []):
+            rt_slot_keys.add(slot_name)
+        for slot_name in node.metadata.get("_reads_slots_", []):
+            rt_slot_keys.add(slot_name)
+
+    for key in sorted(rt_slot_keys):
+        persistent_id = f"slot:{key}"
+        rt_slot_id = f"rt:slot:{key}"
+        if persistent_id not in snapshot.nodes and rt_slot_id not in snapshot.runtime_nodes:
+            snapshot.runtime_nodes[rt_slot_id] = Node(
+                node_id=rt_slot_id, node_type=NodeType.SLOT,
+                label=key,
+                metadata={"slot_name": key, "slot_type": "dynamic", "_runtime_only": True},
+            )
+
+    for node_id, node in snapshot.runtime_nodes.items():
+        if node.node_type != NodeType.PROCESSOR:
+            continue
+        for slot_name in node.metadata.get("_writes_slots_", []):
+            target = f"slot:{slot_name}" if f"slot:{slot_name}" in snapshot.nodes else f"rt:slot:{slot_name}"
+            snapshot.runtime_edges.append(Edge(
+                source_id=node_id, target_id=target,
+                edge_type=EdgeType.WRITES_TO,
+                metadata={"provenance": "runtime_only"},
+            ))
+        for slot_name in node.metadata.get("_reads_slots_", []):
+            target = f"slot:{slot_name}" if f"slot:{slot_name}" in snapshot.nodes else f"rt:slot:{slot_name}"
+            snapshot.runtime_edges.append(Edge(
+                source_id=node_id, target_id=target,
+                edge_type=EdgeType.READS_FROM,
+                metadata={"provenance": "runtime_only"},
+            ))
 
 
 def _make_processor_node(
@@ -271,6 +426,12 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
                     metadata={"provenance": "declared"},
                 ))
 
+    # ── Runtime overlay (L5.1 / L5.1b / L5.3) ──────────────────────────────
+    proc_id_to_node = _add_runtime_overlay(snapshot, config)
+
+    # ── EXECUTES_BEFORE chains (L4.6 persistent → main edges; L5.6 mixed → runtime) ──
+    _add_executes_before_edges(snapshot, config, proc_id_to_node)
+
     return snapshot
 
 
@@ -380,3 +541,141 @@ def _order_parse(proc_dict: dict, target: str) -> int:
     if decl is not None and decl.order != 50:
         return decl.order
     return 0
+
+
+def _add_executes_before_edges(
+    snapshot: GraphSnapshot, config: "HarnessConfig", proc_id_to_node: dict,
+) -> None:
+    """EXECUTES_BEFORE chains (L4.6 persistent → main edges; L5.6 mixed → runtime).
+
+    L4.6: within each bucket, persistent (SerializedReg) processors chain by
+    (order, after topo, persistent-seq) — edges go to ``snapshot.edges``
+    (genotype).  L5.6: the FULL mixed effective order (canonical + RuntimeReg +
+    instance plugins, seq=max+1) chains into ``runtime_edges`` (deployment).
+    Both use the SAME ``stable_topological_sort`` as the runtime router, so the
+    graph chain ≡ the runtime execution order (I7).
+    """
+    from ..core.runtime import RoutingEnvelope, stable_topological_sort
+
+    def _chain(envs: list, target_edges: list, bucket: str, id_map: dict) -> None:
+        if not envs:
+            return
+        ordered = stable_topological_sort(
+            envs,
+            order_key=lambda e: e.reg.order,
+            after_key=lambda e: e.reg.after,
+            group_key=lambda e: e.reg.singleton_group or "",
+            seq_key=lambda e: e.seq,
+        )
+        ids = [id_map[e] for e in ordered]
+        for a, b in zip(ids, ids[1:]):
+            target_edges.append(Edge(
+                source_id=a, target_id=b,
+                edge_type=EdgeType.EXECUTES_BEFORE,
+                metadata={"hook": bucket},
+            ))
+
+    # ── L4.6: persistent-relative chain (main edges, genotype) ──────────────
+    # config.processors is the SerializedReg dict_ref view (same order as the
+    # canonical SerializedRegs), so walking it reproduces the main loop's
+    # per-target index and thus the proc: node ids.
+    seen_targets: dict[str, int] = {}
+    persistent: list[RoutingEnvelope] = []
+    persistent_id: dict = {}
+    for proc_dict in config.processors or []:
+        if not isinstance(proc_dict, dict):
+            continue
+        target = proc_dict.get("_target_", "")
+        if not target:
+            continue
+        bucket = _bucket(proc_dict, target)
+        if bucket == "":
+            continue  # explicit empty bucket: no chain (never executes)
+        seen_targets[target] = seen_targets.get(target, 0) + 1
+        index = seen_targets[target]
+        node_id = f"proc:{_compute_slug(target)}"
+        if index > 1:
+            node_id = f"{node_id}__{index}"
+        sg = proc_dict.get("_singleton_group_")
+        if not sg:
+            from .declaration import WELL_KNOWN_DECLARATIONS
+            decl = WELL_KNOWN_DECLARATIONS.get(target)
+            sg = decl.singleton_group if decl else ""
+        env = RoutingEnvelope(RuntimeReg(
+            proc=None,  # pure read; L4.5 no instantiation
+            hook=bucket,
+            order=_order_parse(proc_dict, target),
+            singleton_group=sg or None,
+            after=tuple(proc_dict.get("_after_") or ()),
+        ), index)  # persistent-seq = per-target index (L4.6)
+        persistent.append(env)
+        persistent_id[env] = node_id
+
+    for bucket in (*PROCESSOR_HOOK_NAMES, "*"):
+        _chain([e for e in persistent if e.reg.hook == bucket],
+               snapshot.edges, bucket, persistent_id)
+
+    # ── L5.6: full mixed effective order (runtime_edges, deployment) ────────
+    mixed: list[RoutingEnvelope] = []
+    mixed_id: dict = {}
+    for seq, r in enumerate(config._processor_regs):
+        if isinstance(r, SerializedReg):
+            target = str(r.dict_ref.get("_target_", ""))
+            bucket = _bucket(r.dict_ref, target)
+            if bucket == "":
+                continue
+            # node id: reuse the persistent mapping (same SerializedRegs, same
+            # order — config.processors is the SerializedReg dict_ref view).
+            sg = r.dict_ref.get("_singleton_group_")
+            if not sg:
+                from .declaration import WELL_KNOWN_DECLARATIONS
+                decl = WELL_KNOWN_DECLARATIONS.get(target)
+                sg = decl.singleton_group if decl else ""
+            env = RoutingEnvelope(RuntimeReg(
+                proc=None,
+                hook=bucket,
+                order=_order_parse(r.dict_ref, target),
+                singleton_group=sg or None,
+                after=tuple(r.dict_ref.get("_after_") or ()),
+            ), seq)
+            # find the matching persistent env's node id by (hook, order, sg)
+            match = next((e for e in persistent
+                          if e.reg.hook == bucket
+                          and e.reg.order == env.reg.order
+                          and (e.reg.singleton_group or "") == (env.reg.singleton_group or "")),
+                         None)
+            if match is None:
+                continue  # defensive: no matching persistent node
+            mixed.append(env)
+            mixed_id[env] = persistent_id[match]
+        else:
+            # RuntimeReg (canonical) — node id from the overlay's proc_id map
+            nid = proc_id_to_node.get(id(r.proc))
+            if nid is None:
+                continue  # defensive: node not created (empty bucket etc.)
+            mixed.append(RoutingEnvelope(r, seq))
+            mixed_id[RoutingEnvelope(r, seq)] = nid
+
+    # instance plugins (seq = max+1; id-dedup vs canonical)
+    base_seq = max((e.seq for e in mixed), default=-1) + 1
+    canonical_proc_ids = {id(r.proc) for r in config._rt_procs}
+    for plugin in config.plugins or []:
+        if isinstance(plugin, dict):
+            continue
+        for proc in getattr(plugin, "processors", []) or []:
+            if id(proc) in canonical_proc_ids:
+                continue
+            reg = coerce_runtime_reg(proc)
+            if reg is None:
+                continue
+            nid = proc_id_to_node.get(id(reg.proc))
+            if nid is None:
+                continue  # defensive: plugin node not created
+            env = RoutingEnvelope(reg, base_seq)
+            mixed.append(env)
+            mixed_id[env] = nid
+            base_seq += 1
+
+    for bucket in (*PROCESSOR_HOOK_NAMES, "*"):
+        _chain([e for e in mixed if e.reg.hook == bucket],
+               snapshot.runtime_edges, bucket, mixed_id)
