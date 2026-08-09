@@ -246,6 +246,61 @@ WELL_KNOWN_DECLARATIONS: dict[str, ComponentDecl] = {
 }
 
 
+# ── Δ9 citation gate ────────────────────────────────────────────────────────
+
+
+def is_cited(decl: ComponentDecl) -> bool:
+    """Δ9: does this declaration carry usable provenance?
+
+    - code introspection WITH file:line citations → cited;
+    - observation-verified → cited (the observations are the provenance);
+    - LLM drafts are NEVER validator-eligible — ``llm_evidence`` is a
+      rationale, not a source location; they stay retrieval-only until
+      observation verifies them (污染扩散 prevention);
+    - unknown / uncited code claims → not cited.
+    """
+    if decl.source is DeclarationSource.CODE_INTROSPECTION:
+        return bool(decl.citations)
+    if decl.source is DeclarationSource.OBSERVATION_VERIFIED:
+        return True
+    return False
+
+
+def citation_gate(
+    decls: "dict[str, ComponentDecl]",
+) -> "tuple[dict[str, ComponentDecl], dict[str, ComponentDecl]]":
+    """Split declarations into (validator_eligible, retrieval_only) — Δ9.
+
+    Uncited declarations are not discarded — they remain available for
+    retrieval/reconciliation — but the validator never consumes them.
+    """
+    eligible: dict[str, ComponentDecl] = {}
+    retrieval: dict[str, ComponentDecl] = {}
+    for target, decl in decls.items():
+        (eligible if is_cited(decl) else retrieval)[target] = decl
+    return eligible, retrieval
+
+
+_CITED_WKD_CACHE: "dict[str, ComponentDecl] | None" = None
+
+
+def cited_well_known() -> "dict[str, ComponentDecl]":
+    """The WKD table enriched with Δ17 bootstrap citations (cached).
+
+    ``WELL_KNOWN_DECLARATIONS`` stays a static, citation-free snapshot so
+    ``to_graph()`` remains pure-read (L4.5).  Gate-time consumers use THIS
+    view instead — it imports the processor classes once and attaches exact
+    file:line provenance, which is what keeps the Δ9 gate from starving the
+    validator (the ordering hazard the mechanism assessment flagged).
+    """
+    global _CITED_WKD_CACHE
+    if _CITED_WKD_CACHE is None:
+        from .bootstrap import bootstrap_well_known
+
+        _CITED_WKD_CACHE = bootstrap_well_known()
+    return _CITED_WKD_CACHE
+
+
 # ── backfill logic ─────────────────────────────────────────────────────────
 
 
@@ -253,20 +308,28 @@ def backfill_declarations(
     targets: list[str],
     *,
     hints: dict[str, ComponentDecl] | None = None,
+    require_citations: bool = False,
 ) -> dict[str, ComponentDecl]:
     """Produce the best available declaration for each target.
 
     Resolution order: code_introspection > observation_verified > llm_draft.
+
+    ``require_citations=True`` applies the Δ9 gate: well-known lookups go
+    through the citation-enriched view, and uncited hints (LLM drafts,
+    unverified claims) resolve to the UNKNOWN placeholder — the validator
+    sees nothing it cannot prove.  Default False preserves the legacy
+    retrieval behaviour.
     """
     result: dict[str, ComponentDecl] = {}
+    wkd = cited_well_known() if require_citations else WELL_KNOWN_DECLARATIONS
 
     for target in targets:
-        known = WELL_KNOWN_DECLARATIONS.get(target)
-        if known is not None:
+        known = wkd.get(target)
+        if known is not None and (not require_citations or is_cited(known)):
             result[target] = known
             continue
         hint = (hints or {}).get(target)
-        if hint is not None:
+        if hint is not None and (not require_citations or is_cited(hint)):
             result[target] = hint
             continue
         result[target] = ComponentDecl(

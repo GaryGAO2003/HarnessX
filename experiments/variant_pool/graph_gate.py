@@ -30,6 +30,7 @@ class GraphGateStage(str, Enum):
     GRAPH_DEDUP = "graph_dedup"  # genotype hash duplicate check (S1)
     GRAPH_METADATA = "graph_metadata"  # new processor nodes must carry metadata
     GRAPH_DFA = "graph_dfa"  # Δ8 lifecycle-DFA protocol pass
+    GRAPH_CITATION = "graph_citation"  # Δ9 citation gate on declaration hints
 
 
 # ── result types ────────────────────────────────────────────────────────────
@@ -152,6 +153,24 @@ def validate_candidate_graph(
             node_ids=list(w.node_ids),
             edge_ids=list(w.edge_ids),
         ))
+
+    # 3a. Δ9 citation gate on caller-provided declaration hints: uncited
+    #     declarations (LLM drafts, unverified claims) are quarantined to
+    #     retrieval — the validator never consumes them.  Surfaced as
+    #     warnings so the quarantine is visible in the report.
+    if declarations:
+        from harnessx.graph.declaration import citation_gate
+
+        _, retrieval_only = citation_gate(declarations)
+        for target, decl in retrieval_only.items():
+            warnings.append(GraphValidationError(
+                error_type="declaration_uncited",
+                message=(
+                    f"[Δ9] declaration for {target} has no provenance "
+                    f"(source={decl.source.value}) — retrieval-only, "
+                    "excluded from validation"
+                ),
+            ))
 
     # 3b. Δ8 lifecycle-DFA pass — a SEPARATE gate from S0–S3 (the V− ablation
     #     toggles them independently; the replay reports "S0–S4 + Δ8").

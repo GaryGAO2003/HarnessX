@@ -20,6 +20,9 @@ from .declaration import (
     DeclarationSource,
     WELL_KNOWN_DECLARATIONS,
     backfill_declarations,
+    citation_gate,
+    cited_well_known,
+    is_cited,
     merge_declarations,
     validate_declarations,
 )
@@ -93,6 +96,10 @@ __all__ = [
     "backfill_declarations",
     "merge_declarations",
     "validate_declarations",
+    # citation gate (Δ9)
+    "is_cited",
+    "citation_gate",
+    "cited_well_known",
     # observer (S4)
     "ObservationProcessor",
     "HookObservation",
