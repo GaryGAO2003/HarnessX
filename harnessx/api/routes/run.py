@@ -309,7 +309,9 @@ def _build_config(req: RunRequest, session_id: str):
 
 def _mount_plugin(harness_config, plugin):
     """Mount an already-instantiated plugin into both processors and plugins."""
-    procs = list(harness_config.processors or [])
+    # Extend the canonical sequence, not the dict view — a view-based rebuild
+    # would silently drop RuntimeReg entries and their interleave (L2.3a).
+    procs = list(getattr(harness_config, "_processor_regs", ()) or ())
     procs.extend(list(getattr(plugin, "processors", []) or []))
     plugins = list(getattr(harness_config, "plugins", []) or [])
     plugins.append(plugin)

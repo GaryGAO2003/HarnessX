@@ -1808,9 +1808,12 @@ def _build_trajectory_text(
                 label = group or type(entry).__name__
                 proc_parts.append(f"{label}({order})")
         for p in getattr(harness_config, "_rt_procs", None) or []:
-            group = getattr(p, "_singleton_group", "")
-            order = getattr(p, "_order", "?")
-            label = group or type(p).__name__
+            from harnessx.core.runtime import unwrap_runtime_proc as _unwrap
+
+            inst = _unwrap(p)  # RuntimeReg → bare proc (label must not be "RuntimeReg")
+            group = getattr(inst, "_singleton_group", "")
+            order = getattr(inst, "_order", "?")
+            label = group or type(inst).__name__
             tag = f"{label}({order})"
             if tag not in proc_parts:
                 proc_parts.append(tag)

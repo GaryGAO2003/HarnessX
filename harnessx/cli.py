@@ -360,7 +360,9 @@ def _apply_enabled_skills(harness_config, enabled_skills: list[str]) -> None:
 
 def _mount_plugin(harness_config, plugin):
     """Mount an already-instantiated plugin into both processors and plugins."""
-    procs = list(harness_config.processors or [])
+    # Extend the canonical sequence, not the dict view — a view-based rebuild
+    # would silently drop RuntimeReg entries and their interleave (L2.3a).
+    procs = list(getattr(harness_config, "_processor_regs", ()) or ())
     procs.extend(list(getattr(plugin, "processors", []) or []))
     plugins = list(getattr(harness_config, "plugins", []) or [])
     plugins.append(plugin)
@@ -476,16 +478,21 @@ def _build_harness(args: argparse.Namespace):
             else:
                 print(f"WARNING: unknown --router param '{key}', ignored", file=sys.stderr)
 
+        from harnessx.core.runtime import SerializedReg as _SReg
+
         new_procs = []
-        for p in harness_config.processors or []:
-            inst = _instantiate(p) if isinstance(p, dict) else p
-            if isinstance(inst, ModelRouterProcessor):
-                inst.enabled = True
-                for k, v in router_kwargs.items():
-                    setattr(inst, k, v)
-                new_procs.append(inst)
-            else:
-                new_procs.append(p)
+        for r in getattr(harness_config, "_processor_regs", ()) or ():
+            if isinstance(r, _SReg) and str(
+                r.dict_ref.get("_target_", "")
+            ).endswith("ModelRouterProcessor"):
+                inst = _instantiate(r.dict_ref)
+                if isinstance(inst, ModelRouterProcessor):
+                    inst.enabled = True
+                    for k, v in router_kwargs.items():
+                        setattr(inst, k, v)
+                    new_procs.append(inst)  # bare → normalized to RuntimeReg
+                    continue
+            new_procs.append(r)  # non-router SerializedReg / RuntimeReg as-is
         harness_config = harness_config.copy(processors=new_procs)
 
     if not verbose:
@@ -1060,10 +1067,13 @@ async def _chat(
             yield event
 
     _tool_printer = _CLIToolPrinter()
-    # Prepend SlashCommandProcessor so slash commands are handled first,
-    # then existing processors, then _tool_printer for tool event output.
+    # Prepend SlashCommandProcessor so slash commands are handled first, then
+    # the existing CANONICAL sequence (RuntimeReg entries preserved — the dict
+    # view would drop them), then _tool_printer for tool event output.
     chat_procs = (
-        [SlashCommandProcessor(model_config=model_config)] + list(harness_config.processors or []) + [_tool_printer]
+        [SlashCommandProcessor(model_config=model_config)]
+        + list(getattr(harness_config, "_processor_regs", ()) or ())
+        + [_tool_printer]
     )
     harness_config = harness_config.copy(processors=chat_procs)
 

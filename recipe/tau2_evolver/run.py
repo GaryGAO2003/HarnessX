@@ -1036,8 +1036,11 @@ def _render_trajectory_body_unified(
                 order = getattr(entry, "_order", "?")
                 proc_parts.append(f"{label}({order})")
         for p in getattr(harness_config, "_rt_procs", None) or []:
-            label = getattr(p, "_singleton_group", "") or type(p).__name__
-            order = getattr(p, "_order", "?")
+            from harnessx.core.runtime import unwrap_runtime_proc as _unwrap
+
+            inst = _unwrap(p)  # RuntimeReg → bare proc (label must not be "RuntimeReg")
+            label = getattr(inst, "_singleton_group", "") or type(inst).__name__
+            order = getattr(inst, "_order", "?")
             proc_parts.append(f"{label}({order})")
         # dedupe while keeping order
         seen: set[str] = set()

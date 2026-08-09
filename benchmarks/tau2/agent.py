@@ -295,13 +295,15 @@ def _build_agent_class() -> type:
             )
             if policy_hints:
                 from .policy_hint import PolicyHintProcessor as _PHProc
+                from harnessx.core.runtime import unwrap_runtime_proc as _unwrap
 
-                _rt = getattr(_config, "_rt_procs", None) or []
-                _already = any(isinstance(p, _PHProc) for p in _rt)
+                _rt = getattr(_config, "_rt_procs", None) or ()
+                _already = any(isinstance(_unwrap(p), _PHProc) for p in _rt)
                 if not _already:
+                    # _rt_procs is a read-only derived view — append via the
+                    # write API (coerce happens inside, L2.3c rule 3)
                     _config = _config.copy()
-                    _config._rt_procs = list(getattr(_config, "_rt_procs", []))
-                    _config._rt_procs.append(_PHProc())
+                    _config.add_runtime_reg(_PHProc())
             self._config: HarnessConfig = _config
             _provider = make_tau2_provider(
                 model=model,
