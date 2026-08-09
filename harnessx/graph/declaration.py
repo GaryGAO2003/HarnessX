@@ -69,6 +69,12 @@ class ComponentDecl:
     confidence: float = 0.0
     llm_evidence: str = ""
 
+    # Δ17 provenance: field name → "path/to/file.py:line" citation(s).
+    # Filled by harnessx.graph.bootstrap for code-introspected declarations;
+    # only EXPLICITLY DECLARED fields get citations (derived defaults, e.g.
+    # the "*" bucket of a hookless MHP, are not declarations and need none).
+    citations: dict = field(default_factory=dict)
+
     def __post_init__(self):
         """hook↔hooks sync + lifecycle normalization (L3.2).
 

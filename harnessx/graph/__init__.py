@@ -30,6 +30,7 @@ from .backlink import (
     resolve_journal_line,
     uuid_at_line,
 )
+from .bootstrap import bootstrap_declaration, bootstrap_well_known
 from .dfa import DfaReport, DfaWitness, lifecycle_dfa_check
 from .edit import GraphEdit, GraphEditType, apply_edits, diff_graphs
 from .footprint import CoverageFootprint, FootprintStore, compute_footprint
@@ -133,6 +134,9 @@ __all__ = [
     "observation_node_id",
     "resolve_journal_line",
     "uuid_at_line",
+    # bootstrap (Δ17)
+    "bootstrap_declaration",
+    "bootstrap_well_known",
     # operators (P3)
     "OperatorError",
     "MutateProcessorParams",
