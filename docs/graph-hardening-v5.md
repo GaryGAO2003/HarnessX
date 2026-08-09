@@ -1011,8 +1011,15 @@ class ComponentDecl:
         """hook/hooks 兼容处理 + 规范化。
         
         - 构造时若传入 ``hook=``（非 ""）但未传入 ``hooks=`` →
-          ``hooks`` 设为 ``(hook,)``。单参数向后兼容。
-        - 若两者都传入 → ``hooks`` 优先，``hook`` 从 ``hooks`` 派生。
+          ``hooks`` 设为 ``(hook,)``。单参数向后兼容（``"*"`` 也进 hooks，
+          L4.1 通配展开为 8）。
+        - **``hook="*"`` 豁免同步**：``"*"`` 是注册桶（bucket），不是 coverage。
+          两者都传入且 ``hook="*"`` 时保留 ``"*"``，不被 ``hooks[0]`` 覆盖 ——
+          WKD 修正表要求每个条目 hook = natural bucket（MHP 无 ``_hook`` 时
+          ``"*"``）；若被 coverage 首元素覆盖，``_bucket`` 桶解析与运行时
+          natural bucket 分叉，破坏 I7。具体 hook 桶（R1 命中）时
+          coverage = [class_hook]，bucket 与 hooks[0] 天然一致，无冲突。
+        - 若两者都传入（hook ≠ "*"）→ ``hooks`` 优先，``hook`` 从 ``hooks`` 派生。
         - ``hooks`` 始终按生命周期序排序。
         
         注意：``hook`` 是普通 dataclass 字段（非 @property），
@@ -1020,7 +1027,7 @@ class ComponentDecl:
         """
         if self.hook and not self.hooks:
             object.__setattr__(self, "hooks", (self.hook,))
-        if self.hooks and (not self.hook or self.hook != self.hooks[0]):
+        if self.hooks and self.hook != "*" and (not self.hook or self.hook != self.hooks[0]):
             object.__setattr__(self, "hook", self.hooks[0])
         # normalize hooks to lifecycle order
         # 只引用本模块（declaration.py）的 PROCESSOR_HOOK_NAMES（L1.1a 别名 = _HOOK_LIFECYCLE_ORDER），
@@ -1030,7 +1037,8 @@ class ComponentDecl:
             sorted_hooks = tuple(sorted(self.hooks, key=lambda h: order.get(h, 999)))
             if sorted_hooks != self.hooks:
                 object.__setattr__(self, "hooks", sorted_hooks)
-                object.__setattr__(self, "hook", sorted_hooks[0])
+                if self.hook != "*":
+                    object.__setattr__(self, "hook", sorted_hooks[0])
 ```
 
 **L3.5 `HarnessConfig.copy()` 清除旧 `_rt_procs`**：
@@ -1088,6 +1096,9 @@ def merge_declarations(declared, observed):
             hooks = obs.hooks if obs.hooks else dec.hooks
             result[target] = ComponentDecl(
                 target=target,
+                # 注册桶随声明保留（"*" 豁免，观测不改桶）；具体桶时传 "" 由
+                # __post_init__ 从 hooks[0] 派生（与桶天然一致，见 L3.2 豁免）
+                hook=dec.hook if dec.hook == "*" else "",
                 hooks=hooks,
                 order=dec.order,
                 singleton_group=dec.singleton_group,
@@ -1760,7 +1771,8 @@ class ModelRouterProcessor(MultiHookProcessor):
 | `ComponentDecl(target="x", hook="task_start")` | `decl.hooks == ("task_start",)`，`decl.hook == "task_start"` |
 | `ComponentDecl(target="x", hooks=("a","b"))` | `decl.hooks == ("a","b")` 或生命周期排序 |
 | 同时传 `hook="x"` 和 `hooks=("y",)` | `hooks` 优先 → `decl.hooks == ("y",)`，`decl.hook == "y"` |
-| 旧代码 `decl.hook` 访问 | 不报错，返回 `hooks[0]` 或 `""` |
+| 同时传 `hook="*"` 和 `hooks=("task_end","task_start")` | `hook == "*"` 保留（注册桶豁免，不被 coverage 覆盖）；`hooks` 生命周期排序 `("task_start","task_end")` |
+| 旧代码 `decl.hook` 访问 | 不报错，返回 `hooks[0]`、`"*"`（注册桶）或 `""` |
 
 ### VM4: merge_declarations — 保留 reads_event_fields + 多 hook
 

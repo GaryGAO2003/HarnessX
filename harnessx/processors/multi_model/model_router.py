@@ -36,6 +36,7 @@ class ModelRouterProcessor(MultiHookProcessor):
 
     _singleton_group = "model_router"
     _order = 20
+    _writes_slot_keys: tuple[str, ...] = ("model.route",)
 
     def __init__(
         self,
@@ -52,6 +53,8 @@ class ModelRouterProcessor(MultiHookProcessor):
         self.simple_key = simple_key
         self.complex_key = complex_key
         self.slot_key = slot_key
+        # instance-level slot declaration so graph export sees a custom slot_key
+        self._writes_slot_keys = (slot_key,)
         self.confidence_threshold = confidence_threshold
         self.max_router_steps = max_router_steps
         self.router_token_budget = router_token_budget

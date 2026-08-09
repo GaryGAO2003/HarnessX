@@ -20,6 +20,7 @@ class CostGuardProcessor(MultiHookProcessor):
 
     _singleton_group = "cost_guard"
     _order = 10
+    _reads_event_fields: tuple[str, ...] = ("BeforeModelEvent.cumulative_cost_usd",)
 
     def __init__(self, max_usd: float = 1.0, warning_threshold: float = 0.8):
         self.max_usd = max_usd
