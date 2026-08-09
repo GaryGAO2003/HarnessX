@@ -96,8 +96,17 @@ def apply_edits(snapshot: GraphSnapshot, edits: list[GraphEdit]) -> GraphSnapsho
     for edit in edits:
         _apply_one(result, edit)
 
-    # Invalidate genotype hash — caller must recompute
+    # Validate: every runtime edge endpoint must exist (L5.5).
+    all_node_ids = set(result.nodes) | set(result.runtime_nodes)
+    for edge in result.runtime_edges:
+        if edge.source_id not in all_node_ids:
+            raise GraphEditError(f"runtime edge source missing: {edge.source_id}")
+        if edge.target_id not in all_node_ids:
+            raise GraphEditError(f"runtime edge target missing: {edge.target_id}")
+
+    # Invalidate all hash caches — caller must recompute (VM11)
     result.genotype_hash = ""
+    result.deployment_hash = ""
     result.phenotype_hash = ""
 
     return result
@@ -129,8 +138,8 @@ def _apply_insert_node(snapshot: GraphSnapshot, edit: GraphEdit) -> None:
         raise GraphEditError("INSERT_NODE: node_spec must include _target_")
 
     # Generate node_id
-    from .snapshot import _slug_from_target
-    node_id = _slug_from_target(target, 0)
+    from .snapshot import _compute_slug
+    node_id = f"proc:{_compute_slug(target)}"
 
     # Ensure uniqueness
     base = node_id
@@ -161,6 +170,12 @@ def _apply_remove_node(snapshot: GraphSnapshot, edit: GraphEdit) -> None:
     del snapshot.nodes[nid]
     snapshot.edges = [
         e for e in snapshot.edges
+        if e.source_id != nid and e.target_id != nid
+    ]
+    # Runtime chains (L5.6) may reference main-graph proc: nodes — drop those
+    # too, or the L5.5 endpoint validation would reject every REMOVE_NODE.
+    snapshot.runtime_edges = [
+        e for e in snapshot.runtime_edges
         if e.source_id != nid and e.target_id != nid
     ]
 
@@ -202,7 +217,7 @@ def _apply_change_dependency(snapshot: GraphSnapshot, edit: GraphEdit) -> None:
         raise GraphEditError("CHANGE_DEPENDENCY requires edge_type")
 
     if edit.add_edge:
-        snapshot.edges.append(EdgeType.ATTACHED_TO.to_edge(
+        snapshot.edges.append(edit.edge_type.to_edge(
             edit.edge_source_id, edit.edge_target_id,
         ))
     else:

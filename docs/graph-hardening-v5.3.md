@@ -1,56 +1,4 @@
-# HarnessX Core ↔ Graph — v5.3 工程实施计划（设计规格 v5.2，8 轮 37 项）
-
-> **文档分工（2026-08-08 定稿）**：设计规格/语义规则/VM1–VM20 → `docs/graph-hardening-v5.md`
-> （= 本文件规格正文）；实施顺序/文件归属/测试/回滚/上线门禁 → `docs/graph-hardening-v5.3-engineering-plan.md`
-> （P0–P7）。本文件 = 设计规格 + v5.3 执行层。
->
-> **执行起点（工程计划 §14）**：下一步只做 **P0** —— 冻结 hash/API/hook 语义并建立测试骨架；
-> P0 退出条件通过前，不实现 runtime.py、GraphEdit 事务、MermaidFlow operator 或任何新演化入口。
-
-## 0. 执行结构摘要（v5.3）
-
-### 0.1 冻结不变量（I1–I10，编码前评审定稿；详见工程计划 §2）
-
-| ID | 不变量 | 验证位置 |
-|----|--------|---------|
-| I1 | `PROCESSOR_HOOK_NAMES` 是 core 中唯一 canonical 8-hook tuple | processor/declaration/snapshot 单测 |
-| I2 | `_processor_regs` 是唯一可写注册序列；`processors` 与 `_rt_procs` 只是视图 | HarnessConfig 测试 |
-| I3 | `SerializedReg` presence/value 是 `dict_ref` 动态读取 | VM20b |
-| I4 | RuntimeReg 不修改共享 processor 实例 | builder/runtime 测试 |
-| I5 | runloop 只执行裸 processor，不执行 RuntimeReg/RoutingEnvelope | routing 集成测试 |
-| I6 | `nodes/edges` 只表示 genotype；runtime overlay 不进 genotype hash | VM10/VM19 |
-| I7 | `EXECUTES_BEFORE` 与实际 routing 排序同源（共享 `stable_topological_sort`） | builder/runtime/graph 对照测试 |
-| I8 | `apply_edits()` 失败时原 snapshot 完整不变 | 事务回滚测试 |
-| I9 | rejected candidate 不得进入 executor、ledger 或 active config | candidate gate 集成测试 |
-| I10 | observed trace 只提供证据，不静默改写声明式 graph | reconciliation/journal 测试 |
-
-### 0.2 Hash 命名（冻结）
-
-- `genotype_hash`：持久 graph nodes/edges；
-- `deployment_hash`：genotype + runtime overlay + deployment edges；
-- `phenotype_hash`：deployment + observed edges；
-- 禁止 `phenotype_hash` 同时表示两个对象；需要"仅 observed IR"时另立 `ir_observed_hash`。
-
-### 0.3 阶段总览（P0–P7 → 本规格分层/VM 映射）
-
-| 阶段 | 内容 | 对应规格 | 退出条件 |
-|------|------|---------|---------|
-| P0 | 语义冻结 + 测试骨架（`tests/graph/fixtures/`、`test_contract_matrix.py` I1–I10 空壳、8-hook 迁移样例） | 全部 | 命名冲突解决；pytest 可发现新测试且不改变现有行为 |
-| P1 | Core runtime canonicalization（新增 `harnessx/core/runtime.py`；修改 processor/builder/harness） | L1/L2 | VM1、VM5、VM6、VM15–VM18；核心测试不依赖 graph 模块 |
-| P2 | Graph snapshot / runtime overlay / 三 hash | L3–L6 | VM2–4、VM7–14、VM19–20；纯 serialized 导出不 import `_target_`；overlay 不改 genotype |
-| P3 | GraphEdit 事务化 + fail-closed validator（新增 `graph/validate.py`、`graph/operators.py`；S0–S5 分层；接入 `experiments/variant_pool/graph_gate.py`） | L5.5/VM11 扩展 | 非法 edit 全 fail-closed；gate 不再把 build 异常降级 warning 后放行（现状：`test_graph_gate.py:132-158` 即降级行为） |
-| P4 | 全库消费者迁移（L2.3a 表 + copy 六调用点）+ grep 审计 | L2.3a/L2.3c | `rg "_rt_procs\s*=|_rt_procs\.append|list\(.*processors.*\).*_rt_procs"` 只剩测试/兼容诊断；S-R-S-R 序列不变；全量测试通过 |
-| P5 | MermaidFlow-inspired shadow evolution（每轮 ≤4 候选；S0–S4 gate 先行；A/B/C/D 对照实验） | —（新） | §9 上线门禁；只写 shadow ledger，不写 active config |
-| P6 | History / sampling / crossover（可选） | —（新） | 仅 P5 连续运行稳定后；crossover 只允许 persistent genotype 且须过完整 P3 事务验证 |
-| P7 | GS-D diagnostic chain / WorkflowPlanGraph（独立立项） | —（新） | 先验证 GS-D 改变 `GraphEdit.target_node_id` 命中率，再上重机制 |
-
-### 0.4 测试与发布策略（详见工程计划 §12）
-
-- 层级：unit → property-based（合法 edit 闭包 / 随机混合注册 / roundtrip）→ integration → failure injection（owner 冲突、构造失败、plugin stop 失败、取消 cleanup）→ shadow evaluation（A/B/C/D）
-- 每阶段必跑：`pytest tests/core tests/graph`、`pytest tests/graph -q`、`python experiments/analysis/smoke_test_graph.py`
-- 回滚：P1–P4 经 feature flag/兼容 wrapper 保留旧读取路径（禁止新增旧写入路径）；P5 只写 shadow ledger；hash/schema 迁移失败恢复旧命名 alias、不删旧数据；不用 destructive git reset/checkout
-
-> 以下规格正文 = v5.2 设计规格（同步于 `docs/graph-hardening-v5.md`），P1–P4 逐层引用。
+# HarnessX Core ↔ Graph 加强规格 — v5.2
 
 > v5.2 (2026-08-08): 八轮修正，共 37 项：
 > **第一轮（v5.1 → v5.2）：** 1–6
@@ -1475,12 +1423,19 @@ def apply_edits(snapshot: GraphSnapshot, edits: list[GraphEdit]) -> GraphSnapsho
 - `to_graph()` 创建全新 snapshot，所有 hash 字段初始为 `""`。
 - 各 hash 函数按需计算并写入对应字段。
 - 原 `snapshot` 不变。
+- 机械修正（同函数族）：`_apply_change_dependency` add 分支改用
+  `edit.edge_type.to_edge(...)` —— 现实现硬编码 `EdgeType.ATTACHED_TO`，而
+  remove 分支按 `edit.edge_type` 过滤，add/remove 不对称；`diff_graphs` 产出的
+  非 ATTACHED_TO 边 roundtrip 即失真。
 
 **EXECUTES_BEFORE 陈旧性补充（第八轮第 36 项）**：`apply_edits` 后的快照无 canonical
 seq，order 边（L4.6 / L5.6）无法重建 → 视为陈旧；hash 已清空（VM11）保证不会把
 陈旧链哈希出去。REMOVE_NODE 删除入射 order 边（edit.py:162-165 删全部入射边），
-INSERT_NODE 不补 order 边（派生边，下次 to_graph 重算）。下游需要有效 order 边先
-重新 `to_graph()`。
+**且同一过滤必须作用于 `runtime_edges`**（L5.6 允许 persistent↔persistent 链进
+runtime_edges、mixed 链引用主图 proc: 节点 —— 只过滤主图 edges 时，删除被引用
+节点后 runtime edge 端点缺失，L5.5 端点校验必抛 GraphEditError，REMOVE_NODE
+永不可用）。INSERT_NODE 不补 order 边（派生边，下次 to_graph 重算）。下游需要
+有效 order 边先重新 `to_graph()`。
 
 **L5.6 EXECUTES_BEFORE 边 — 完整 mixed 有效序（→ runtime_edges，影响 deployment/phenotype）**：
 
@@ -1999,3 +1954,78 @@ class ModelRouterProcessor(MultiHookProcessor):
 | 20d | 每个 cleanup await 点（sub / plugin.stop / sandbox release）取消 | shield 保证 impl 跑完；资源引用在 impl 内清除（取消不丢引用）；重试 await 同一 task 完成 |
 | 20e | 同桶 S,R ↔ R,S | deployment_hash 不同（VM19 首行）；genotype_hash 相同 |
 
+---
+
+## TODO integration addendum (from `experiments/docs/TODO/`, 2026-08-08)
+
+This is a planning delta, not an implementation claim. The v5.2 Core↔Graph contract
+remains the prerequisite for every item below.
+
+### Accepted immediate items
+
+1. **Lifecycle DFA gate (T0).** Add a deterministic builder validation pass for the
+   canonical eight-hook lifecycle. Reject illegal `after` constraints and return a
+   structured witness before candidate scoring or execution.
+2. **Trace journal (T1).** Add bidirectional graph-node ↔ journal-record identity
+   (`uuid`, source line/event, run id) in `tracing/journal.py`; keep it observational,
+   never a second graph source of truth.
+3. **Hash naming closure.** Rename the observed-runtime IR hash currently exposed as
+   `phenotype_hash` to an unambiguous name (for example `ir_observed_hash`) if an
+   execution-graph hash is introduced later. Keep v5.2 genotype/deployment/phenotype
+   semantics and use migration aliases only temporarily.
+4. **GraphEdit transaction hardening.** Before evolution, make `apply_edits()` validate
+   endpoints, edge-kind schemas, relation-specific cycles, singleton/order/after
+   invariants, and rollback atomically. INSERT/CHANGE/MUTATE operations must prove
+   preconditions; no warning-only acceptance.
+5. **Graph type vocabulary.** Add HarnessX-native relation types for processor, hook,
+   slot, bundle, event-field, and runtime provenance. Borrow prompt/parameter/return/
+   message/state as edge semantics only; keep actual interface typing explicit.
+6. **Declaration provenance.** Keep manual, inferred, and observed metadata distinct;
+   add source/confidence and require evidence for automatic backfill. WKD alone is not
+   proof.
+7. **Typed candidate gate.** Use
+   `typed edits → apply_edits → fail-closed validator → build → to_graph roundtrip
+   → hash checks → selective retest`. Rejected candidates cannot reach runtime or
+   the success ledger.
+
+### Conditional items (after the immediate gates)
+
+8. **Declaration self-enumeration (T2).** Allow AST/file-line backfill only for
+   high-confidence syntactic facts. Event-field reads/writes remain manual or
+   observation-backed until a reliable analyzer exists; T2 depends on item 6.
+9. **Harness-native typed operators.** Implement deterministic parameter mutation,
+   processor insertion/removal, same-interface replacement, ordering rewiring,
+   bundle swap, and matched-boundary crossover. Crossover is persistent-genotype-only;
+   runtime overlays are recomputed, never mutated as genotype.
+10. **History sampling and crossover.** Extend `VariantPool`/`SuccessLedger` with
+    lineage, edit manifests, hashes, and uniform-plus-score parent sampling. LLM judge
+    remains advisory; deterministic gates and measured evaluation stay authoritative.
+11. **GS-D diagnostic chain.** Add the lower-cost path
+    `Digester + CoverageFootprint → Planner root-cause intersection → ordered
+    suspicious node/edge table → Evolver target_node_id` as a separate trace lane.
+12. **Workflow-plan graph (optional).** If task-level agent workflow evolution is
+    needed, introduce a separate `WorkflowPlanGraph` compiled to the workflow
+    plugin/sub-harness executor. Do not overload `GraphSnapshot`, whose canonical
+    meaning is harness configuration plus runtime overlay.
+
+### Explicitly deferred or rejected
+
+- Mermaid text is a visualization/import-export projection, never canonical truth.
+- Mermaid CLI is syntax checking only, not a type or semantic checker.
+- LLM graph→Python translation is not a trusted compiler; deterministic
+  `graph_to_config → HarnessBuilder` remains the materialization path.
+- Reachability/SCC/def-use, valid-time reconciliation, spawn slicing,
+  archive/Pareto/island search, and other GS-D/GS-A/B/C items stay deferred until
+  their measured consumer and failure policy are identified.
+
+### Required order and acceptance evidence
+
+`v5.2 VM1–VM20 → lifecycle DFA + hash rename → journal → GraphEdit transaction
+validator → native type/declaration provenance → shadow-mode typed operators
+→ history/crossover → optional WorkflowPlanGraph`.
+
+Every accepted evolution candidate must record: static-gate result, roundtrip/build
+result, genotype/deployment/phenotype hashes, edit lineage, runtime provenance,
+selective-retest scope, and held-out outcome. The minimum go condition is zero
+accepted invariant or roundtrip violations; efficiency or score gains are secondary
+and must be measured against a current-pipeline control arm.

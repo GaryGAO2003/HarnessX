@@ -1423,12 +1423,19 @@ def apply_edits(snapshot: GraphSnapshot, edits: list[GraphEdit]) -> GraphSnapsho
 - `to_graph()` 创建全新 snapshot，所有 hash 字段初始为 `""`。
 - 各 hash 函数按需计算并写入对应字段。
 - 原 `snapshot` 不变。
+- 机械修正（同函数族）：`_apply_change_dependency` add 分支改用
+  `edit.edge_type.to_edge(...)` —— 现实现硬编码 `EdgeType.ATTACHED_TO`，而
+  remove 分支按 `edit.edge_type` 过滤，add/remove 不对称；`diff_graphs` 产出的
+  非 ATTACHED_TO 边 roundtrip 即失真。
 
 **EXECUTES_BEFORE 陈旧性补充（第八轮第 36 项）**：`apply_edits` 后的快照无 canonical
 seq，order 边（L4.6 / L5.6）无法重建 → 视为陈旧；hash 已清空（VM11）保证不会把
 陈旧链哈希出去。REMOVE_NODE 删除入射 order 边（edit.py:162-165 删全部入射边），
-INSERT_NODE 不补 order 边（派生边，下次 to_graph 重算）。下游需要有效 order 边先
-重新 `to_graph()`。
+**且同一过滤必须作用于 `runtime_edges`**（L5.6 允许 persistent↔persistent 链进
+runtime_edges、mixed 链引用主图 proc: 节点 —— 只过滤主图 edges 时，删除被引用
+节点后 runtime edge 端点缺失，L5.5 端点校验必抛 GraphEditError，REMOVE_NODE
+永不可用）。INSERT_NODE 不补 order 边（派生边，下次 to_graph 重算）。下游需要
+有效 order 边先重新 `to_graph()`。
 
 **L5.6 EXECUTES_BEFORE 边 — 完整 mixed 有效序（→ runtime_edges，影响 deployment/phenotype）**：
 
