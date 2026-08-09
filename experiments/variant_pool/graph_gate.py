@@ -29,6 +29,7 @@ class GraphGateStage(str, Enum):
     GRAPH_BUILD = "graph_build"  # validate candidate graph via build()
     GRAPH_DEDUP = "graph_dedup"  # genotype hash duplicate check (S1)
     GRAPH_METADATA = "graph_metadata"  # new processor nodes must carry metadata
+    GRAPH_DFA = "graph_dfa"  # Δ8 lifecycle-DFA protocol pass
 
 
 # ── result types ────────────────────────────────────────────────────────────
@@ -150,6 +151,18 @@ def validate_candidate_graph(
             message=f"[{w.layer}] {w.message}",
             node_ids=list(w.node_ids),
             edge_ids=list(w.edge_ids),
+        ))
+
+    # 3b. Δ8 lifecycle-DFA pass — a SEPARATE gate from S0–S3 (the V− ablation
+    #     toggles them independently; the replay reports "S0–S4 + Δ8").
+    from harnessx.graph.dfa import lifecycle_dfa_check
+
+    dfa = lifecycle_dfa_check(snapshot)
+    for w in dfa.witnesses:
+        errors.append(GraphValidationError(
+            error_type=f"dfa_{w.check}",
+            message=f"[Δ8] {w.message}",
+            node_ids=list(w.node_ids),
         ))
 
     # 4. build_from_config — FAIL-CLOSED (P3 exit criterion / I9): a candidate

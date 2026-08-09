@@ -23,6 +23,7 @@ from .declaration import (
     merge_declarations,
     validate_declarations,
 )
+from .dfa import DfaReport, DfaWitness, lifecycle_dfa_check
 from .edit import GraphEdit, GraphEditType, apply_edits, diff_graphs
 from .footprint import CoverageFootprint, FootprintStore, compute_footprint
 from .identity import DedupRegistry, deployment_hash, genotype_hash, phenotype_hash
@@ -115,6 +116,10 @@ __all__ = [
     "validate_snapshot",
     "validate_edit_preconditions",
     "transactional_apply",
+    # dfa (Δ8)
+    "DfaReport",
+    "DfaWitness",
+    "lifecycle_dfa_check",
     # operators (P3)
     "OperatorError",
     "MutateProcessorParams",

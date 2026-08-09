@@ -246,6 +246,26 @@ def run_shadow_round(
             ))
             continue
 
+        # Δ8 lifecycle-DFA pass — a hard gate alongside S0–S4 (separately
+        # implemented so the V− ablation can toggle each; both on by default)
+        from harnessx.graph.dfa import lifecycle_dfa_check
+
+        dfa = lifecycle_dfa_check(result)
+        if not dfa.passed:
+            records.append(CandidateRecord(
+                **base, operator=op_name,
+                operator_params=dict(raw.get("params", {})),
+                boundary_signature=getattr(op, "replacement_signature", ""),
+                decision="REJECT", decided_by="gate",
+                validation_passed=False,
+                validation_issues=[{
+                    "layer": "Δ8", "error_type": w.check, "message": w.message,
+                } for w in dfa.witnesses],
+                validation_warnings=warns,
+                rationale=rationale,
+            ))
+            continue
+
         gate_passed += 1
         g, d = genotype_hash(result), deployment_hash(result)
         seen_genotypes.add(g)
