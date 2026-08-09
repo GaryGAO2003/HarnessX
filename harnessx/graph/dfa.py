@@ -15,7 +15,10 @@ Hand-written lifecycle transition table (the one-off "hook 时序规约"):
 Six checks, each producing witnesses on failure:
 
     1. alphabet_violation    — coverage / attachment outside the 8 DFA states
-    2. dead_processor        — no firing state at all (never executes)
+    2. dead_processor        — coverage EXPLICITLY empty and unattached
+                               (provably never executes; statically UNKNOWN
+                               coverage makes no claim — the runtime's
+                               natural fallback may well fire it)
     3. after_never_enforced  — ``_after_`` resolves to a DIFFERENT registration
                                bucket: the runtime sorts per bucket, so the
                                constraint silently never applies
@@ -117,10 +120,17 @@ def lifecycle_dfa_check(snapshot: GraphSnapshot) -> DfaReport:
                     "(model/tool are not processor states)",
                     [nid], hook=str(h)))
         firing[nid] = states
-        if not states:
+        # Provable-deadness only: an ABSENT _hooks_ key means the coverage is
+        # statically unknown (e.g. a co-located file-URI processor with no
+        # serialized hook metadata) — at runtime the natural fallback resolves
+        # the class hooks and the processor fires.  Claiming "dead" there
+        # would be a false positive (observed on the e_pervar3 replay corpus).
+        coverage_known = "_hooks_" in node.metadata or nid in attach
+        if not states and coverage_known:
             witnesses.append(DfaWitness(
                 "dead_processor",
-                f"{nid}: no firing state — this processor can never execute",
+                f"{nid}: coverage explicitly empty and unattached — this "
+                "processor can never execute",
                 [nid]))
 
     # 3 + 4: after enforcement vs registration buckets / temporal possibility

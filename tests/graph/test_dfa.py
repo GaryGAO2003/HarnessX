@@ -83,6 +83,16 @@ def test_dead_processor_witnessed():
     assert report.witnesses[0].node_ids == ["proc:p"]
 
 
+def test_unknown_coverage_makes_no_dead_claim():
+    # co-located / file-URI style target: no hook metadata anywhere — the
+    # runtime natural fallback would fire it, so Δ8 must not call it dead
+    # (false-positive class observed on the e_pervar3 replay corpus)
+    snap = to_graph(HarnessConfig(processors=[
+        {"_target_": "workspace/custom.py::LocalProcessor"}]))
+    report = lifecycle_dfa_check(snap)
+    assert "dead_processor" not in _checks(report)
+
+
 # ── checks 3+4: after enforcement / temporal possibility ────────────────────
 
 
