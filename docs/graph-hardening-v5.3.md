@@ -866,6 +866,13 @@ registry 外的任何实例属性方案都依赖 hash/eq 去重且无法处理�
    `RuntimeReg(proc=new_inst, ...)` 或原 SerializedReg 保留），最后
    `config.copy(processors=混合列表)`（override 路径经 `normalize_processor_reg` 规范化重建），
    **删除 `_rt_procs=[]`**（只读 tuple property — 传了即 AttributeError）。
+   **RuntimeReg per-child clone（L2.3b 单 owner 推论）**：父配置 canonical 中的
+   RuntimeReg 实例不得原样进入子配置 —— 父 Harness 已 claim 这些实例，子
+   Harness 构造时 `claim_owners` 必抛 ValueError；且共享实例会被子的
+   `_bind_*` 改写绑定（父绑定被静默破坏 — claim 暴露的正是这个潜在 bug）。
+   spawn 对每个 RuntimeReg 产出 `dataclasses.replace(reg, proc=deepcopy(reg.proc))`
+   （= "并行复用走 factory/clone" 的 spawn 实例化）；deepcopy 失败 → 该处理器
+   从子配置 **drop + warning**（与 DROPPED 语义一致，坏于共享、好于崩溃）。
 
 **桶内排序规则**：`stable_topological_sort`（runtime.py 共享函数，签名
 `order_key`/`after_key`/`group_key`/`seq_key`，完整抽取 builder.py:678 语义：

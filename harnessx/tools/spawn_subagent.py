@@ -535,40 +535,68 @@ def _patch_processors_for_child(
     child_depth: int,
     max_depth: int,
 ) -> "HarnessConfig":
+    import dataclasses as _dc
+    import warnings as _warnings
+
     from ..processors.context.system_prompt import SystemPromptProcessor
     from ..processors.context.strategies.system_prompt.default import DefaultSystemPromptBuilder
     from ..core.builder import _instantiate
+    from ..core.runtime import SerializedReg
 
-    all_procs: list = list(config.processors or []) + list(getattr(config, "_rt_procs", None) or [])
+    def _child_system_prompt(inst: "SystemPromptProcessor") -> "SystemPromptProcessor":
+        if system_prompt_override:
+            new_builder: Any = _StaticSystemPromptBuilder(system_prompt_override)
+        elif isinstance(inst.system_builder, DefaultSystemPromptBuilder):
+            new_builder = DefaultSystemPromptBuilder(
+                spawn_depth=child_depth,
+                max_spawn_depth=max_depth,
+                persona_root=inst.system_builder.persona_root,
+                extra_skills_dirs=inst.system_builder.extra_skills_dirs,
+            )
+        else:
+            new_builder = inst.system_builder
+        return SystemPromptProcessor(new_builder)
+
+    # Walk the canonical sequence directly — mixed serialized/runtime order is
+    # preserved into the child (VM20a); the old dicts-then-runtime concat
+    # reordered interleaved registrations.
     new_procs: list = []
-    for p in all_procs:
-        if isinstance(p, dict) and "_target_" in p:
+    for r in getattr(config, "_processor_regs", ()) or ():
+        if isinstance(r, SerializedReg):
+            p = r.dict_ref
             try:
                 inst: Any = _instantiate(p)
             except Exception:
                 new_procs.append(p)
                 continue
-        else:
-            inst = p.proc if isinstance(p, RuntimeReg) else p  # unwrap record
-
-        if isinstance(inst, SystemPromptProcessor):
-            if system_prompt_override:
-                new_builder: Any = _StaticSystemPromptBuilder(system_prompt_override)
-            elif isinstance(inst.system_builder, DefaultSystemPromptBuilder):
-                new_builder = DefaultSystemPromptBuilder(
-                    spawn_depth=child_depth,
-                    max_spawn_depth=max_depth,
-                    persona_root=inst.system_builder.persona_root,
-                    extra_skills_dirs=inst.system_builder.extra_skills_dirs,
-                )
+            if isinstance(inst, SystemPromptProcessor):
+                new_procs.append(_child_system_prompt(inst))
             else:
-                new_builder = inst.system_builder
-            new_procs.append(SystemPromptProcessor(new_builder))
-        else:
-            new_procs.append(p)
+                new_procs.append(p)  # keep the dict — child re-instantiates fresh
+            continue
 
-    # No `_rt_procs=` override: _rt_procs is a read-only derived view (L2.3c).
-    # RuntimeReg entries already in new_procs pass through normalize on rebuild.
+        proc = r.proc if isinstance(r, RuntimeReg) else r
+        if isinstance(proc, SystemPromptProcessor):
+            new_procs.append(_child_system_prompt(proc))
+            continue
+        # L2.3b single-owner: the parent Harness has claimed this instance —
+        # the child needs its OWN copy (factory/clone rule).  Sharing would
+        # also let the child's _bind_* clobber the parent's bindings.
+        try:
+            cloned = copy.deepcopy(proc)
+        except Exception as exc:
+            _warnings.warn(
+                f"spawn: runtime processor {type(proc).__name__} could not be "
+                f"cloned for the child ({type(exc).__name__}: {exc}); the child "
+                "runs WITHOUT it",
+                stacklevel=2,
+            )
+            continue
+        if isinstance(r, RuntimeReg):
+            new_procs.append(_dc.replace(r, proc=cloned))  # keep the 4-tuple
+        else:
+            new_procs.append(cloned)
+
     return config.copy(processors=new_procs)
 
 

@@ -54,7 +54,7 @@ class _ProcEntry:
 # ---------------------------------------------------------------------------
 
 
-from .runtime import HarnessConflictError  # noqa: F401  # re-exported (block 5)
+from .runtime import HarnessConflictError, RuntimeReg  # noqa: F401  # re-exported (block 5)
 
 
 # ---------------------------------------------------------------------------
@@ -322,11 +322,17 @@ class HarnessBuilder:
                         serialized["_hooks_"] = list(PROCESSOR_HOOK_NAMES)
                     processors.append(serialized)
                 else:
-                    if not hasattr(proc, "__hx_hook_override__"):
-                        natural = getattr(proc, "_hook", None) or getattr(type(proc), "_hook", None)
-                        if natural != hook:
-                            proc.__hx_hook_override__ = hook
-                    processors.append(proc)
+                    # Runtime-only: immutable registration record — the shared
+                    # instance is never mutated (L2.3).  HarnessConfig's
+                    # __post_init__ keeps the record in the canonical sequence;
+                    # the processors view (and to_yaml) exposes only dicts.
+                    processors.append(RuntimeReg(
+                        proc,
+                        hook,
+                        entry.order,
+                        entry.singleton_group or None,
+                        tuple(entry.after),
+                    ))
 
         # ── tool_registry ─────────────────────────────────────────────────────
         slots = dict(self._slots)

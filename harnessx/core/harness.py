@@ -382,20 +382,50 @@ def _instantiate_proc(d: dict) -> "Any | None":
 
 
 def _route_processors(flat: list) -> "dict[str, list]":
-    """Route a flat list of Processor instances into a hook-keyed dict."""
-    from .processor import MultiHookProcessor
+    """Route registrations into a hook-keyed dict of bare processors (L2.3c).
+
+    Primary input is ``list[RoutingEnvelope]`` (canonical + plugin tails from
+    ``_instantiate_runtime``): bucket = ``env.reg.hook``; bucket order =
+    ``stable_topological_sort`` (order → ``_after_`` topo → seq, same function
+    as the builder and the graph EXECUTES_BEFORE chains — I7); output values
+    are ``reg.proc`` — records never enter the proc dict (I5).  The explicit
+    empty bucket ``""`` is routed but the runloop never executes it (VM14).
+
+    Bare processor instances stay accepted as a defensive path (legacy direct
+    callers): coerced to natural envelopes, honoring a pre-set
+    ``__hx_hook_override__`` attribute, seq = list position.
+    """
+    import dataclasses as _dc
+
+    from .runtime import RoutingEnvelope, coerce_runtime_reg, stable_topological_sort
+
+    envs: list = []
+    for i, item in enumerate(flat):
+        if isinstance(item, RoutingEnvelope):
+            envs.append(item)
+            continue
+        reg = coerce_runtime_reg(item)
+        if reg is None:
+            continue  # dict/None never route directly
+        override = getattr(item, "__hx_hook_override__", None)
+        if override:
+            reg = _dc.replace(reg, hook=override)
+        envs.append(RoutingEnvelope(reg, i))
+
+    buckets: dict = {}
+    for env in envs:
+        buckets.setdefault(env.reg.hook, []).append(env)
 
     result: dict = {}
-    for proc in flat:
-        # Explicit hook override wins (set at build time or from _hook_ dict field)
-        hook_override = getattr(proc, "__hx_hook_override__", None)
-        if hook_override:
-            result.setdefault(hook_override, []).append(proc)
-        elif isinstance(proc, MultiHookProcessor):
-            result.setdefault("*", []).append(proc)
-        else:
-            hook = getattr(proc, "_hook", None) or getattr(type(proc), "_hook", None) or "*"
-            result.setdefault(hook, []).append(proc)
+    for hook, bucket_envs in buckets.items():
+        ordered = stable_topological_sort(
+            bucket_envs,
+            order_key=lambda e: e.reg.order,
+            after_key=lambda e: e.reg.after,
+            group_key=lambda e: e.reg.singleton_group or "",
+            seq_key=lambda e: e.seq,
+        )
+        result[hook] = [e.reg.proc for e in ordered]
     return result
 
 
@@ -607,28 +637,77 @@ def _instantiate_runtime(config: "HarnessConfig") -> _HarnessRuntime:
     else:
         tracer = tc
 
-    # ── Processors ───────────────────────────────────────────────────────────
+    # ── Plugins (instantiated BEFORE routing so their processors join the
+    #    single unified envelope routing — L2.3c rule 4) ─────────────────────
+    plugins: list = []
+    for p in config.plugins or []:
+        if not isinstance(p, dict):
+            plugins.append(p)
+            continue
+        path = p.get("path") or ""
+        target = p.get("_target_") or ""
+        kwargs = {k: v for k, v in p.items() if k not in ("_target_", "path", "_code_hash")}
+        try:
+            from ..plugins.loader import load_plugin
+
+            if path:
+                plugins.append(load_plugin(path))
+            elif target:
+                import importlib as _importlib
+
+                mod_path, cls_name = target.rsplit(".", 1)
+                cls = getattr(_importlib.import_module(mod_path), cls_name)
+                plugins.append(cls(**kwargs))
+        except Exception:
+            pass
+
+    # ── Processors: consume the canonical sequence exactly once (L2.3c) ─────
+    from .runtime import RoutingEnvelope, coerce_runtime_reg
+
     flat: list = []
-    # config.processors contains only _target_ dicts (enforced by __post_init__).
-    for p in config.processors or []:
-        if isinstance(p, dict) and "_target_" in p:
-            hook_override = p.get("_hook_")
-            inst = _instantiate_proc(p)
-            if inst is not None:
-                if hook_override:
-                    inst.__hx_hook_override__ = hook_override
-                flat.append(inst)
-            else:
+    for seq, reg in enumerate(config._processor_regs):
+        if isinstance(reg, SerializedReg):
+            inst = _instantiate_proc(reg.dict_ref)
+            if inst is None:
                 _log.error(
                     "processor _target_=%r is declared in the harness config but was "
                     "DROPPED (see _instantiate_proc error above); the runtime stack "
                     "will NOT include it",
-                    p.get("_target_"),
+                    reg.dict_ref.get("_target_"),
                 )
-    # _rt_procs is a derived view of canonical RuntimeRegs; unwrap to instances
-    # so the route/output surface stays bare processors (I5).
-    for p in getattr(config, "_rt_procs", None) or []:
-        flat.append(p.proc if isinstance(p, RuntimeReg) else p)
+                continue
+            # Unified natural resolution: explicit dict value if the key is
+            # present, else the instance's natural metadata (instance-level
+            # overrides included — VM7 pattern; bare no-_hook instances → "*";
+            # explicit `_hook_=""` → empty bucket, never executes).
+            natural = coerce_runtime_reg(inst)
+            flat.append(RoutingEnvelope(RuntimeReg(
+                proc=inst,
+                hook=reg.hook if reg.hook_present else natural.hook,
+                order=reg.order if reg.order_present else natural.order,
+                singleton_group=(reg.singleton_group if reg.sg_present
+                                 else natural.singleton_group),
+                after=reg.after if reg.after_present else natural.after,
+            ), seq))
+        else:
+            flat.append(RoutingEnvelope(reg, seq))
+
+    # Plugin tail envelopes: seq = max+1 (safe across DROPPED seq holes);
+    # id-identity dedup — a mounted plugin's processor may already be in the
+    # canonical sequence as the same instance.
+    seen_ids = {id(e.reg.proc) for e in flat}
+    base_seq = max((e.seq for e in flat), default=-1) + 1
+    for plugin in plugins:
+        for proc in getattr(plugin, "processors", []) or []:
+            if id(proc) in seen_ids:
+                continue
+            seen_ids.add(id(proc))
+            reg = coerce_runtime_reg(proc)
+            if reg is None:
+                continue
+            flat.append(RoutingEnvelope(reg, base_seq))
+            base_seq += 1
+
     proc_dict = _route_processors(flat)
 
     # ── Workspace ────────────────────────────────────────────────────────────
@@ -677,41 +756,8 @@ def _instantiate_runtime(config: "HarnessConfig") -> _HarnessRuntime:
     else:
         sandbox_provider = sp
 
-    # ── Plugins ──────────────────────────────────────────────────────────────
-    plugins: list = []
-    for p in config.plugins or []:
-        if not isinstance(p, dict):
-            plugins.append(p)
-            continue
-        path = p.get("path") or ""
-        target = p.get("_target_") or ""
-        kwargs = {k: v for k, v in p.items() if k not in ("_target_", "path", "_code_hash")}
-        try:
-            from ..plugins.loader import load_plugin
-
-            if path:
-                plugins.append(load_plugin(path))
-            elif target:
-                import importlib as _importlib
-
-                mod_path, cls_name = target.rsplit(".", 1)
-                cls = getattr(_importlib.import_module(mod_path), cls_name)
-                plugins.append(cls(**kwargs))
-        except Exception:
-            pass
-
-    # Wire processor-providing plugins that were instantiated from YAML dicts.
-    # Plugins mounted via _mount_plugin() already have their processors in
-    # _rt_procs, so they appear in proc_dict.  Only add processors that are
-    # not already present (checked by object identity) to avoid duplicates.
-    existing_proc_ids = {id(p) for procs in proc_dict.values() for p in procs}
-    for plugin in plugins:
-        for proc in getattr(plugin, "processors", []) or []:
-            if id(proc) not in existing_proc_ids:
-                for hook, hook_procs in _route_processors([proc]).items():
-                    proc_dict.setdefault(hook, []).extend(hook_procs)
-                existing_proc_ids.add(id(proc))
-
+    # Plugins were instantiated before processor routing (see above) — their
+    # processors already joined the unified envelope routing as tail entries.
     return _HarnessRuntime(
         tool_registry=tool_registry,
         tracer=tracer,
@@ -1096,66 +1142,86 @@ class Harness:
             for key, procs in extra_processors.items():
                 self._rt.processors.setdefault(key, []).extend(procs)
 
-        # Resolve HarnessJournal base_dir to an absolute path so traces never
-        # land in whatever CWD the caller happens to be in.
-        from ..tracing.journal import HarnessJournal as _HJ
-
-        tracer = self._rt.tracer
-        if isinstance(tracer, _HJ) and tracer.base_dir == "sessions":
-            if self._rt.workspace is not None:
-                # Standard path: workspace was explicitly set (CLI / Lab UI).
-                tracer.base_dir = str(self._rt.workspace.root / "sessions")
-            else:
-                # No explicit workspace: derive the default workspace root from
-                # AGENT_HOME so traces go to
-                #   agent_home()/workspaces/{agent_id}/{project}/sessions/
-                # matching the layout used when workspace IS set.
-                from ..home import agent_workspace_root
-
-                tracer.base_dir = str(agent_workspace_root() / "sessions")
-
-        # Build minimal sub-harnesses for each non-"main" key in ModelConfig
-        # and bind them to all MultiHookProcessors via _bind_sub_harnesses().
-        # Sub-harnesses use NullTracer so their internal model responses
-        # (e.g. router classifier JSON) don't leak into the user-facing output.
-        from ..tracing.null_tracer import NullTracer as _NullTracer
-
-        sub_harnesses: dict[str, "Harness"] = {}
-        for key, provider in self.model_config.models.items():
-            if key == "main":
-                continue
-            sub_model = _MC(main=provider)
-            sub_config = HarnessConfig(tracer=_NullTracer())
-            sub_harnesses[key] = Harness(sub_model, sub_config)
-        self._sub_harnesses = sub_harnesses
-
         from .processor import MultiHookProcessor
+        from .runtime import claim_owners, release_owners
 
-        for procs in self._rt.processors.values():
-            for proc in procs:
-                if isinstance(proc, MultiHookProcessor):
-                    proc._bind_sub_harnesses(sub_harnesses)
-                    proc._bind_tool_registry(self._rt.tool_registry)
-                    proc._bind_model_config(self.model_config)
-                    proc._bind_harness_config(self.config)
-                    proc._bind_runtime(self._rt)
+        # L2.3b: single-owner claim over ALL MHPs in the final routed
+        # processors — canonical RuntimeReg instances + plugin tails +
+        # extra_processors in one sweep (claim surface == _bind_* surface).
+        # Serialized specs instantiate fresh per construction, so claiming
+        # them is always conflict-free.  Placed after the extras merge and
+        # before sub-harness creation; a failure below rolls back this
+        # token's claims only.
+        claim_owners(
+            (p for procs in self._rt.processors.values() for p in procs
+             if isinstance(p, MultiHookProcessor)),
+            self.__hx_owner_token,
+        )
+        try:
+            # Resolve HarnessJournal base_dir to an absolute path so traces never
+            # land in whatever CWD the caller happens to be in.
+            from ..tracing.journal import HarnessJournal as _HJ
 
-        # Two-phase plugin lifecycle: setup() runs after all processors are wired.
-        for plugin in self._rt.plugins:
-            try:
-                plugin.setup(self.config)
-                # Give plugin access to the runtime tool registry (InMemoryToolRegistry)
-                # after setup() so it can register tools. config.tool_registry is
-                # ToolRegistryConfig (serialisable form); _rt.tool_registry is the live one.
-                if getattr(plugin, "_tool_registry", None) is not self._rt.tool_registry:
-                    if hasattr(plugin, "_tool_registry"):
-                        plugin._tool_registry = self._rt.tool_registry
-            except Exception as exc:
-                warnings.warn(
-                    f"Plugin '{plugin.name}' setup() raised {type(exc).__name__}: {exc}. "
-                    "The plugin's runtime initialisation was skipped.",
-                    stacklevel=2,
-                )
+            tracer = self._rt.tracer
+            if isinstance(tracer, _HJ) and tracer.base_dir == "sessions":
+                if self._rt.workspace is not None:
+                    # Standard path: workspace was explicitly set (CLI / Lab UI).
+                    tracer.base_dir = str(self._rt.workspace.root / "sessions")
+                else:
+                    # No explicit workspace: derive the default workspace root from
+                    # AGENT_HOME so traces go to
+                    #   agent_home()/workspaces/{agent_id}/{project}/sessions/
+                    # matching the layout used when workspace IS set.
+                    from ..home import agent_workspace_root
+
+                    tracer.base_dir = str(agent_workspace_root() / "sessions")
+
+            # Build minimal sub-harnesses for each non-"main" key in ModelConfig
+            # and bind them to all MultiHookProcessors via _bind_sub_harnesses().
+            # Sub-harnesses use NullTracer so their internal model responses
+            # (e.g. router classifier JSON) don't leak into the user-facing output.
+            from ..tracing.null_tracer import NullTracer as _NullTracer
+
+            sub_harnesses: dict[str, "Harness"] = {}
+            for key, provider in self.model_config.models.items():
+                if key == "main":
+                    continue
+                sub_model = _MC(main=provider)
+                sub_config = HarnessConfig(tracer=_NullTracer())
+                sub_harnesses[key] = Harness(sub_model, sub_config)
+            self._sub_harnesses = sub_harnesses
+
+            for procs in self._rt.processors.values():
+                for proc in procs:
+                    if isinstance(proc, MultiHookProcessor):
+                        proc._bind_sub_harnesses(sub_harnesses)
+                        proc._bind_tool_registry(self._rt.tool_registry)
+                        proc._bind_model_config(self.model_config)
+                        proc._bind_harness_config(self.config)
+                        proc._bind_runtime(self._rt)
+
+            # Two-phase plugin lifecycle: setup() runs after all processors are wired.
+            for plugin in self._rt.plugins:
+                try:
+                    plugin.setup(self.config)
+                    # Give plugin access to the runtime tool registry (InMemoryToolRegistry)
+                    # after setup() so it can register tools. config.tool_registry is
+                    # ToolRegistryConfig (serialisable form); _rt.tool_registry is the live one.
+                    if getattr(plugin, "_tool_registry", None) is not self._rt.tool_registry:
+                        if hasattr(plugin, "_tool_registry"):
+                            plugin._tool_registry = self._rt.tool_registry
+                except Exception as exc:
+                    warnings.warn(
+                        f"Plugin '{plugin.name}' setup() raised {type(exc).__name__}: {exc}. "
+                        "The plugin's runtime initialisation was skipped.",
+                        stacklevel=2,
+                    )
+        except BaseException:
+            # Construction failed after the claim: roll back THIS token's
+            # claims only (other harnesses' claims untouched — L2.3b rule 4).
+            release_owners(self.__hx_owner_token)
+            _ACTIVE_HARNESSES.discard(self)
+            raise
 
         # Cleanup state machine (L2.3b rule 4): first cleanup() call starts the
         # shielded impl task; cancellation of the caller does NOT cancel the impl,
