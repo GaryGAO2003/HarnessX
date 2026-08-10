@@ -288,6 +288,7 @@ def run(roots: "list[Path]") -> dict:
     divergent = subclasses.get(MISMATCH_DIVERGENT, 0)
     denom = total - import_uncertain
     fixed_point = ok + stabilizes
+    buildable = ok + stabilizes + divergent
     return {
         "roots": [str(r) for r in roots],
         "total": total,
@@ -304,6 +305,13 @@ def run(roots: "list[Path]") -> dict:
             "mismatch_stabilizes": stabilizes,
             "mismatch_divergent": divergent,
             "fixed_point_rate": (fixed_point / denom) if denom else 0.0,
+            # headline 3 — G1 gate reading (adopted 2026-08-10): fixed point
+            # over the BUILDABLE denominator.  Configs that do not build
+            # cannot round-trip by definition — they are the interception
+            # story (replay headline), not the round-trip story.
+            "buildable": buildable,
+            "fixed_point_rate_buildable": (
+                (fixed_point / buildable) if buildable else 0.0),
             "build_import_uncertain_excluded": import_uncertain,
             "note": (
                 "roundtrip_rate = roundtrip_ok / (total - build_import_uncertain) "
@@ -356,6 +364,9 @@ def main(argv: "list[str] | None" = None) -> int:
           f"= {h['fixed_point_rate']:.1%}  "
           f"(+{h['mismatch_stabilizes']} stabilizes, "
           f"{h['mismatch_divergent']} divergent)")
+    print(f"headline G1 (buildable):      {h['fixed_point']}/{h['buildable']} "
+          f"= {h['fixed_point_rate_buildable']:.1%}  "
+          "(non-building configs are the interception story, not roundtrip)")
 
     if args.out:
         args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2),

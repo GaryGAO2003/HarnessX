@@ -13,6 +13,14 @@ counted into the headline interception rate; the headline uses only
 verdicts that are environment-independent: static S0–S3, Δ8 DFA witnesses,
 and build conflicts (HarnessConflictError-class).
 
+Corpus convention (adopted 2026-08-10): the thesis replay corpus is the
+ON-DISK candidate set — 133 config-bearing candidates + 7 rejected-only
+metadata rows = 140 across the 11 surviving run roots.  Doc-12's
+"142 (34 evaluated + 108 unevaluated)" additionally counted the since-
+deleted ``a1big4`` run; the gap (142−140, 34−33, 108−107) is attributed to
+it and is not recoverable.  Journal-only ghost ids (mentioned in traces but
+never persisted as candidates) stay excluded, matching doc-12.
+
 Usage::
 
     python -m experiments.analysis.replay_validator \
