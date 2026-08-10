@@ -55,13 +55,23 @@ class ValidationReport:
     passed: bool
     issues: list[ValidationIssue] = field(default_factory=list)
     warnings: list[ValidationIssue] = field(default_factory=list)
+    # S4 fixed point: the re-graph snapshot of the built config (build → to_graph).
+    # Populated ONLY when a materialize pass runs clean; None otherwise (including
+    # materialize=False).  Carries the candidate's canonical build-time identity —
+    # fresh EXECUTES_BEFORE chains + full builder metadata — as opposed to the
+    # apply_edits result, whose derived chains are stale (L5.5) and whose inserted
+    # nodes hold only partial metadata.  Intentionally excluded from ``reason()``
+    # and from any serialization of issues/warnings.
+    fixed_point: GraphSnapshot | None = None
 
     def reason(self) -> str:
         return "; ".join(f"[{i.layer}:{i.error_type}] {i.message}" for i in self.issues)
 
 
-def _report(issues: list, warnings: list) -> ValidationReport:
-    return ValidationReport(passed=not issues, issues=issues, warnings=warnings)
+def _report(issues: list, warnings: list, *,
+            fixed_point: "GraphSnapshot | None" = None) -> ValidationReport:
+    return ValidationReport(passed=not issues, issues=issues, warnings=warnings,
+                            fixed_point=fixed_point)
 
 
 def _edge_key(edge) -> str:
@@ -442,16 +452,27 @@ def transactional_apply(
     if not full.passed:
         return None, full
 
+    fixed_point: GraphSnapshot | None = None
     if materialize:
-        issues = _s4_materialize(result)
+        issues, fixed_point = _s4_materialize(result)
         if issues:
             return None, _report(issues, full.warnings)
 
-    return result, _report([], full.warnings)
+    return result, _report([], full.warnings, fixed_point=fixed_point)
 
 
-def _s4_materialize(result: GraphSnapshot) -> "list[ValidationIssue]":
-    """S4: graph → config dict → build → re-graph, all fail-closed."""
+def _s4_materialize(
+    result: GraphSnapshot,
+) -> "tuple[list[ValidationIssue], GraphSnapshot | None]":
+    """S4: graph → config dict → build → re-graph, all fail-closed.
+
+    Returns ``(issues, fixed_point)``.  ``fixed_point`` is the ``re1`` re-graph
+    snapshot — the build output ``to_graph(build_from_config(...))`` — and is
+    returned ONLY when the pass is clean (no issues); on any failure or drift it
+    is ``None``.  This snapshot is the candidate's canonical build-time identity:
+    the same one that a persisted config would re-graph to, with fresh derived
+    chains and full builder metadata.
+    """
     from harnessx.core.builder import build_from_config
     from .identity import genotype_hash
     from .snapshot import to_graph
@@ -463,16 +484,17 @@ def _s4_materialize(result: GraphSnapshot) -> "list[ValidationIssue]":
         config_dict = graph_to_config_dict(result)
     except Exception as exc:  # noqa: BLE001
         return [ValidationIssue(
-            "S4", "materialize_failed", f"{type(exc).__name__}: {exc}")]
+            "S4", "materialize_failed", f"{type(exc).__name__}: {exc}")], None
 
     try:
         config = build_from_config(config_dict)
     except HarnessConflictError as exc:
         conflicts = getattr(exc, "conflicts", None) or [str(exc)]
-        return [ValidationIssue("S4", "build_conflict", str(c)) for c in conflicts]
+        return [ValidationIssue("S4", "build_conflict", str(c))
+                for c in conflicts], None
     except Exception as exc:  # noqa: BLE001 — ImportError included: FAIL-CLOSED
         return [ValidationIssue(
-            "S4", "build_failed", f"{type(exc).__name__}: {exc}")]
+            "S4", "build_failed", f"{type(exc).__name__}: {exc}")], None
 
     try:
         re1 = to_graph(config)
@@ -482,10 +504,10 @@ def _s4_materialize(result: GraphSnapshot) -> "list[ValidationIssue]":
                 "S4", "hash_unstable",
                 "re-graph genotype hash differs across two exports"))
     except HarnessConflictError as exc:
-        return [ValidationIssue("S4", "regraph_conflict", str(exc))]
+        return [ValidationIssue("S4", "regraph_conflict", str(exc))], None
     except Exception as exc:  # noqa: BLE001
         return [ValidationIssue(
-            "S4", "regraph_failed", f"{type(exc).__name__}: {exc}")]
+            "S4", "regraph_failed", f"{type(exc).__name__}: {exc}")], None
 
     # invariant: the persistent processor target multiset survives the
     # materialize→build round-trip (nothing silently dropped or fabricated)
@@ -501,4 +523,6 @@ def _s4_materialize(result: GraphSnapshot) -> "list[ValidationIssue]":
             "S4", "materialize_drift",
             f"processor targets changed across materialize/build: "
             f"{_targets(result)} != {_targets(re1)}"))
-    return issues
+    # clean pass → hand back the build fixed point as the candidate identity;
+    # any late-appended issue (hash_unstable / materialize_drift) suppresses it
+    return issues, (None if issues else re1)

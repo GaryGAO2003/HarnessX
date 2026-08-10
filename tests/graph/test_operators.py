@@ -18,7 +18,9 @@ from harnessx.graph.operators import (
     SwapBundle,
     apply_operator,
 )
+from harnessx.graph.identity import deployment_hash, genotype_hash
 from harnessx.graph.snapshot import to_graph
+from harnessx.graph.transform import graph_to_config_dict
 from harnessx.graph.types import Node, NodeType
 
 from tests.graph.fixtures import serialized_dict
@@ -220,3 +222,41 @@ def test_operator_full_materialize_with_real_target():
         "proc:runtime_probe", order=3), materialize=True)
     assert report.passed, report.reason()
     assert result is not None
+
+
+def test_materialize_returns_build_fixed_point_not_edited_snapshot(tmp_path):
+    """Candidate identity under ``materialize=True`` is the S4 build fixed point,
+    not the ``apply_edits`` result.
+
+    On a multi-processor parent, a RewireOrdering that flips the run order leaves
+    a STALE derived EXECUTES_BEFORE chain on the edited snapshot (L5.5), so its
+    genotype diverges from the build fixed point.  ``apply_operator`` must hand
+    back the fixed point, whose genotype equals what a persisted-then-reloaded
+    config re-graphs to — the exact invariant eval_bridge roundtrips on (this is
+    the divergence that drove rehearsal roundtrip_rate below 1.0 before the fix).
+    """
+    snap = _snap()  # two importable processors in task_start, orders 10 & 20
+    op = RewireOrdering("proc:runtime_probe", order=99)
+
+    edited, r_edit = apply_operator(snap, op, materialize=False)
+    fixed, r_fixed = apply_operator(snap, op, materialize=True)
+
+    # materialize=False runs no build → no fixed point; the edited result stands
+    assert r_edit.fixed_point is None
+    assert edited is not None
+    # materialize=True → returned snapshot IS the build fixed point
+    assert r_fixed.fixed_point is not None
+    assert fixed is r_fixed.fixed_point
+
+    # the stale chain makes the edited snapshot a genuinely different genotype —
+    # returning it (the old behavior) is what broke the roundtrip
+    assert genotype_hash(edited) != genotype_hash(fixed)
+
+    # fixed point re-graphs to itself through a persisted config (mirrors
+    # eval_bridge.materialize_candidate: graph→config→yaml→reload→re-graph)
+    cfg = HarnessConfig(processors=graph_to_config_dict(fixed).get("processors", []))
+    cfg_path = tmp_path / "candidate" / "config.yaml"
+    cfg.to_yaml_file(cfg_path)
+    reloaded = to_graph(HarnessConfig.from_yaml_file(cfg_path))
+    assert genotype_hash(reloaded) == genotype_hash(fixed)
+    assert deployment_hash(reloaded) == deployment_hash(fixed)

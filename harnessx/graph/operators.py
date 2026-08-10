@@ -216,10 +216,26 @@ def apply_operator(
     Operator applicability failures come back as a rejected report
     (``operator_precondition``) instead of an exception, so shadow-mode
     callers have a single fail-closed entrypoint.
+
+    Candidate identity (``materialize=True``): the returned snapshot is the S4
+    build **fixed point** (``report.fixed_point`` — the config re-graphed via
+    ``build_from_config → to_graph``), NOT the raw ``apply_edits`` result.  The
+    edited result carries stale derived ``EXECUTES_BEFORE`` chains (L5.5) and
+    inserted nodes with only partial metadata, so its genotype/deployment hash
+    would not match the identity that a persisted-then-reloaded config re-graphs
+    to.  Returning the fixed point makes ``genotype_hash``/``deployment_hash`` of
+    this snapshot equal what materialization writes to disk and re-hashes — and,
+    as a side effect, two textually different edits that build to the same graph
+    collapse onto one genotype (natural dedup).  ``materialize=False`` skips the
+    build entirely and returns the ``apply_edits`` result unchanged (for callers
+    whose targets are not importable and who re-graph in a later stage).
     """
     try:
         edits = operator.edits(snapshot)
     except OperatorError as exc:
         return None, ValidationReport(passed=False, issues=[ValidationIssue(
             "S0", "operator_precondition", str(exc))])
-    return transactional_apply(snapshot, edits, materialize=materialize)
+    result, report = transactional_apply(snapshot, edits, materialize=materialize)
+    if materialize and report.fixed_point is not None:
+        return report.fixed_point, report
+    return result, report
