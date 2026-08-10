@@ -62,6 +62,15 @@ SELECTIVE_HOOK_PROJECTION_NOTE = (
     "hook-projected candidates read danger-vs-footprint at hook granularity "
     "(observation layer emits hook-level footprints, no proc:* attribution); their "
     "saving is a conservative upper bound pending an observation-layer upgrade")
+#: Control processors whose effect is global: they can terminate or reroute the
+#: ENTIRE run, so a footprint that misses them still cannot make skipping safe —
+#: every such edit forces a universal retest. Transitional rule; retire once the
+#: L8 schema adds a control-effect channel and proc-level attribution replaces it.
+_GLOBAL_EFFECT_SLUGS = frozenset({"cost_guard", "token_budget", "loop_detection"})
+SELECTIVE_GLOBAL_EFFECT_NOTE = (
+    "global-effect control processor: universal retest required — an edit anchored "
+    "on cost_guard / token_budget / loop_detection can terminate or reroute the "
+    "whole run, so its saving is 0 regardless of footprint disjointness")
 HOLDOUT_NO_APPLY_REASON = "no APPLY rounds"
 HOLDOUT_NOT_WIRED_REASON = "holdout not wired for this run"
 
@@ -487,6 +496,7 @@ def _selective_retest_savings(rounds: "list[dict]", gate_rows: "list[dict]") -> 
     n_scored = 0
     footprints_seen = 0
     hook_projected_any = False
+    global_effect_any = False
 
     for r in rounds:
         gated = gated_by_round.get(r.get("round_id", ""), [])
@@ -532,6 +542,24 @@ def _selective_retest_savings(rounds: "list[dict]", gate_rows: "list[dict]") -> 
             affected_procs = {
                 nid for e in edits for nid in e.affected_node_ids()
                 if nid.startswith("proc:")}
+            # Global-effect control processors terminate/reroute the whole run —
+            # footprint disjointness never makes skipping safe. This overrides
+            # BOTH granularities (proc-level and hook-projected): saving is forced
+            # to 0 with a universal retest, independent of the footprint.
+            if any(slug in nid for nid in affected_procs
+                   for slug in _GLOBAL_EFFECT_SLUGS):
+                global_effect_any = True
+                per_candidate.append({
+                    "round_id": r.get("round_id", ""),
+                    "candidate_id": cand_id,
+                    "operator": g.get("operator", ""),
+                    "bed_tasks": n_bed,
+                    "retest_tasks": sorted(footprints),      # universal retest
+                    "savings": 0.0,
+                    "granularity": "global-effect control processor: universal retest required",
+                })
+                n_scored += 1
+                continue
             if hook_level_obs and affected_procs:
                 # Conservative hook projection: intersect the footprint with the
                 # HOOKS those procs attach to (ATTACHED_TO edges), standing in for
@@ -574,8 +602,13 @@ def _selective_retest_savings(rounds: "list[dict]", gate_rows: "list[dict]") -> 
         "per_candidate": per_candidate,
         "skipped": skipped,
     }
+    notes = []
     if hook_projected_any:
-        result["note"] = SELECTIVE_HOOK_PROJECTION_NOTE
+        notes.append(SELECTIVE_HOOK_PROJECTION_NOTE)
+    if global_effect_any:
+        notes.append(SELECTIVE_GLOBAL_EFFECT_NOTE)
+    if notes:
+        result["note"] = " | ".join(notes)
     return result
 
 
@@ -690,11 +723,16 @@ def render_text(metrics: dict) -> str:
         head = (f"9. selective_retest_saving {_fmt(sr['value'])}"
                 f"  [{sr['candidates_scored']} gated candidate(s) scored]")
         if sr.get("note"):
-            head += "  (hook-projected upper bound)"
+            head += "  (see note)"
         out.append(head)
         for c in sr["per_candidate"]:
-            proj = c.get("granularity", "processor").startswith("hook")
-            tag = " hook-projected" if proj else ""
+            gran = c.get("granularity", "processor")
+            if gran.startswith("hook"):
+                tag = " hook-projected"
+            elif gran.startswith("global-effect"):
+                tag = " global-effect"
+            else:
+                tag = ""
             out.append(f"     {c['round_id']}/{c['candidate_id']} ({c['operator']}):"
                        f" saving={_fmt(c['savings'])}"
                        f" [{len(c['retest_tasks'])}/{c['bed_tasks']} retest{tag}]")

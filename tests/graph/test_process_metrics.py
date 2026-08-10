@@ -405,6 +405,67 @@ def test_selective_hook_projection_wildcard_zero(tmp_path):
     assert cand["savings"] == pytest.approx(0.0)
 
 
+def _cost_guard_parent(tmp_path):
+    """A single-processor parent whose proc is cost_guard (a global-effect control
+    processor).  _target_ is read as a string, never imported (to_graph)."""
+    config = HarnessConfig(processors=[
+        serialized_dict("harnessx.processors.control.cost_guard.CostGuardProcessor",
+                        hook="before_model", singleton_group="cost_guard", order=10),
+    ])
+    path = tmp_path / "parent.yaml"
+    config.to_yaml_file(path)
+    return path
+
+
+def test_selective_global_effect_forces_full_retest_proc_level(tmp_path):
+    """Editing a global-effect control processor (cost_guard) forces saving 0 even
+    when the footprint is completely disjoint at PROC granularity — the processor
+    can terminate/reroute the whole run, so skipping is never safe."""
+    parent = _cost_guard_parent(tmp_path)
+    proc_id = _proc_node_id(parent)
+    assert "cost_guard" in proc_id
+
+    # proc:* footprints that never touch the cost_guard node → fully disjoint
+    eval_dir = tmp_path / "out" / "eval_0000"
+    _write_footprints(eval_dir, [
+        (0, CoverageFootprint(task_id="t1", touched_node_ids={"proc:__absent__"})),
+        (0, CoverageFootprint(task_id="t2", touched_node_ids={"proc:__absent__"})),
+    ])
+    report_path, ledger_path = _report_ledger_one_mutate(tmp_path, parent, proc_id, eval_dir)
+
+    m = compute_process_metrics(report_path, ledger_path)
+    sr = m["selective_retest_savings"]
+    cand = sr["per_candidate"][0]
+    assert cand["savings"] == pytest.approx(0.0)         # disjoint, yet no skipping
+    assert cand["retest_tasks"] == ["t1", "t2"]          # universal retest
+    assert cand["granularity"].startswith("global-effect")
+    assert "universal retest" in (sr.get("note") or "")
+    assert isinstance(render_text(m), str)               # renders without crashing
+
+
+def test_selective_global_effect_forces_full_retest_hook_projected(tmp_path):
+    """Same override at HOOK granularity: hook-level footprints that miss the
+    cost_guard proc's hook would otherwise project to saving 1.0, but the
+    global-effect rule forces a universal retest there too (termination effect is
+    not exempted by footprint disjointness at any granularity)."""
+    parent = _cost_guard_parent(tmp_path)
+    proc_id = _proc_node_id(parent)
+
+    # hook-level footprints (no proc:* attribution) touching a DIFFERENT hook —
+    # the projection would find no intersection (saving 1.0) absent the override
+    eval_dir = tmp_path / "out" / "eval_0000"
+    _write_footprints(eval_dir, [
+        (0, CoverageFootprint(task_id="t1", touched_node_ids={"hook:step_end"})),
+        (0, CoverageFootprint(task_id="t2", touched_node_ids={"hook:step_end"})),
+    ])
+    report_path, ledger_path = _report_ledger_one_mutate(tmp_path, parent, proc_id, eval_dir)
+
+    sr = compute_process_metrics(report_path, ledger_path)["selective_retest_savings"]
+    cand = sr["per_candidate"][0]
+    assert cand["savings"] == pytest.approx(0.0)
+    assert cand["granularity"].startswith("global-effect")
+
+
 _REHEARSAL_B2 = Path(__file__).resolve().parents[2] / "recipe/gaia_evolver/runs/rehearsal_b2"
 
 
@@ -413,20 +474,24 @@ _REHEARSAL_B2 = Path(__file__).resolve().parents[2] / "recipe/gaia_evolver/runs/
 def test_selective_real_rehearsal_b2_not_optimistic():
     """Real rehearsal smoke: hook-level footprints (0 proc:* nodes) + 8 gated
     mutate_processor_params candidates.  Before the projection this read a blanket
-    saving=1.000; the hook projection drops it below 1.0 and flags every candidate
-    hook-projected (procs on before_model/'*' are touched by every task → full
-    retest; only a step_start-only proc, never observed, keeps its saving)."""
+    saving=1.000; the hook projection dropped it below 1.0, and the global-effect
+    rule then forces the candidates editing control processors (cost_guard /
+    token_budget / loop_detection) to a universal retest.  Every candidate ends at
+    saving 0 — 6 via the global-effect override, 2 via hook projection (procs on
+    before_model/'*' are touched by every task)."""
     m = compute_process_metrics(_REHEARSAL_B2 / "report.json",
                                 _REHEARSAL_B2 / "shadow.jsonl")
     sr = m["selective_retest_savings"]
     assert sr["value"] is not None
     assert sr["value"] < 1.0                         # no longer the optimistic artefact
-    assert sr["note"]                                # projection flagged
+    assert sr["note"]                                # projection / global-effect flagged
     assert sr["candidates_scored"] == 8
-    assert all(c["granularity"] == "hook-projected(conservative)"
-               for c in sr["per_candidate"])
+    grans = [c["granularity"] for c in sr["per_candidate"]]
+    assert all(g.startswith("global-effect") or g == "hook-projected(conservative)"
+               for g in grans)
+    assert sum(g.startswith("global-effect") for g in grans) == 6  # control-proc edits
     full_retest = [c for c in sr["per_candidate"] if c["savings"] == 0.0]
-    assert len(full_retest) >= 6                     # before_model/'*' procs, every task hits
+    assert len(full_retest) >= 6                     # before_model/'*' procs + global effect
     assert isinstance(render_text(m), str)
 
 
