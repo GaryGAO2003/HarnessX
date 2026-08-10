@@ -16,6 +16,7 @@ import base64
 import httpx
 
 from ..base import tool
+from ..query_blocklist import QUERY_BLOCKED_MESSAGE, is_query_blocked
 from ..url_blocklist import filter_results
 from ._web_utils import _USER_AGENT
 
@@ -367,6 +368,11 @@ async def web_search_tool(query: str, max_results: int = 5) -> str:
     global _consecutive_failures, _last_failure_time
 
     query = str(query)  # guard against model returning non-string (e.g. Qwen passing int)
+    # Anti-contamination L1 (query side): refuse an answer-hunting query BEFORE the
+    # circuit breaker and BEFORE the first provider call — no network is touched.
+    # Default-off (empty HARNESSX_QUERY_BLOCKLIST) is a no-op.
+    if is_query_blocked(query):
+        return QUERY_BLOCKED_MESSAGE
     try:
         max_results = int(max_results)
     except (TypeError, ValueError):

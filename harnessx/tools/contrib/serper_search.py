@@ -56,6 +56,7 @@ import httpx
 from ..base import Tool
 from ..builtin.web_search import _format_results
 from ..builtin.web_search import web_search_tool as _builtin_web_search
+from ..query_blocklist import QUERY_BLOCKED_MESSAGE, is_query_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,11 @@ async def _serper_web_search(query: str, max_results: int = 5) -> str:
     circuit breaker and provider ladder run unchanged and are never touched here.
     """
     query = str(query)  # guard against non-string (mirrors the built-in)
+    # Anti-contamination L1 (query side): refuse an answer-hunting query BEFORE
+    # the Serper call AND before the built-in fallback chain — no network is
+    # touched. Default-off (empty HARNESSX_QUERY_BLOCKLIST) is a no-op.
+    if is_query_blocked(query):
+        return QUERY_BLOCKED_MESSAGE
     try:
         max_results = int(max_results)
     except (TypeError, ValueError):
@@ -216,6 +222,11 @@ async def _serper_only_web_search(query: str, max_results: int = 5) -> str:
       ``"Web search failed (Serper): <last error>."``. Never raises.
     """
     query = str(query)  # guard against non-string (mirrors the built-in)
+    # Anti-contamination L1 (query side): refuse an answer-hunting query BEFORE
+    # the first Serper attempt — no network is touched. Default-off (empty
+    # HARNESSX_QUERY_BLOCKLIST) is a no-op.
+    if is_query_blocked(query):
+        return QUERY_BLOCKED_MESSAGE
     try:
         max_results = int(max_results)
     except (TypeError, ValueError):
