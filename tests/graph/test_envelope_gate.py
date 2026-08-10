@@ -108,11 +108,20 @@ def test_loop_threshold_disabling_edit_is_binding():
 
 
 @pytest.mark.parametrize("param", [
-    "warn_threshold", "name_warn_threshold", "compaction_drop_threshold",
+    "warn_threshold", "name_warn_threshold",
 ])
 def test_loop_other_count_params_covered(param):
     r = judge_param_edit("loop_detection_processor", param, 25, 30, CAP1)
     assert r is not None and f"loop_detection.{param}=30" in r
+
+
+def test_compaction_drop_threshold_never_judged():
+    # Message-count param, not step-bounded (a step can emit several messages):
+    # "above max_steps" proves nothing, so the rule table must NOT govern it.
+    # Guards the provably-dead polarity against future rule-table extensions.
+    assert judge_param_edit(
+        "loop_detection_processor", "compaction_drop_threshold", 25, 30, CAP1
+    ) is None
 
 
 # ── judge_param_edit: default-pass paths (never over-reject) ──────────────────

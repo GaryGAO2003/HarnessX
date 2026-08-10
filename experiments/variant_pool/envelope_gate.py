@@ -130,9 +130,12 @@ _RULES: "tuple[_Rule, ...]" = (
           "max_cost_usd", "max_cost_usd", _cost_reach),
     _Rule("cost_guard", frozenset({"warning_threshold"}),
           "max_cost_usd", "max_cost_usd", _warn_reach),
+    # compaction_drop_threshold is deliberately ABSENT: it counts a drop in
+    # *message* count (loop_detection.py:143), and a step can emit several
+    # messages, so "above max_steps" does not prove unreachability — judging it
+    # would violate the provably-dead polarity above.
     _Rule("loop_detection",
-          frozenset({"threshold", "warn_threshold",
-                     "name_warn_threshold", "compaction_drop_threshold"}),
+          frozenset({"threshold", "warn_threshold", "name_warn_threshold"}),
           "max_steps", "max_steps", _count_reach),
 )
 
