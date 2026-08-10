@@ -6,6 +6,7 @@ discipline that keeps the recipe's heavy module off the zero-API test path.
 """
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -255,3 +256,67 @@ def test_graft_excludes_tracer(tmp_path):
     out = graft_base_fields({"processors": [{"_target_": "x.P"}]}, base)
     assert "tracer" not in out
     assert out["tool_registry"] == {"builtin": ["Read"]}
+
+
+# ── per-evaluate isolation (the contamination fix) ───────────────────────────
+
+
+def test_make_eval_env_isolates_journal_and_workspace(tmp_path):
+    """Two evaluations must not share a journal base_dir or a workspace root.
+
+    The live contamination: a shared default journal restored a completed
+    session, so each candidate's cost continued the previous one's (an
+    arithmetic progression). A per-call base_dir/root is a guaranteed cold
+    start. Unit-tested here (not through evaluate) because the recipe rollout
+    layer is lazily imported — this keeps the check zero-API and recipe-free.
+    """
+    from experiments.variant_pool.eval_bridge import _make_eval_env
+
+    j0, w0, d0 = _make_eval_env(tmp_path, 0, Path("out/r1_c0/config.yaml"))
+    j1, w1, d1 = _make_eval_env(tmp_path, 1, Path("out/r1_c1/config.yaml"))
+
+    # distinct eval dir, journal and workspace root per call
+    assert d0 != d1
+    assert j0.base_dir != j1.base_dir
+    assert w0.root != w1.root
+
+    # the journal never uses the shared "sessions" default that the harness
+    # would re-root at the workspace — base_dir is explicit and under eval_dir
+    assert j0.base_dir != "sessions"
+    assert Path(j0.base_dir).resolve().parent == d0.resolve()
+    assert Path(j0.base_dir).is_dir()
+    # workspace root is isolated under the same eval dir
+    assert w0.root.resolve().parent == d0.resolve()
+    assert w0.root.is_dir()
+
+
+def test_write_eval_records_strips_private_keys(tmp_path):
+    """records.jsonl is the audit ledger; private (_-prefixed) keys — the live
+    Harness/HarnessResult objects _run_task_pass_k leaves on the record — must
+    never reach it (unserialisable, and not evidence)."""
+    from experiments.variant_pool.eval_bridge import (
+        _clean_merged_record,
+        _write_eval_records,
+    )
+
+    merged = {
+        "task_id": "t1", "passed": True, "n_pass": 1, "n_att": 1,
+        "cost_usd": 0.37, "total_tokens": 1500, "steps": 4,
+        "exit_reason": "done", "_harness": object(), "_result": object(),
+    }
+    assert _clean_merged_record(merged) == {
+        "task_id": "t1", "passed": True, "n_pass": 1, "n_att": 1,
+        "cost_usd": 0.37, "total_tokens": 1500, "steps": 4, "exit_reason": "done",
+    }
+
+    path = _write_eval_records(
+        tmp_path / "eval" / "records.jsonl",
+        [merged, {"task_id": "t2", "passed": False, "_result": object()}],
+    )
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    row0 = json.loads(lines[0])
+    assert row0["task_id"] == "t1"
+    assert row0["cost_usd"] == 0.37
+    assert row0["exit_reason"] == "done"
+    assert not any(k.startswith("_") for k in row0)

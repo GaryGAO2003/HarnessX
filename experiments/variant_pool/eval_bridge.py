@@ -36,6 +36,7 @@ the promotion decision out of the bridge is what preserves the 上线门禁 boun
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -178,6 +179,9 @@ class TaskBedResult:
     total_tokens: int = 0
     infra_failed: bool = False
     error: str = ""
+    #: Directory holding this evaluation's isolated artefacts (sessions, rendered
+    #: trajectories, ``records.jsonl``) — the audit "first scene" for the run.
+    eval_dir: str = ""
 
 
 class TaskBed(Protocol):
@@ -242,6 +246,77 @@ class StubTaskBed:
         return TaskBedResult(per_task={}, pass_rate=float(self._pass_rate or 0.0))
 
 
+# ── per-evaluate isolation env (the contamination fix) ───────────────────────
+
+
+def _make_eval_env(
+    out_dir: Path, seq: int, config_path: "Path | str"
+) -> "tuple[Any, Any, Path]":
+    """Build one evaluation's isolation triple ``(journal, workspace, eval_dir)``.
+
+    The contamination this closes: with no journal of its own, :meth:`evaluate`
+    fell back to the default :class:`~harnessx.tracing.journal.HarnessJournal`
+    (``base_dir='sessions'``), which the harness then re-rooted at the *grafted*
+    workspace's ``root/sessions`` — shared across every candidate.  A completed
+    session sitting there was restored instead of re-run, so each candidate's
+    ``cumulative_cost_usd`` continued the previous one's (observed live: costs
+    formed an arithmetic progression; 30 attempts "ran" in 28s).  A per-call
+    ``base_dir`` guarantees a cold start — no prior session exists to restore —
+    which is exactly how the recipe's own ``_make_journal`` isolates each
+    ``(variant, round)``.
+
+    The workspace root is isolated too (defensive): the grafted root was reused
+    across calls, and an unset journal's ``base_dir`` is derived from it.
+    ``workspace_template`` / ``init_workspace`` stay on the config, so any
+    template seeding still runs — into this fresh root.
+    """
+    from harnessx.tracing.journal import HarnessJournal
+    from harnessx.workspace.workspace import Workspace
+
+    src = Path(config_path)
+    stem = _fs_safe(src.parent.name or src.stem or "cfg")
+    eval_dir = Path(out_dir) / f"eval_{seq:04d}_{stem}"
+    sessions_dir = eval_dir / "sessions"
+    ws_root = eval_dir / "workspace"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    ws_root.mkdir(parents=True, exist_ok=True)
+
+    # Mirror recipe._make_journal: an explicit base_dir (never the shared
+    # "sessions" default the harness would re-root at the workspace) + JSONL
+    # export. run_id gives each rollout its own session segment underneath.
+    journal = HarnessJournal(base_dir=str(sessions_dir), export_jsonl=True)
+    workspace = Workspace(agent_id=f"eval{seq:04d}", root=ws_root, mode="isolated")
+    return journal, workspace, eval_dir
+
+
+def _clean_merged_record(merged: "dict") -> dict:
+    """Drop private (``_``-prefixed) keys so a merged attempt record serialises.
+
+    ``_run_task_pass_k`` leaves ``_harness`` / ``_result`` on the primary
+    attempt; stripping the underscore keys mirrors the recipe's ``_clean_record``.
+    """
+    return {k: v for k, v in merged.items() if not k.startswith("_")}
+
+
+def _write_eval_records(records_path: "Path | str", merged_records: "Any") -> Path:
+    """Write one cleaned merged record per task to ``records.jsonl``.
+
+    This is the eval's audit ledger — task_id / passed / n_pass / n_att /
+    cost_usd / total_tokens / steps / exit_reason etc., whatever the merged
+    record carries — that the contaminated path never produced (no first scene
+    for an SOP identity / accounting spot-check).
+    """
+    path = Path(records_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for merged in merged_records:
+            fh.write(
+                json.dumps(_clean_merged_record(merged), ensure_ascii=False, default=str)
+                + "\n"
+            )
+    return path
+
+
 # ── real bed (GAIA subset) ───────────────────────────────────────────────────
 
 
@@ -275,6 +350,7 @@ class GaiaTaskBed:
         self._max_steps = max_steps
         self._concurrency = concurrency
         self._out_dir = Path(out_dir)
+        self._eval_seq = 0  # monotonic per-evaluate id → unique eval dir/journal
 
     async def evaluate(
         self, config_path: Path, task_ids: "list[str] | None" = None
@@ -287,16 +363,28 @@ class GaiaTaskBed:
         from benchmarks.gaia.task import load_gaia_tasks_from_json
         from harnessx.core.model_config import ModelConfig
         from recipe.gaia_evolver.run import (
+            _build_trajectory_text,
             _make_provider,
             _rollout_once,
             _run_task_pass_k,
+            _write_task_trajectory,
         )
         from recipe.gaia_evolver.run_variant_pool import _prepare_round_config
+
+        # Per-evaluate isolation. The bug: with journal=None this fell back to a
+        # shared default journal, so a completed session was restored and its
+        # cumulative_cost_usd continued across calls (and the grafted workspace
+        # root was reused too). Each call now gets its own dir, a fresh journal
+        # rooted there, and an isolated workspace root — nothing from a previous
+        # candidate can be restored or overwritten.
+        seq = self._eval_seq
+        self._eval_seq += 1
+        journal, workspace, eval_dir = _make_eval_env(self._out_dir, seq, config_path)
 
         # Fail-closed config load: a config the variant is *defined by* that will
         # not open is infra failure, not a task failure — return, do not crash.
         try:
-            round_config = _prepare_round_config(Path(config_path), None)
+            round_config = _prepare_round_config(Path(config_path), journal)
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             return TaskBedResult(
                 per_task={},
@@ -305,7 +393,13 @@ class GaiaTaskBed:
                 total_tokens=0,
                 infra_failed=True,
                 error=str(exc),
+                eval_dir=str(eval_dir),
             )
+
+        # Defensive workspace isolation: override the grafted (shared) root with
+        # this evaluation's own root. workspace_template / init_workspace stay on
+        # the config, so any template seeding still happens — into the fresh root.
+        round_config = round_config.copy(workspace=workspace)
 
         provider = _make_provider(self._model, self._provider_id)
         model_config = ModelConfig(main=provider)
@@ -323,6 +417,7 @@ class GaiaTaskBed:
         tasks = [dataclasses.replace(t, max_steps=self._max_steps) for t in tasks]
 
         sem = asyncio.Semaphore(max(1, self._concurrency))
+        traj_dir = eval_dir / "trajectories"
 
         async def _one(task: Any) -> "tuple[str, dict]":
             async def _rollout(tk: Any, attempt_idx: int) -> dict:
@@ -336,8 +431,36 @@ class GaiaTaskBed:
                     max_cost=self._max_cost,
                 )
 
+            async def _finalize(tk: Any, attempt_idx: int, record: dict) -> dict:
+                # Land each rollout's trajectory as the audit "first scene",
+                # reusing run.py's own module-level renderers. Judge enrichment
+                # is skipped: with full ground truth the bridge scores
+                # deterministically and never calls the judge.
+                record.pop("_harness", None)
+                raw = record.get("_result")
+                tid = record.get("task_id") or (tk.task_id or "unknown")
+                traj_name = (
+                    f"{tid}.md" if attempt_idx == 0 else f"{tid}.a{attempt_idx + 1}.md"
+                )
+                record["trajectory_file"] = f"trajectories/{traj_name}"
+                if raw is not None:
+                    try:
+                        text = _build_trajectory_text(
+                            tk, raw, harness_config=round_config
+                        )
+                        _write_task_trajectory(
+                            traj_dir, tk, text, record=record, filename=traj_name
+                        )
+                    except Exception:  # noqa: BLE001 - best-effort artefact dump
+                        pass
+                return record
+
             merged = await _run_task_pass_k(
-                task, pass_k=self._pass_k, sem=sem, rollout=_rollout
+                task,
+                pass_k=self._pass_k,
+                sem=sem,
+                rollout=_rollout,
+                finalize=_finalize,
             )
             return (task.task_id or "?"), merged
 
@@ -353,12 +476,16 @@ class GaiaTaskBed:
                 "tokens": int(merged.get("total_tokens") or 0),
             }
 
+        # Persist the merged per-task records as this eval's audit ledger.
+        _write_eval_records(eval_dir / "records.jsonl", (m for _, m in pairs))
+
         pass_rate, cost, tokens = _aggregate_per_task(per_task)
         return TaskBedResult(
             per_task=per_task,
             pass_rate=pass_rate,
             total_cost_usd=cost,
             total_tokens=tokens,
+            eval_dir=str(eval_dir),
         )
 
 
