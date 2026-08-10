@@ -16,6 +16,7 @@ import base64
 import httpx
 
 from ..base import tool
+from ..url_blocklist import filter_results
 from ._web_utils import _USER_AGENT
 
 logger = logging.getLogger(__name__)
@@ -333,6 +334,13 @@ async def _search_duckduckgo_lite(query: str, max_results: int) -> list[dict]:
 
 
 def _format_results(results: list[dict]) -> str:
+    # Convergence point for every search path — the built-in fallback chain, the
+    # Serper backend (which imports this function), and the direct WebSearch tool
+    # all format here. Drop blocklisted URLs once, so anti-contamination applies
+    # uniformly. Default-off (empty HARNESSX_URL_BLOCKLIST) is a no-op.
+    results, _dropped = filter_results(results)
+    if _dropped:
+        logger.debug("url_blocklist: dropped %d blocked search result(s)", _dropped)
     lines = []
     for i, r in enumerate(results, 1):
         lines.append(f"{i}. [{r['title']}]({r['url']})")

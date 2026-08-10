@@ -9,6 +9,7 @@ import tempfile
 import time
 
 from ..base import tool
+from ..url_blocklist import is_blocked, url_host
 from ._web_utils import truncate_text
 
 # ── Local singleton (LocalSandbox / no sandbox) ───────────────────────────────
@@ -263,6 +264,8 @@ async def browser_tool(
     if action == "navigate":
         if not url:
             return "Error: 'url' is required for navigate action."
+        if is_blocked(url):
+            return f"[blocked] URL blocked by policy: {url_host(url)}"
         page = await _get_page()
         await page.goto(url, timeout=30000, wait_until="domcontentloaded")
         await page.wait_for_timeout(1000)

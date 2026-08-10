@@ -502,6 +502,11 @@ def _warn_if_no_serper_key() -> bool:
 
 
 def main(argv: "list[str] | None" = None) -> int:
+    # Anti-contamination L1: block GAIA answer-key domains before any tool runs.
+    # setdefault, so an explicit HARNESSX_URL_BLOCKLIST env override still wins.
+    from experiments.variant_pool.anti_contamination import install_blocklist_env
+
+    install_blocklist_env()
     args = _build_parser().parse_args(argv)
     out_dir = Path(args.out_dir)
     ledger = ShadowLedger(Path(args.ledger) if args.ledger

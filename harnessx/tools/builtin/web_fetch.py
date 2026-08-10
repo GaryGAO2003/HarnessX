@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 
 from ..base import tool
+from ..url_blocklist import is_blocked, load_blocklist, url_host
 from ._web_utils import _USER_AGENT, truncate_text
 
 # Heuristic: static fetch returning fewer than this many chars likely got a
@@ -17,8 +18,13 @@ _BROWSER_TIMEOUT_S = 30.0
 _OVERALL_TIMEOUT_S = 60.0
 
 
-async def _fetch_static(url: str) -> str:
-    """httpx GET → html2text. Returns error description on failure (not empty)."""
+async def _fetch_static(url: str, blocklist=None) -> str:
+    """httpx GET → html2text. Returns error description on failure (not empty).
+
+    Follows redirects, so the *final* URL is re-checked against the blocklist:
+    a page that 30x-redirects onto a blocked host yields a policy rejection
+    instead of its content (the response body is fetched but never surfaced).
+    """
     try:
         import html2text
     except ImportError:
@@ -32,6 +38,9 @@ async def _fetch_static(url: str) -> str:
             async with httpx.AsyncClient(timeout=_STATIC_TIMEOUT_S, follow_redirects=True) as client:
                 resp = await client.get(url, headers={"User-Agent": _USER_AGENT})
                 resp.raise_for_status()
+                final_url = str(resp.url)
+                if is_blocked(final_url, blocklist):
+                    return f"[blocked] URL blocked by policy after redirect: {url_host(final_url)}"
                 content_type = resp.headers.get("content-type", "")
                 if "html" not in content_type and "text" not in content_type:
                     return f"[binary content: {content_type}]"
@@ -84,6 +93,8 @@ def _is_short_enough_to_retry_via_browser(text: str) -> bool:
     s = text.strip()
     if len(s) >= _JS_THRESHOLD:
         return False
+    if s.startswith("[blocked"):
+        return False
     if s.startswith("[binary content:"):
         return False
     if s.startswith("[fetch failed:") or s.startswith("[fetch failed after retries:"):
@@ -107,8 +118,14 @@ async def web_fetch_tool(url: str) -> str:
     """
     import asyncio
 
+    blocklist = load_blocklist()
+    if is_blocked(url, blocklist):
+        # Refuse before any network request; name the host so the model reroutes
+        # instead of retrying the same URL.
+        return f"[blocked] URL blocked by policy: {url_host(url)}"
+
     async def _inner() -> str:
-        text = await _fetch_static(url)
+        text = await _fetch_static(url, blocklist)
         if _is_short_enough_to_retry_via_browser(text):
             try:
                 text = await _fetch_with_browser(url)
