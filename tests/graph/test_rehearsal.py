@@ -344,3 +344,28 @@ def test_proposer_transport_exception_survives_round(tmp_path):
         assert "proposer transport" in rr.error
         assert rr.baseline_measured
     assert ledger.records() == []
+
+
+def test_normalize_grafts_non_graph_fields(tmp_path):
+    """tool_registry / workspace survive normalization with original values -
+    without the graft the normalized parent runs toolless (live smoke: every
+    task FAILed at step 2)."""
+    import yaml
+
+    from experiments.variant_pool.rehearsal import normalize_parent
+
+    parent = tmp_path / "parent.yaml"
+    cfg = HarnessConfig(processors=[
+        serialized_dict(PROBE_TARGET, hook="task_start",
+                        singleton_group="probe", order=10)])
+    d = yaml.safe_load(cfg.to_yaml())
+    d["tool_registry"] = {"builtin": ["Read", "Bash"],
+                          "custom": ["x.y.serper_tool"]}
+    d["workspace"] = {"root": "D:/tmp/wsx", "agent_id": "gaia"}
+    parent.write_text(yaml.safe_dump(d), encoding="utf-8")
+
+    norm = normalize_parent(parent, tmp_path / "out")
+    nd = yaml.safe_load(norm.read_text(encoding="utf-8"))
+    assert nd["tool_registry"] == d["tool_registry"]
+    assert nd["workspace"] == d["workspace"]
+    assert nd["processors"]                      # composition layer normalized

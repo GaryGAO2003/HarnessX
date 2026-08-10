@@ -131,14 +131,30 @@ def normalize_parent(parent_config: Path, out_dir: Path) -> Path:
     inherited reasons rather than real ones.  Fail-closed: a parent that
     does not build cannot anchor a rehearsal — the exception propagates.
     """
+    import yaml
+
     from harnessx.core.builder import build_from_config
     from harnessx.graph.transform import graph_to_config_dict
 
+    from experiments.variant_pool.eval_bridge import graft_base_fields
+
     cfg = HarnessConfig.from_yaml_file(parent_config)
     built = build_from_config(graph_to_config_dict(to_graph(cfg)))
+    # normalization touches ONLY the composition layer: graft every non-graph
+    # field (tool_registry / workspace / tracer / sandbox…) back from the
+    # source YAML — without them the config runs toolless (observed live).
+    norm_dict = graft_base_fields(
+        {"processors": yaml.safe_load(built.to_yaml())["processors"]},
+        parent_config,
+    )
     norm = Path(out_dir) / "parent_normalized" / "config.yaml"
     norm.parent.mkdir(parents=True, exist_ok=True)
-    built.to_yaml_file(norm)
+    # dump the merged dict directly (never back through HarnessConfig(**...):
+    # construction coerces raw grafted specs and loses them on re-serialization)
+    norm.write_text(
+        yaml.safe_dump(norm_dict, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
     return norm
 
 
@@ -280,7 +296,8 @@ async def run_rehearsal(
         rounds_dir = out_dir / "rounds" / round_id
         outcomes: "list[CandidateOutcome]" = []
         for rec in gated:
-            cfg_path = materialize_candidate(snapshot, rec, rounds_dir)
+            cfg_path = materialize_candidate(
+                snapshot, rec, rounds_dir, base_config=current_parent)
             cand_result = await task_bed.evaluate(cfg_path, task_ids)
             outcomes.append(CandidateOutcome(
                 candidate_id=rec.candidate_id,

@@ -66,17 +66,44 @@ def _fs_safe(name: str) -> str:
 # ── materialization: GATED record → runnable config.yaml ─────────────────────
 
 
+def graft_base_fields(config_dict: dict, base_config: "Path | dict | None") -> dict:
+    """Carry every NON-graph top-level field over from *base_config*.
+
+    The graph IR owns exactly the composition layer (``processors``); a real
+    run config also carries ``tool_registry`` / ``workspace`` / ``tracer`` /
+    sandbox fields the graph never sees.  Evolution edits only the composition
+    layer, so those fields are arm-invariant and must pass through unchanged —
+    a materialized candidate without them runs TOOLLESS and fails every task
+    at step 2 (observed live on the first paid smoke).  Grafting is
+    genotype-neutral: none of these keys enter the graph or its hashes.
+    """
+    if base_config is None:
+        return config_dict
+    if isinstance(base_config, (str, Path)):
+        import yaml
+
+        base = yaml.safe_load(Path(base_config).read_text(encoding="utf-8")) or {}
+    else:
+        base = dict(base_config)
+    return {**{k: v for k, v in base.items() if k != "processors"}, **config_dict}
+
+
 def materialize_candidate(
     parent_snapshot: "GraphSnapshot",
     record: "CandidateRecord",
     out_dir: Path,
+    *,
+    base_config: "Path | dict | None" = None,
 ) -> Path:
     """Rebuild a GATED candidate's runnable config from its ledger record.
 
     Re-runs the operator against *parent_snapshot* and serializes the resulting
     graph to ``out_dir/<candidate_id>/config.yaml`` (candidate_id path-sanitized).
     The written config re-graphs to ``record.genotype_hash`` — the gate's own
-    genotype, not a fresh one.
+    genotype, not a fresh one.  ``base_config`` (the parent's on-disk config)
+    supplies the non-graph fields via :func:`graft_base_fields`; omit it only
+    for graph-layer tests — a real evaluation NEEDS the graft or the candidate
+    runs toolless.
 
     Raises ``ValueError`` if *record* is not a GATED gate row (an evaluation
     decision, a REJECT, or a never-parsed proposal cannot be materialized).
@@ -106,11 +133,19 @@ def materialize_candidate(
             f"supplied parent snapshot: {reasons}"
         )
 
-    config_dict = graph_to_config_dict(snapshot)
-    config = HarnessConfig(processors=config_dict.get("processors", []))
+    config_dict = graft_base_fields(graph_to_config_dict(snapshot), base_config)
+
+    # dump the merged dict directly — round-tripping grafted fields through
+    # HarnessConfig(**...) coerces raw specs (e.g. tool_registry dicts) into
+    # constructed objects and loses them on re-serialization.
+    import yaml
 
     out_path = Path(out_dir) / _fs_safe(record.candidate_id) / "config.yaml"
-    config.to_yaml_file(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        yaml.safe_dump(config_dict, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
     return out_path
 
 

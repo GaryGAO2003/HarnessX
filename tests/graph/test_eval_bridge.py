@@ -217,3 +217,26 @@ def test_gaia_bed_constructs_and_stores_params():
     assert bed._pass_k == 1
     assert bed._concurrency == 2
     assert bed._max_steps == 20
+
+
+def test_materialize_grafts_base_config_fields(tmp_path):
+    """A materialized candidate must carry the parent's non-graph fields
+    (tool_registry etc.) - the graph only owns the composition layer."""
+    import yaml
+
+    from experiments.variant_pool.eval_bridge import graft_base_fields
+
+    base = {"tool_registry": {"builtin": ["Read"]},
+            "workspace": {"root": "r"},
+            "processors": [{"_target_": "old.Gone"}]}
+    projected = {"processors": [{"_target_": "new.Proc"}]}
+    out = graft_base_fields(projected, base)
+    assert out["tool_registry"] == {"builtin": ["Read"]}
+    assert out["workspace"] == {"root": "r"}
+    assert out["processors"] == [{"_target_": "new.Proc"}]   # projection wins
+
+    base_path = tmp_path / "base.yaml"
+    base_path.write_text(yaml.safe_dump(base), encoding="utf-8")
+    out2 = graft_base_fields(projected, base_path)
+    assert out2["tool_registry"] == {"builtin": ["Read"]}
+    assert graft_base_fields(projected, None) == projected
