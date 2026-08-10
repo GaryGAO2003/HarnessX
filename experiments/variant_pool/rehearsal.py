@@ -120,6 +120,28 @@ class RehearsalReport:
 # ── deterministic dry-run proposer (zero API) ────────────────────────────────
 
 
+def normalize_parent(parent_config: Path, out_dir: Path) -> Path:
+    """One build-backed fixed-point cycle: load → graph → config → build → YAML.
+
+    Pre-v5.3 parents carry partial serialized metadata; their first
+    graph→config cycle drifts (the G1 roundtrip corpus: strict first-cycle
+    2.3%, fixed point 100% among buildable configs, 0 divergent).  Lineage
+    must START at the fixed point, otherwise every materialized child fails
+    the independent genotype re-hash (metrics ``roundtrip_rate``) for
+    inherited reasons rather than real ones.  Fail-closed: a parent that
+    does not build cannot anchor a rehearsal — the exception propagates.
+    """
+    from harnessx.core.builder import build_from_config
+    from harnessx.graph.transform import graph_to_config_dict
+
+    cfg = HarnessConfig.from_yaml_file(parent_config)
+    built = build_from_config(graph_to_config_dict(to_graph(cfg)))
+    norm = Path(out_dir) / "parent_normalized" / "config.yaml"
+    norm.parent.mkdir(parents=True, exist_ok=True)
+    built.to_yaml_file(norm)
+    return norm
+
+
 def stub_proposer(snapshot: GraphSnapshot) -> ExtractionResult:
     """A deterministic proposer: one legal ``rewire_ordering`` per snapshot.
 
@@ -164,11 +186,15 @@ async def run_rehearsal(
     max_candidates: int = 4,
     min_delta: float = 0.0,
     task_ids: "list[str] | None" = None,
+    normalize: bool = True,
 ) -> RehearsalReport:
     """Run ``rounds`` shadow-evolution rounds and return the raw-facts report.
 
     See the module docstring for the K=1 Global selection semantics.  ``mode``
-    is ``"b"`` (full loop) or ``"f0"`` (baseline-only honest denominator).
+    is ``"b"`` (full loop), ``"r"`` (same loop — the arm difference lives
+    entirely in ``proposer``, which the CLI wires to the seeded uniform
+    :func:`~experiments.variant_pool.random_proposer.random_proposer`), or
+    ``"f0"`` (baseline-only honest denominator).
     ``proposer`` defaults to :func:`stub_proposer` (zero-API).  The report is
     flushed to ``out_dir/report.json`` after every round so a crash mid-run
     still leaves the completed rounds on disk.
@@ -176,6 +202,8 @@ async def run_rehearsal(
     parent_config = Path(parent_config)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if normalize:
+        parent_config = normalize_parent(parent_config, out_dir)
     report_path = out_dir / "report.json"
     active_proposer: Proposer = proposer or stub_proposer
 
@@ -328,7 +356,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--parent", required=True, help="parent HarnessConfig YAML")
     p.add_argument("--rounds", type=int, default=3)
-    p.add_argument("--mode", choices=["b", "f0"], default="b")
+    p.add_argument("--mode", choices=["b", "f0", "r"], default="b")
+    p.add_argument("--seed", type=int, default=0,
+                   help="rng seed for --mode r (uniform random proposer)")
     p.add_argument("--dry-run", action="store_true",
                    help="StubTaskBed + stub_proposer (zero API)")
     p.add_argument("--out-dir", required=True)
@@ -354,9 +384,21 @@ def main(argv: "list[str] | None" = None) -> int:
     ledger = ShadowLedger(Path(args.ledger) if args.ledger
                           else out_dir / "shadow.jsonl")
 
+    def _random_proposer() -> "Proposer":
+        # R arm: uniform random legal edits, seeded — needs NO proposer model
+        # (that is the arm's point: same action space + gate, zero LLM).
+        import random as _random
+
+        from experiments.variant_pool.random_proposer import random_proposer
+
+        rng = _random.Random(args.seed)
+        return lambda snapshot: random_proposer(
+            snapshot, rng, max_candidates=args.max_candidates)
+
     if args.dry_run:
         task_bed: TaskBed = StubTaskBed(pass_rate=0.5)
-        proposer: "Proposer | None" = stub_proposer
+        proposer: "Proposer | None" = (
+            _random_proposer() if args.mode == "r" else stub_proposer)
     else:
         if not (args.model and args.meta_model and args.provider_id):
             _build_parser().error(
@@ -382,6 +424,8 @@ def main(argv: "list[str] | None" = None) -> int:
                 return llm_propose(
                     snapshot, llm_call, max_candidates=args.max_candidates
                 )
+        elif args.mode == "r":
+            proposer = _random_proposer()
         else:
             proposer = None
 

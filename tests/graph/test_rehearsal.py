@@ -129,7 +129,8 @@ def test_no_winner_keeps_parent(tmp_path):
 
     report = asyncio.run(run_rehearsal(
         parent, rounds=2, task_bed=StubTaskBed(pass_rate=0.5),
-        proposer=stub_proposer, ledger=ledger, out_dir=tmp_path / "out"))
+        proposer=stub_proposer, ledger=ledger, out_dir=tmp_path / "out",
+        normalize=False))
 
     for rr in report.round_reports:
         assert rr.winner == ""
@@ -201,7 +202,7 @@ def test_f0_mode_baseline_only(tmp_path):
     report = asyncio.run(run_rehearsal(
         parent, rounds=3, task_bed=StubTaskBed(pass_rate=0.5),
         proposer=stub_proposer, ledger=ledger, out_dir=tmp_path / "out",
-        mode="f0"))
+        mode="f0", normalize=False))
 
     assert len(report.round_reports) == 3
     for rr in report.round_reports:
@@ -224,7 +225,7 @@ def test_min_delta_blocks_small_gain(tmp_path):
     report = asyncio.run(run_rehearsal(
         parent, rounds=1, task_bed=_PathBed(parent_pr=0.5, cand_pr=0.6),
         proposer=stub_proposer, ledger=ledger, out_dir=tmp_path / "out",
-        min_delta=0.2))
+        min_delta=0.2, normalize=False))
     rr = report.round_reports[0]
     assert rr.winner == ""
     assert all(c.decision == "REJECT" for c in rr.candidates)
@@ -237,6 +238,87 @@ def test_equal_scores_never_promote(tmp_path):
     # strict '>' — an exactly-tied challenger does not promote (default min_delta)
     report = asyncio.run(run_rehearsal(
         parent, rounds=1, task_bed=_PathBed(parent_pr=0.5, cand_pr=0.5),
-        proposer=stub_proposer, ledger=ledger, out_dir=tmp_path / "out"))
+        proposer=stub_proposer, ledger=ledger, out_dir=tmp_path / "out",
+        normalize=False))
     assert report.round_reports[0].winner == ""
     assert report.final_parent_config == str(parent)
+
+
+# ── R arm wiring ─────────────────────────────────────────────────────────────
+
+
+def test_r_arm_mode_runs_with_random_proposer(tmp_path):
+    import random
+
+    from experiments.variant_pool.random_proposer import random_proposer
+
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    rng = random.Random(7)
+
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=2, task_bed=StubTaskBed(pass_rate=0.5),
+        proposer=lambda s: random_proposer(s, rng),
+        ledger=ledger, out_dir=tmp_path / "out", mode="r"))
+
+    assert report.mode == "r"
+    assert len(report.round_reports) == 2
+    for rr in report.round_reports:
+        assert rr.mode == "r"
+        assert rr.parse_ok            # random source never parse-fails
+        assert rr.n_proposals >= 1
+
+
+def test_cli_dry_run_r_mode(tmp_path):
+    from experiments.variant_pool.rehearsal import main
+
+    parent = _write_parent(tmp_path)
+    out = tmp_path / "cli_out"
+    rc = main(["--parent", str(parent), "--rounds", "1", "--mode", "r",
+               "--dry-run", "--seed", "3", "--out-dir", str(out)])
+    assert rc == 0
+
+    import json
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["mode"] == "r"
+    assert len(report["round_reports"]) == 1
+
+
+# ── parent normalization: lineage starts at the genotype fixed point ─────────
+
+
+def test_partial_metadata_parent_normalizes_to_fixed_point(tmp_path):
+    """A pre-v5.3-style parent (partial serialized metadata) drifts on its
+    first graph->config cycle; normalize_parent must land it on the fixed
+    point so every materialized child passes the independent genotype
+    re-hash (metrics roundtrip_rate == 1.0)."""
+    from experiments.variant_pool.process_metrics import compute_process_metrics
+    from experiments.variant_pool.rehearsal import normalize_parent
+    from harnessx.graph import genotype_hash, to_graph
+
+    # partial metadata: only _target_ + _hook_, the pre-v5.3 on-disk shape
+    parent = tmp_path / "old_parent.yaml"
+    parent.write_text(
+        "processors:\n"
+        f"- _target_: {PROBE_TARGET}\n"
+        "  _hook_: task_start\n",
+        encoding="utf-8",
+    )
+
+    # normalization is idempotent (fixed point): a second cycle is a no-op
+    norm = normalize_parent(parent, tmp_path / "n1")
+    norm2 = normalize_parent(norm, tmp_path / "n2")
+    h1 = genotype_hash(to_graph(HarnessConfig.from_yaml_file(norm)))
+    h2 = genotype_hash(to_graph(HarnessConfig.from_yaml_file(norm2)))
+    assert h1 == h2
+
+    # end-to-end: rehearsal (normalize=True default) -> metrics roundtrip 1.0
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    out = tmp_path / "out"
+    asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=StubTaskBed(pass_rate=0.5),
+        proposer=stub_proposer, ledger=ledger, out_dir=out))
+    metrics = compute_process_metrics(out / "report.json", tmp_path / "shadow.jsonl")
+    rt = metrics["roundtrip_rate"]
+    assert rt["candidates"] >= 1
+    assert rt["value"] == 1.0, rt
