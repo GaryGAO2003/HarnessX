@@ -37,12 +37,13 @@ def discover_candidates(root: Path) -> "dict[str, Path]":
     """candidate_id → canonical config path.
 
     Recursive across every layout a run may use (pipeline products,
-    candidate_gate copies, bounce/retry re-attempts); per candidate id the
-    SHORTEST path wins — that is the canonical product, re-attempt copies
-    live deeper.
+    candidate_gate copies, bounce/retry re-attempts, nested
+    ``C-*/output_dir/config.yaml``); any config.yaml whose path carries a
+    candidate id counts.  Per candidate id the SHORTEST path wins — that is
+    the canonical product, re-attempt/nested copies live deeper.
     """
     found: dict[str, Path] = {}
-    for path in sorted(root.rglob("C-*/config.yaml"),
+    for path in sorted(root.rglob("config.yaml"),
                        key=lambda p: (len(p.parts), str(p))):
         m = _CAND_RE.search(str(path))
         if m:
