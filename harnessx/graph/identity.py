@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import PurePath
 
 from .types import GraphSnapshot, Node, Edge
 
@@ -70,6 +71,23 @@ def phenotype_hash(snapshot: GraphSnapshot) -> str:
 # ── internals ───────────────────────────────────────────────────────────────
 
 
+def _json_default(obj: object):
+    """Hash-kernel JSON fallback for non-native types (shared by all 3 hashes).
+
+    ``pathlib.PurePath`` (covers ``WindowsPath`` / ``PosixPath`` and their Pure
+    variants) serializes to its POSIX string via ``as_posix()`` — deliberately
+    NOT ``str()``: a ``WindowsPath`` stringifies with backslashes, which would
+    make the hash platform-dependent and mismatch the forward-slash path strings
+    stored in YAML.  A reconstructed ``Path("a/b")`` therefore hashes identically
+    to the string ``"a/b"`` it came from (path value semantics).  Every other
+    unknown type still raises ``TypeError`` so the hash stays strict.
+    """
+    if isinstance(obj, PurePath):
+        return obj.as_posix()
+    raise TypeError(
+        f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def _sha256(canonical: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -110,7 +128,8 @@ def _canonical_form(nodes: dict, edges: list, *, include_observed: bool = False)
         "edges": canonical_edges,
     }
 
-    return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":"), default=_json_default)
 
 
 def _node_canonical(node: Node) -> dict:

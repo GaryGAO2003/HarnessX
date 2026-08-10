@@ -70,6 +70,13 @@ IMPORT_UNCERTAIN = "build_import_uncertain"
 BUILD_OTHER = "build_failed_other"
 LOAD_FAILED = "config_load_failed"
 
+# ── mismatch sub-classification (second normalization loop) ──────────────────
+#: The first-loop mismatch settled to a fixed point after ONE more normalization
+#: (g3 == g2) — the drift was pre-v5.3 partial serialization, not divergence.
+MISMATCH_STABILIZES = "mismatch_stabilizes"
+#: A second loop did NOT reach a fixed point (g3 != g2, or its build failed).
+MISMATCH_DIVERGENT = "mismatch_divergent"
+
 
 # ── builtin corpus ───────────────────────────────────────────────────────────
 
@@ -163,9 +170,13 @@ def _classify_failed(report) -> str:
 def roundtrip_config(config) -> "tuple[str, dict]":
     """Run the ``graph→config→build→re-graph`` round-trip on one HarnessConfig.
 
-    Returns ``(verdict, detail)``; *detail* carries the two genotype hashes for
-    ``roundtrip_ok`` / ``roundtrip_hash_mismatch`` and a truncated reason on
-    failure.
+    Returns ``(verdict, detail)``.  For ``roundtrip_ok`` *detail* carries the
+    single stable genotype.  A first-loop ``roundtrip_hash_mismatch`` triggers a
+    SECOND normalization loop (``g2 → re-graph → g3``) that reads the fixed
+    point: *detail* then carries a ``subclass`` (``mismatch_stabilizes`` when
+    ``g3 == g2`` — one normalization was enough — else ``mismatch_divergent``)
+    and the three genotypes ``genotype_g1`` / ``genotype_g2`` / ``genotype_g3``.
+    Build failures carry a truncated reason.
     """
     from harnessx.graph.identity import genotype_hash
     from harnessx.graph.snapshot import to_graph
@@ -198,7 +209,28 @@ def roundtrip_config(config) -> "tuple[str, dict]":
 
     if h1 == h2:
         return OK, {"genotype": h1}
-    return MISMATCH, {"genotype_before": h1, "genotype_after": h2}
+
+    # First-loop mismatch — run a SECOND normalization loop to read the fixed
+    # point.  A pre-v5.3 partial serialization (missing _order_/_hooks_/…) drifts
+    # exactly once: g1 (partial) != g2 (full instance introspection), but g2
+    # already carries full metadata, so g3 = re-graph(g2) should equal g2.
+    #   g3 == g2 → mismatch_stabilizes  (one normalization reaches a fixed point)
+    #   g3 != g2 → mismatch_divergent   (no fixed point after one more loop)
+    try:
+        re_graph2 = _materialize_and_regraph(re_graph)
+        h3 = genotype_hash(re_graph2)
+    except Exception as exc:  # noqa: BLE001 — a 2nd-loop build failure = divergence
+        return MISMATCH, {
+            "subclass": MISMATCH_DIVERGENT,
+            "genotype_g1": h1, "genotype_g2": h2,
+            "stage": "regraph2", "error": _err(exc),
+        }
+
+    subclass = MISMATCH_STABILIZES if h3 == h2 else MISMATCH_DIVERGENT
+    return MISMATCH, {
+        "subclass": subclass,
+        "genotype_g1": h1, "genotype_g2": h2, "genotype_g3": h3,
+    }
 
 
 # ── corpus runner ────────────────────────────────────────────────────────────
@@ -209,6 +241,7 @@ def run(roots: "list[Path]") -> dict:
     per_item: dict[str, dict] = {}
     verdicts: Counter = Counter()
     by_source: Counter = Counter()
+    subclasses: Counter = Counter()  # mismatch fixed-point sub-classification
 
     def _record(label, source, verdict, detail, config_path=None):
         row: dict = {"source": source, "verdict": verdict}
@@ -218,6 +251,9 @@ def run(roots: "list[Path]") -> dict:
         per_item[label] = row
         verdicts[verdict] += 1
         by_source[source] += 1
+        sub = detail.get("subclass")
+        if sub:
+            subclasses[sub] += 1
 
     # 1. builtin corpus (always-green baseline)
     for label, factory in _builtin_recipes():
@@ -248,22 +284,36 @@ def run(roots: "list[Path]") -> dict:
     total = len(per_item)
     import_uncertain = verdicts.get(IMPORT_UNCERTAIN, 0)
     ok = verdicts.get(OK, 0)
+    stabilizes = subclasses.get(MISMATCH_STABILIZES, 0)
+    divergent = subclasses.get(MISMATCH_DIVERGENT, 0)
     denom = total - import_uncertain
+    fixed_point = ok + stabilizes
     return {
         "roots": [str(r) for r in roots],
         "total": total,
         "by_source": dict(sorted(by_source.items())),
         "verdicts": dict(sorted(verdicts.items())),
+        "subclasses": dict(sorted(subclasses.items())),
         "headline": {
+            # headline 1 — strict first-loop round-trip
             "roundtrip_ok": ok,
             "denominator": denom,
             "roundtrip_rate": (ok / denom) if denom else 0.0,
+            # headline 2 — fixed point after one normalization loop
+            "fixed_point": fixed_point,
+            "mismatch_stabilizes": stabilizes,
+            "mismatch_divergent": divergent,
+            "fixed_point_rate": (fixed_point / denom) if denom else 0.0,
             "build_import_uncertain_excluded": import_uncertain,
             "note": (
-                "roundtrip_rate = roundtrip_ok / (total - build_import_uncertain); "
-                "genotype-only criterion (runtime overlay excluded, I6); import "
-                "failures may be co-located-file environment artifacts and are "
-                "excluded from the denominator"
+                "roundtrip_rate = roundtrip_ok / (total - build_import_uncertain) "
+                "is the STRICT first-loop rate; fixed_point_rate = "
+                "(roundtrip_ok + mismatch_stabilizes) / (total - "
+                "build_import_uncertain) credits mismatches that reach a fixed "
+                "point after ONE normalization loop (g3 == g2 — pre-v5.3 partial "
+                "serialization, not divergence); genotype-only criterion (runtime "
+                "overlay excluded, I6); import failures may be co-located-file "
+                "environment artifacts and are excluded from both denominators"
             ),
         },
         "per_item": dict(sorted(per_item.items())),
@@ -295,10 +345,17 @@ def main(argv: "list[str] | None" = None) -> int:
           f"({', '.join(f'{k}:{v}' for k, v in result['by_source'].items())})")
     for verdict, n in result["verdicts"].items():
         print(f"  {verdict:26s} {n}")
+        if verdict == MISMATCH:
+            for sub, sn in result["subclasses"].items():
+                print(f"    └ {sub:24s} {sn}")
     h = result["headline"]
-    print(f"headline roundtrip: {h['roundtrip_ok']}/{h['denominator']} "
+    print(f"headline roundtrip (strict):  {h['roundtrip_ok']}/{h['denominator']} "
           f"= {h['roundtrip_rate']:.1%}  "
           f"(build_import_uncertain excluded: {h['build_import_uncertain_excluded']})")
+    print(f"headline fixed-point:         {h['fixed_point']}/{h['denominator']} "
+          f"= {h['fixed_point_rate']:.1%}  "
+          f"(+{h['mismatch_stabilizes']} stabilizes, "
+          f"{h['mismatch_divergent']} divergent)")
 
     if args.out:
         args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2),

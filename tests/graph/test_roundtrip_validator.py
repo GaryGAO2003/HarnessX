@@ -22,6 +22,8 @@ from experiments.analysis.roundtrip_validator import (
     IMPORT_UNCERTAIN,
     LOAD_FAILED,
     MISMATCH,
+    MISMATCH_DIVERGENT,
+    MISMATCH_STABILIZES,
     OK,
     _builtin_recipes,
     discover_yaml_configs,
@@ -56,8 +58,10 @@ def test_builtin_corpus_all_roundtrip_ok():
     offenders = {k: v["verdict"] for k, v in builtins.items()
                  if v["verdict"] != OK}
     assert not offenders, offenders
-    # with no on-disk corpus the headline is a clean 100%
+    # with no on-disk corpus both headlines are a clean 100%
     assert result["headline"]["roundtrip_rate"] == 1.0
+    assert result["headline"]["fixed_point_rate"] == 1.0
+    assert result["headline"]["mismatch_stabilizes"] == 0
     assert result["headline"]["build_import_uncertain_excluded"] == 0
 
 
@@ -76,9 +80,11 @@ def test_valid_full_metadata_yaml_roundtrips_ok(tmp_path):
 
 def test_partial_metadata_yaml_is_hash_mismatch(tmp_path):
     """Old-format serialization (no _order_/_singleton_group_/_hooks_/…) is a
-    real genotype mismatch: dict metadata (g1) vs instance introspection
-    (re-graph).  transactional_apply passes; the runner's explicit assertion is
-    what catches it — both hashes are reported.
+    real FIRST-loop genotype mismatch: dict metadata (g1) vs instance
+    introspection (g2).  transactional_apply passes; the runner's explicit
+    assertion catches the drift.  But g2 already carries full metadata, so the
+    SECOND normalization loop reaches a fixed point (g3 == g2) — the mismatch is
+    sub-classified ``mismatch_stabilizes``, not divergence.
     """
     partial = {"processors": [{
         "_target_": _COST_GUARD, "_code_hash": "sha256:deadbeef",
@@ -89,27 +95,62 @@ def test_partial_metadata_yaml_is_hash_mismatch(tmp_path):
     cfg = HarnessConfig.from_yaml_file(str(p))
     verdict, detail = roundtrip_config(cfg)
     assert verdict == MISMATCH, detail
-    assert detail["genotype_before"] and detail["genotype_after"]
-    assert detail["genotype_before"] != detail["genotype_after"]
+    assert detail["subclass"] == MISMATCH_STABILIZES, detail
+    # g1 (partial) drifts to g2 (full introspection); g3 settles onto g2
+    assert detail["genotype_g1"] != detail["genotype_g2"]
+    assert detail["genotype_g3"] == detail["genotype_g2"]
 
 
 def test_hash_mismatch_via_regraph_seam(monkeypatch):
-    """The classification path itself: distort the re-graph seam (leaving
-    transactional_apply untouched) → the explicit genotype check flags MISMATCH.
+    """The classification path itself: a re-graph seam that distorts DIFFERENTLY
+    on every call (leaving transactional_apply untouched) never reaches a fixed
+    point → MISMATCH / ``mismatch_divergent`` with all three genotypes distinct.
     """
     from harnessx.bundles import context
     cfg = (HarnessBuilder() | context).build()
 
+    calls = {"n": 0}
+
     def _distort(snapshot):
         distorted = copy.deepcopy(snapshot)
         node = next(iter(distorted.nodes.values()))
-        node.metadata["_roundtrip_test_distortion_"] = 1  # dict is mutable
+        calls["n"] += 1
+        node.metadata["_roundtrip_test_distortion_"] = calls["n"]  # differs/call
         return distorted
 
     monkeypatch.setattr(rv, "_materialize_and_regraph", _distort)
     verdict, detail = roundtrip_config(cfg)
     assert verdict == MISMATCH, detail
-    assert detail["genotype_before"] != detail["genotype_after"]
+    assert detail["subclass"] == MISMATCH_DIVERGENT, detail
+    # loop 1 → g2 (n=1) != g1; loop 2 → g3 (n=2) != g2
+    assert detail["genotype_g1"] != detail["genotype_g2"]
+    assert detail["genotype_g3"] != detail["genotype_g2"]
+
+
+def test_second_loop_build_failure_is_divergent(monkeypatch):
+    """A second-loop build failure (no reachable fixed point) is recorded as
+    ``mismatch_divergent`` with its error, never an unhandled crash.
+    """
+    from harnessx.bundles import context
+    cfg = (HarnessBuilder() | context).build()
+
+    calls = {"n": 0}
+
+    def _flaky(snapshot):
+        calls["n"] += 1
+        if calls["n"] == 1:  # loop 1: distort so h1 != h2
+            distorted = copy.deepcopy(snapshot)
+            node = next(iter(distorted.nodes.values()))
+            node.metadata["_roundtrip_test_distortion_"] = 1
+            return distorted
+        raise RuntimeError("second-loop build boom")  # loop 2: build blows up
+
+    monkeypatch.setattr(rv, "_materialize_and_regraph", _flaky)
+    verdict, detail = roundtrip_config(cfg)
+    assert verdict == MISMATCH, detail
+    assert detail["subclass"] == MISMATCH_DIVERGENT, detail
+    assert detail["stage"] == "regraph2"
+    assert "RuntimeError" in detail["error"]
 
 
 # ── environment-fair classification ──────────────────────────────────────────
@@ -136,8 +177,9 @@ def test_missing_module_is_import_uncertain_and_excluded(tmp_path):
     h = result["headline"]
     assert h["build_import_uncertain_excluded"] >= 1
     assert h["denominator"] == result["total"] - h["build_import_uncertain_excluded"]
-    # here every non-import item is ok → headline is a clean 100%
+    # here every non-import item is ok → both headlines are a clean 100%
     assert h["roundtrip_rate"] == 1.0
+    assert h["fixed_point_rate"] == 1.0
 
 
 def test_config_load_failed(tmp_path):
