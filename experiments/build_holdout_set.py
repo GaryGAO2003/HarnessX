@@ -28,10 +28,16 @@ OUT = DATA / "holdout6.json"
 PER_LEVEL = {"1": 2, "2": 3, "3": 1}
 SEED = 0
 
+#: Dead tasks excluded from the holdout on top of the bed files. Evidence:
+#: ghx_6x3 (recipe/gaia_evolver/runs/ghx_6x3) shows 6/6 budget_exceeded under
+#: all 4 configurations — unsolvable inside the $1.0 / 20-step envelope, so it can
+#: never register a regression and only burns holdout budget. Swap it out.
+DEAD_TASKS = frozenset({"42d4198c-5895-4f0a-b0c0-424a66465d83"})
+
 
 def build() -> list[dict]:
     pool = json.loads(POOL.read_text(encoding="utf-8"))
-    used: set[str] = set()
+    used: set[str] = set(DEAD_TASKS)
     for name in EXCLUDE_FILES:
         used |= {t["task_id"] for t in
                  json.loads((DATA / name).read_text(encoding="utf-8"))}
