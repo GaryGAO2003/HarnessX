@@ -271,6 +271,41 @@ def _write_footprints(eval_dir, rows):
             fh.write(json.dumps({"attempt": attempt, **fp.to_dict()}) + "\n")
 
 
+def _write_parent_on(tmp_path, hook):
+    """A legal single-processor parent whose proc attaches to ``hook`` ('*' = all 8)."""
+    config = HarnessConfig(processors=[
+        serialized_dict(PROBE_TARGET, hook=hook, singleton_group="probe", order=10),
+    ])
+    path = tmp_path / "parent.yaml"
+    config.to_yaml_file(path)
+    return path
+
+
+def _report_ledger_one_mutate(tmp_path, parent, proc_id, eval_dir):
+    """report.json + shadow.jsonl for one GATED mutate_processor_params candidate
+    on ``proc_id``, with the round's baseline footprints under ``eval_dir``."""
+    report = {
+        "mode": "b", "rounds": 1,
+        "initial_parent_config": str(parent), "final_parent_config": str(parent),
+        "round_reports": [{
+            "round_id": "r0", "mode": "b", "parent_config": str(parent),
+            "baseline_eval_dir": str(eval_dir),
+            "parent_pass_rate": 0.0, "baseline_measured": {}, "candidates": [],
+            "n_proposals": 1, "n_gated": 1, "n_evaluated": 1, "wall_clock_s": 0.0,
+        }],
+    }
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    ledger_path = tmp_path / "shadow.jsonl"
+    ledger_path.write_text(json.dumps({
+        "record_kind": "gate", "candidate_id": "r0/c0", "round_id": "r0",
+        "parent_genotype": "", "operator": "mutate_processor_params",
+        "operator_params": {"node_id": proc_id, "param_changes": {"foo": 1}},
+        "decision": "GATED", "genotype_hash": "abc",
+    }) + "\n", encoding="utf-8")
+    return report_path, ledger_path
+
+
 def test_selective_retest_savings_computed(tmp_path):
     """Two bed tasks, one whose parent footprint touches the candidate's edit and
     one that does not → exactly half the bed needs a retest → saving of 0.5, with
@@ -316,7 +351,82 @@ def test_selective_retest_savings_computed(tmp_path):
     assert cand["bed_tasks"] == 2
     assert cand["retest_tasks"] == ["t_hit"]         # only the intersecting task
     assert cand["savings"] == pytest.approx(0.5)
+    # footprints name proc:* nodes → exact processor-level path, not projection
+    assert cand["granularity"] == "processor"
+    assert "note" not in sr                          # no conservative caveat needed
     # value branch renders without crashing (ASCII table)
+    assert isinstance(render_text(m), str)
+
+
+def test_selective_hook_projection_conservative(tmp_path):
+    """Hook-level footprints (no proc:* attribution) + a proc-node edit: the danger
+    set is projected through the proc's ATTACHED_TO hook.  One task touches that
+    hook, one does not → saving 0.5, flagged hook-projected(conservative)."""
+    parent = _write_parent_on(tmp_path, "before_model")
+    proc_id = _proc_node_id(parent)                  # attaches to hook:before_model
+
+    eval_dir = tmp_path / "out" / "eval_0000"
+    _write_footprints(eval_dir, [
+        (0, CoverageFootprint(task_id="t_hit", touched_node_ids={"hook:before_model"})),
+        (0, CoverageFootprint(task_id="t_miss", touched_node_ids={"hook:task_end"})),
+    ])
+    report_path, ledger_path = _report_ledger_one_mutate(tmp_path, parent, proc_id, eval_dir)
+
+    m = compute_process_metrics(report_path, ledger_path)
+    sr = m["selective_retest_savings"]
+    assert sr["value"] == pytest.approx(0.5)          # 1 − 1/2 bed retested
+    assert sr["note"]                                 # projection flagged at top level
+    cand = sr["per_candidate"][0]
+    assert cand["granularity"] == "hook-projected(conservative)"
+    assert cand["retest_tasks"] == ["t_hit"]          # only the task touching the hook
+    assert cand["savings"] == pytest.approx(0.5)
+    assert isinstance(render_text(m), str)            # projection branch renders
+
+
+def test_selective_hook_projection_wildcard_zero(tmp_path):
+    """A wildcard ('*') processor attaches to all 8 processor hooks → every task's
+    footprint intersects the projected hook set → the whole bed retests → saving
+    0.0.  Correct at hook granularity: a whole-lifecycle change must retest all."""
+    parent = _write_parent_on(tmp_path, "*")
+    proc_id = _proc_node_id(parent)                  # attaches to all 8 hooks
+
+    eval_dir = tmp_path / "out" / "eval_0000"
+    _write_footprints(eval_dir, [
+        (0, CoverageFootprint(task_id="t1", touched_node_ids={"hook:before_model"})),
+        (0, CoverageFootprint(task_id="t2", touched_node_ids={"hook:task_end"})),
+    ])
+    report_path, ledger_path = _report_ledger_one_mutate(tmp_path, parent, proc_id, eval_dir)
+
+    sr = compute_process_metrics(report_path, ledger_path)["selective_retest_savings"]
+    assert sr["value"] == pytest.approx(0.0)         # nothing can be skipped
+    cand = sr["per_candidate"][0]
+    assert cand["granularity"] == "hook-projected(conservative)"
+    assert sorted(cand["retest_tasks"]) == ["t1", "t2"]   # every task retests
+    assert cand["savings"] == pytest.approx(0.0)
+
+
+_REHEARSAL_B2 = Path(__file__).resolve().parents[2] / "recipe/gaia_evolver/runs/rehearsal_b2"
+
+
+@pytest.mark.skipif(not (_REHEARSAL_B2 / "report.json").is_file(),
+                    reason="rehearsal_b2 artefacts not present")
+def test_selective_real_rehearsal_b2_not_optimistic():
+    """Real rehearsal smoke: hook-level footprints (0 proc:* nodes) + 8 gated
+    mutate_processor_params candidates.  Before the projection this read a blanket
+    saving=1.000; the hook projection drops it below 1.0 and flags every candidate
+    hook-projected (procs on before_model/'*' are touched by every task → full
+    retest; only a step_start-only proc, never observed, keeps its saving)."""
+    m = compute_process_metrics(_REHEARSAL_B2 / "report.json",
+                                _REHEARSAL_B2 / "shadow.jsonl")
+    sr = m["selective_retest_savings"]
+    assert sr["value"] is not None
+    assert sr["value"] < 1.0                         # no longer the optimistic artefact
+    assert sr["note"]                                # projection flagged
+    assert sr["candidates_scored"] == 8
+    assert all(c["granularity"] == "hook-projected(conservative)"
+               for c in sr["per_candidate"])
+    full_retest = [c for c in sr["per_candidate"] if c["savings"] == 0.0]
+    assert len(full_retest) >= 6                     # before_model/'*' procs, every task hits
     assert isinstance(render_text(m), str)
 
 

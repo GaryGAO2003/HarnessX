@@ -37,6 +37,7 @@ from pathlib import Path
 
 from harnessx.core.harness import HarnessConfig
 from harnessx.graph import (
+    EdgeType,
     danger_edge_set,
     genotype_hash,
     intersects_footprint,
@@ -52,6 +53,15 @@ from experiments.variant_pool.shadow_evolution import parse_proposal
 SELECTIVE_NO_FOOTPRINTS_REASON = "footprints not collected (run with --collect-footprints)"
 SELECTIVE_NO_SCORE_REASON = (
     "footprints present but no gated candidate could be re-derived to danger edges")
+#: Emitted at top level whenever any candidate was scored by hook projection
+#: (below): the observation layer currently records coverage at hook
+#: granularity (no proc:* attribution), so a processor-level danger set is read
+#: through the hooks its procs attach to — an upper-bound, conservative saving
+#: until the observation layer attributes coverage to individual processors.
+SELECTIVE_HOOK_PROJECTION_NOTE = (
+    "hook-projected candidates read danger-vs-footprint at hook granularity "
+    "(observation layer emits hook-level footprints, no proc:* attribution); their "
+    "saving is a conservative upper bound pending an observation-layer upgrade")
 HOLDOUT_NO_APPLY_REASON = "no APPLY rounds"
 HOLDOUT_NOT_WIRED_REASON = "holdout not wired for this run"
 
@@ -449,6 +459,20 @@ def _selective_retest_savings(rounds: "list[dict]", gate_rows: "list[dict]") -> 
     same danger∩footprint call :class:`experiments.variant_pool.selective_retest.
     SelectiveRetestEngine` makes live at eval time.
 
+    Granularity guard (read from the data, no flag): a ``proc:*`` danger set is
+    invisible to a footprint recorded at hook granularity (the current runtime
+    overlay attributes coverage to the hook skeleton, not to individual
+    processors — every ``touched_node_ids`` is ``hook:*`` / ``slot:*``), so the
+    raw intersection is empty and every candidate reads a spurious ``saving=1``.
+    When a round's footprints name no ``proc:*`` node AND a candidate's edit
+    anchors on proc nodes, the danger set is instead projected through the HOOKS
+    those procs attach to (``ATTACHED_TO``) and intersected there — a conservative
+    upper bound (a wildcard/whole-lifecycle processor projects to all 8 hooks →
+    saving 0).  Each candidate carries a ``granularity`` of ``"processor"`` (exact
+    path) or ``"hook-projected(conservative)"``; a top-level ``note`` flags the
+    projection.  Proc-level footprints (a future overlay) route back to the exact
+    path automatically.
+
     Honest ``null`` (never ``0.0``): no footprints collected anywhere, or none of
     the gated candidates could be re-derived to edits.
     """
@@ -462,6 +486,7 @@ def _selective_retest_savings(rounds: "list[dict]", gate_rows: "list[dict]") -> 
     total_savings = 0.0
     n_scored = 0
     footprints_seen = 0
+    hook_projected_any = False
 
     for r in rounds:
         gated = gated_by_round.get(r.get("round_id", ""), [])
@@ -472,6 +497,15 @@ def _selective_retest_savings(rounds: "list[dict]", gate_rows: "list[dict]") -> 
             continue
         footprints_seen += 1
         n_bed = len(footprints)
+        # Granularity of THIS round's observation layer, read from the data (not
+        # a flag): if no loaded footprint names a single ``proc:*`` node, coverage
+        # was recorded at hook granularity — the runtime overlay attributes to the
+        # hook skeleton, never to individual processors (see rehearsal_b2).  When
+        # a future overlay emits proc-level footprints this flips to False on its
+        # own and every candidate takes the exact path below.
+        hook_level_obs = not any(
+            any(nid.startswith("proc:") for nid in fn)
+            for fn, _fe in footprints.values())
         try:
             parent_snap = to_graph(
                 HarnessConfig.from_yaml_file(Path(r.get("parent_config", ""))))
@@ -487,15 +521,36 @@ def _selective_retest_savings(rounds: "list[dict]", gate_rows: "list[dict]") -> 
                 skipped.append({"candidate_id": cand_id, "reason": reason})
                 continue
             try:
-                danger_nodes, danger_edges = danger_edge_set(
-                    op.edits(parent_snap), parent_snap)
+                edits = op.edits(parent_snap)
+                danger_nodes, danger_edges = danger_edge_set(edits, parent_snap)
             except Exception as exc:  # noqa: BLE001 — inapplicable edit skips the candidate
                 skipped.append({"candidate_id": cand_id,
                                 "reason": f"danger set: {type(exc).__name__}: {exc}"})
                 continue
-            retest = sorted(
-                tid for tid, (fn, fe) in footprints.items()
-                if intersects_footprint(danger_nodes, danger_edges, fn, fe))
+            # ``proc:*`` nodes this edit anchors on — the processor-level danger
+            # set a hook-level footprint can never see.
+            affected_procs = {
+                nid for e in edits for nid in e.affected_node_ids()
+                if nid.startswith("proc:")}
+            if hook_level_obs and affected_procs:
+                # Conservative hook projection: intersect the footprint with the
+                # HOOKS those procs attach to (ATTACHED_TO edges), standing in for
+                # the invisible proc nodes.  A wildcard ("*") processor attaches to
+                # all 8 processor hooks, so every task's footprint intersects → the
+                # whole bed retests → saving 0.  That is the correct reading at hook
+                # granularity: a whole-lifecycle processor change must retest all.
+                hooks = {e.target_id for e in parent_snap.edges
+                         if e.edge_type is EdgeType.ATTACHED_TO
+                         and e.source_id in affected_procs}
+                retest = sorted(tid for tid, (fn, _fe) in footprints.items()
+                                if fn & hooks)
+                granularity = "hook-projected(conservative)"
+                hook_projected_any = True
+            else:
+                retest = sorted(
+                    tid for tid, (fn, fe) in footprints.items()
+                    if intersects_footprint(danger_nodes, danger_edges, fn, fe))
+                granularity = "processor"
             savings = 1.0 - (len(retest) / n_bed) if n_bed else 0.0
             total_savings += savings
             n_scored += 1
@@ -506,18 +561,22 @@ def _selective_retest_savings(rounds: "list[dict]", gate_rows: "list[dict]") -> 
                 "bed_tasks": n_bed,
                 "retest_tasks": retest,
                 "savings": savings,
+                "granularity": granularity,
             })
 
     if footprints_seen == 0:
         return {"value": None, "reason": SELECTIVE_NO_FOOTPRINTS_REASON}
     if n_scored == 0:
         return {"value": None, "reason": SELECTIVE_NO_SCORE_REASON, "skipped": skipped}
-    return {
+    result = {
         "value": total_savings / n_scored,
         "candidates_scored": n_scored,
         "per_candidate": per_candidate,
         "skipped": skipped,
     }
+    if hook_projected_any:
+        result["note"] = SELECTIVE_HOOK_PROJECTION_NOTE
+    return result
 
 
 # ── top-level entry point ────────────────────────────────────────────────────
@@ -602,7 +661,7 @@ def render_text(metrics: dict) -> str:
 
     rw = metrics["reward"]
     out.append(f"6. reward_per_evaluation  {_fmt(rw['reward_per_evaluation'])}"
-               f"  reward_per_1k_tokens={_fmt(rw['reward_per_1k_tokens'])}")
+               f"  reward_per_1k_tokens={rw['reward_per_1k_tokens']:.6f}")
     out.append(f"     reward_total={_fmt(rw['reward_total'])} over "
                f"{rw['evaluations_incl_baseline']} evals / {rw['tokens']} tokens"
                f" ({rw['n_apply']} APPLY)")
@@ -628,12 +687,19 @@ def render_text(metrics: dict) -> str:
     if sr["value"] is None:
         out.append(f"9. selective_retest_saving null  ({sr['reason']})")
     else:
-        out.append(f"9. selective_retest_saving {_fmt(sr['value'])}"
-                   f"  [{sr['candidates_scored']} gated candidate(s) scored]")
+        head = (f"9. selective_retest_saving {_fmt(sr['value'])}"
+                f"  [{sr['candidates_scored']} gated candidate(s) scored]")
+        if sr.get("note"):
+            head += "  (hook-projected upper bound)"
+        out.append(head)
         for c in sr["per_candidate"]:
+            proj = c.get("granularity", "processor").startswith("hook")
+            tag = " hook-projected" if proj else ""
             out.append(f"     {c['round_id']}/{c['candidate_id']} ({c['operator']}):"
                        f" saving={_fmt(c['savings'])}"
-                       f" [{len(c['retest_tasks'])}/{c['bed_tasks']} retest]")
+                       f" [{len(c['retest_tasks'])}/{c['bed_tasks']} retest{tag}]")
+        if sr.get("note"):
+            out.append(f"     note: {sr['note']}")
 
     out.append("")
     out.append(f"skipped_inputs: {len(metrics['skipped_inputs'])}")
