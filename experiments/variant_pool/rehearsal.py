@@ -104,6 +104,10 @@ class RoundReport:
     n_evaluated: int = 0
     parent_pass_rate: float = 0.0
     baseline_measured: dict = field(default_factory=dict)
+    #: Isolated artefact dir of THIS round's parent baseline evaluation. Metric 9
+    #: (selective_retest_savings) reads ``<baseline_eval_dir>/footprints.jsonl``
+    #: from it; ``""`` when the bed produced no dir (StubTaskBed / dry-run).
+    baseline_eval_dir: str = ""
     candidates: list = field(default_factory=list)   # list[CandidateOutcome]
     winner: str = ""                # winning candidate_id, "" when parent survives
     wall_clock_s: float = 0.0
@@ -277,6 +281,7 @@ async def run_rehearsal(
             parent_config=str(current_parent),
             parent_pass_rate=parent_pass_rate,
             baseline_measured=measured_from_result(baseline_result),
+            baseline_eval_dir=baseline_result.eval_dir,
         )
 
         if mode == "f0":
@@ -443,6 +448,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-cost", type=float, default=0.5)
     p.add_argument("--max-steps", type=int, default=20)
     p.add_argument("--pass-k", type=int, default=1)
+    # selective_retest_savings (metric 9): collect per-task coverage footprints
+    # to each eval's footprints.jsonl. Default off — pure instrumentation, no
+    # change to evaluation behaviour or cost when unset. Dry-run ignores it
+    # (StubTaskBed produces no footprints).
+    p.add_argument("--collect-footprints", action="store_true",
+                   help="collect coverage footprints for selective_retest_savings (metric 9)")
     return p
 
 
@@ -513,6 +524,7 @@ def main(argv: "list[str] | None" = None) -> int:
             max_cost=args.max_cost,
             max_steps=args.max_steps,
             out_dir=out_dir / "taskbed",
+            collect_footprints=args.collect_footprints,
         )
         # Second bed on the disjoint holdout set (metric 8). Built only when the
         # read-out is enabled, the mode can promote (f0 never does), and the data
@@ -529,6 +541,7 @@ def main(argv: "list[str] | None" = None) -> int:
                 max_cost=args.max_cost,
                 max_steps=args.max_steps,
                 out_dir=out_dir / "holdout_taskbed",
+                collect_footprints=args.collect_footprints,
             )
         if args.mode == "b":
             # arm discipline: the proposer runs on the META model (same tier

@@ -539,3 +539,42 @@ def test_cli_holdout_flags_parse_and_dry_run_smoke(tmp_path):
     rc = main(["--parent", str(parent), "--rounds", "1", "--mode", "b",
                "--dry-run", "--no-holdout", "--out-dir", str(tmp_path / "o")])
     assert rc == 0
+
+
+def test_cli_collect_footprints_flag_defaults_off_and_parses(tmp_path):
+    """--collect-footprints reaches the arg layer (default off) and a dry-run with
+    it set still completes — StubTaskBed ignores it, so zero-API behaviour is
+    unchanged (the flag only wires the real GaiaTaskBed)."""
+    from experiments.variant_pool.rehearsal import _build_parser, main
+
+    args = _build_parser().parse_args(["--parent", "p", "--out-dir", "o"])
+    assert args.collect_footprints is False
+    args_on = _build_parser().parse_args(
+        ["--parent", "p", "--out-dir", "o", "--collect-footprints"])
+    assert args_on.collect_footprints is True
+
+    parent = _write_parent(tmp_path)
+    rc = main(["--parent", str(parent), "--rounds", "1", "--mode", "b", "--dry-run",
+               "--collect-footprints", "--out-dir", str(tmp_path / "o")])
+    assert rc == 0
+
+
+def test_round_report_carries_baseline_eval_dir(tmp_path):
+    """RoundReport records the parent baseline's eval_dir so metric 9 can locate
+    its footprints.jsonl — whatever the bed returns ("" for StubTaskBed)."""
+
+    class _DirBed:
+        async def evaluate(self, config_path, task_ids=None):
+            return TaskBedResult(per_task={"t1": {"passed": True}}, pass_rate=0.6,
+                                 eval_dir="some/eval/dir")
+
+    parent = _write_parent(tmp_path)
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=_DirBed(), proposer=stub_proposer,
+        ledger=ShadowLedger(tmp_path / "shadow.jsonl"), out_dir=tmp_path / "out"))
+    assert report.round_reports[0].baseline_eval_dir == "some/eval/dir"
+
+    report2 = asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=StubTaskBed(pass_rate=0.5), proposer=stub_proposer,
+        ledger=ShadowLedger(tmp_path / "shadow2.jsonl"), out_dir=tmp_path / "out2"))
+    assert report2.round_reports[0].baseline_eval_dir == ""

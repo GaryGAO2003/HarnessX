@@ -218,6 +218,15 @@ def test_gaia_bed_constructs_and_stores_params():
     assert bed._pass_k == 1
     assert bed._concurrency == 2
     assert bed._max_steps == 20
+    # footprint collection is opt-in: off unless explicitly requested, so the
+    # default eval path never attaches an ObservationProcessor or pays for it.
+    assert bed._collect_footprints is False
+    on = GaiaTaskBed(
+        model="m", meta_model="mm", provider_id="test",
+        data_path=Path("x.json"), max_cost=0.5, max_steps=20,
+        out_dir=Path("unused"), collect_footprints=True,
+    )
+    assert on._collect_footprints is True
 
 
 def test_materialize_grafts_base_config_fields(tmp_path):
@@ -320,3 +329,45 @@ def test_write_eval_records_strips_private_keys(tmp_path):
     assert row0["cost_usd"] == 0.37
     assert row0["exit_reason"] == "done"
     assert not any(k.startswith("_") for k in row0)
+
+
+# ── S5 footprint collection: serialization round-trip (metric 9 input) ───────
+
+
+def test_footprint_row_roundtrips_to_intersection(tmp_path):
+    """The per-attempt row the bridge dumps under --collect-footprints must be a
+    JSON line that reloads into an intersectable footprint.
+
+    Mirrors ``evaluate``'s ``{"attempt": i, **fp.to_dict()}`` shape without a
+    model call: build a trace, map it to graph coordinates via ``compute_footprint``,
+    write it as the bridge does, read it back, and confirm the touched nodes still
+    drive ``intersects_footprint`` — the exact call metric 9 makes."""
+    from harnessx.bundles import context
+    from harnessx.core.builder import HarnessBuilder
+    from harnessx.graph import compute_footprint, intersects_footprint
+    from harnessx.graph.observer import HookObservation, TaskTrace
+
+    snapshot = to_graph((HarnessBuilder() | context).build())
+    trace = TaskTrace(task_id="t1", variant_id="V0")
+    trace.record(HookObservation(step_id=1, hook_name="before_model",
+                                 processor_label="model"))
+    trace.record(HookObservation(step_id=2, hook_name="after_model",
+                                 processor_label="model", tools_called=["Bash"]))
+    fp = compute_footprint(trace, snapshot)
+    assert fp.touched_node_ids  # a non-empty footprint to intersect against
+
+    # Write exactly as the bridge does, one JSON line per (task, attempt).
+    fp_path = tmp_path / "footprints.jsonl"
+    fp_path.write_text(json.dumps({"attempt": 0, **fp.to_dict()}) + "\n",
+                       encoding="utf-8")
+
+    row = json.loads(fp_path.read_text(encoding="utf-8").strip())
+    assert row["attempt"] == 0
+    assert row["task_id"] == "t1"
+    nodes = set(row["touched_node_ids"])
+    edges = set(row["observed_edge_keys"])
+    assert nodes == fp.touched_node_ids
+    # a danger set that shares one touched node intersects; a disjoint one does not
+    one = next(iter(nodes))
+    assert intersects_footprint({one}, set(), nodes, edges)
+    assert not intersects_footprint({"proc:__absent__"}, set(), nodes, edges)

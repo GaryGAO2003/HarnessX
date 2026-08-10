@@ -7,16 +7,23 @@ the metrics against the known plot.  Same directory / style as
 """
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
 from experiments.variant_pool.eval_bridge import StubTaskBed, TaskBedResult
-from experiments.variant_pool.process_metrics import compute_process_metrics, render_text
+from experiments.variant_pool.process_metrics import (
+    SELECTIVE_NO_FOOTPRINTS_REASON,
+    _load_footprints,
+    compute_process_metrics,
+    render_text,
+)
 from experiments.variant_pool.proposer import ExtractionResult
 from experiments.variant_pool.rehearsal import run_rehearsal, stub_proposer
 from experiments.variant_pool.shadow_evolution import ShadowLedger
 from harnessx.core.harness import HarnessConfig
+from harnessx.graph import CoverageFootprint, NodeType, to_graph
 
 from tests.graph.fixtures import serialized_dict
 
@@ -244,6 +251,103 @@ def test_holdout_null_reason_not_wired_when_apply_without_holdout(tmp_path):
     ho = compute_process_metrics(out / "report.json", ledger_path)["holdout_regression_rate"]
     assert ho["value"] is None
     assert ho["reason"] == "holdout not wired for this run"
+
+
+# ── metric 9: selective_retest_savings — real compute + not-collected null ───
+
+
+def _proc_node_id(parent):
+    """The single processor node_id in the parent config's snapshot."""
+    snap = to_graph(HarnessConfig.from_yaml_file(parent))
+    return next(nid for nid, n in snap.nodes.items()
+                if n.node_type is NodeType.PROCESSOR)
+
+
+def _write_footprints(eval_dir, rows):
+    """Write footprints.jsonl exactly as the bridge does ({attempt, **to_dict})."""
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    with (eval_dir / "footprints.jsonl").open("w", encoding="utf-8") as fh:
+        for attempt, fp in rows:
+            fh.write(json.dumps({"attempt": attempt, **fp.to_dict()}) + "\n")
+
+
+def test_selective_retest_savings_computed(tmp_path):
+    """Two bed tasks, one whose parent footprint touches the candidate's edit and
+    one that does not → exactly half the bed needs a retest → saving of 0.5, with
+    the touched task named in the retest set."""
+    parent = _write_parent(tmp_path)
+    proc_id = _proc_node_id(parent)
+
+    # t_hit's footprint touches the mutated node (∈ danger set); t_miss touches a
+    # node absent from the graph, so it can never intersect any danger set.
+    eval_dir = tmp_path / "out" / "eval_0000"
+    _write_footprints(eval_dir, [
+        (0, CoverageFootprint(task_id="t_hit", touched_node_ids={proc_id})),
+        (0, CoverageFootprint(task_id="t_miss", touched_node_ids={"proc:__absent__"})),
+    ])
+
+    report = {
+        "mode": "b", "rounds": 1,
+        "initial_parent_config": str(parent), "final_parent_config": str(parent),
+        "round_reports": [{
+            "round_id": "r0", "mode": "b", "parent_config": str(parent),
+            "baseline_eval_dir": str(eval_dir),
+            "parent_pass_rate": 0.0, "baseline_measured": {}, "candidates": [],
+            "n_proposals": 1, "n_gated": 1, "n_evaluated": 1, "wall_clock_s": 0.0,
+        }],
+    }
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    ledger_path = tmp_path / "shadow.jsonl"
+    ledger_path.write_text(json.dumps({
+        "record_kind": "gate", "candidate_id": "r0/c0", "round_id": "r0",
+        "parent_genotype": "", "operator": "mutate_processor_params",
+        "operator_params": {"node_id": proc_id, "param_changes": {"foo": 1}},
+        "decision": "GATED", "genotype_hash": "abc",
+    }) + "\n", encoding="utf-8")
+
+    m = compute_process_metrics(report_path, ledger_path)
+    sr = m["selective_retest_savings"]
+    assert sr["value"] == pytest.approx(0.5)         # 1 − 1/2 bed retested
+    assert sr["candidates_scored"] == 1
+    cand = sr["per_candidate"][0]
+    assert cand["candidate_id"] == "r0/c0"
+    assert cand["bed_tasks"] == 2
+    assert cand["retest_tasks"] == ["t_hit"]         # only the intersecting task
+    assert cand["savings"] == pytest.approx(0.5)
+    # value branch renders without crashing (ASCII table)
+    assert isinstance(render_text(m), str)
+
+
+def test_selective_null_reason_when_not_collected(tmp_path):
+    """A real gated candidate but no footprints on disk (the bed was run without
+    --collect-footprints) → honest null with the 'not collected' reason."""
+    parent = _write_parent(tmp_path)
+    out, ledger_path = tmp_path / "out", tmp_path / "shadow.jsonl"
+    _run(parent, rounds=1, bed=StubTaskBed(pass_rate=0.5),
+         proposer=stub_proposer, ledger_path=ledger_path, out_dir=out)
+
+    sr = compute_process_metrics(out / "report.json", ledger_path)["selective_retest_savings"]
+    assert sr["value"] is None
+    assert sr["reason"] == SELECTIVE_NO_FOOTPRINTS_REASON
+
+
+def test_load_footprints_unions_attempts_and_missing(tmp_path):
+    """_load_footprints unions per-attempt rows per task and returns {} when the
+    file is absent (the not-collected case)."""
+    assert _load_footprints(str(tmp_path / "nope")) == {}
+
+    eval_dir = tmp_path / "eval"
+    _write_footprints(eval_dir, [
+        (0, CoverageFootprint(task_id="t1", touched_node_ids={"a"},
+                              observed_edge_keys={"a→b"})),
+        (1, CoverageFootprint(task_id="t1", touched_node_ids={"c"})),
+        (0, CoverageFootprint(task_id="t2", touched_node_ids={"d"})),
+    ])
+    fps = _load_footprints(str(eval_dir))
+    assert fps["t1"] == ({"a", "c"}, {"a→b"})        # unioned across attempts
+    assert fps["t2"] == ({"d"}, set())
 
 
 # ── malformed ledger line is counted, never silently dropped ─────────────────

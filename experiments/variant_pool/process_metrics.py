@@ -7,10 +7,13 @@ two frozen inputs — a rehearsal ``report.json`` (``RehearsalReport`` asdict, s
 ``CandidateRecord`` asdict, see :mod:`experiments.variant_pool.shadow_evolution`)
 — and returns the nine metrics plus run ``totals``.
 
-It is a *pure reader*: no task bed is ever re-run.  The one place it recomputes
-is roundtrip (metric 3), where it independently re-derives each candidate's
-``genotype_hash`` from the materialized config on disk rather than trusting the
-bridge's own re-graph assertion.
+It is a *pure reader*: no task bed is ever re-run.  It recomputes in two places,
+both from artefacts already on disk: roundtrip (metric 3) re-derives each
+candidate's ``genotype_hash`` from the materialized config rather than trusting
+the bridge's re-graph assertion; selective retest (metric 9) re-derives each
+gated candidate's danger set from the parent config and intersects it with the
+parent-baseline coverage footprints the bridge collected under
+``--collect-footprints``.
 
 Division-by-zero convention (no metric ever raises on empty input):
   * rate / ratio metrics       → ``0.0`` on an empty denominator;
@@ -18,7 +21,9 @@ Division-by-zero convention (no metric ever raises on empty input):
   * holdout metric 8           → ``null`` (honest absence) with a reason when no
                                  APPLY round carries holdout data; a real rate
                                  otherwise;
-  * deferred metric 9          → ``null`` with a standing reason.
+  * selective metric 9         → ``null`` (honest absence) with a reason when no
+                                 footprints were collected; a real saving
+                                 otherwise.
 
 No silent caps: any malformed input line (bad JSON, wrong shape, missing file)
 is counted into ``skipped_inputs`` with a reason — never dropped silently.
@@ -31,12 +36,22 @@ import json
 from pathlib import Path
 
 from harnessx.core.harness import HarnessConfig
-from harnessx.graph import genotype_hash, to_graph
+from harnessx.graph import (
+    danger_edge_set,
+    genotype_hash,
+    intersects_footprint,
+    to_graph,
+)
 
-#: Standing reason for metric 9 (still structurally not wired) plus the two
-#: honest-null branches of metric 8 (now computed, but null when there is
-#: nothing to read: no promotion at all, or promotions with no holdout data).
-SELECTIVE_REASON = "requires footprint∩danger-edge wiring into the round loop"
+from experiments.variant_pool.shadow_evolution import parse_proposal
+
+#: Honest-null reasons. Metric 9 (now computed) is null only when there is
+#: nothing to read — no footprints were collected, or none of the gated
+#: candidates could be re-derived to danger edges. Metric 8's two null branches:
+#: no promotion at all, or promotions carrying no holdout data.
+SELECTIVE_NO_FOOTPRINTS_REASON = "footprints not collected (run with --collect-footprints)"
+SELECTIVE_NO_SCORE_REASON = (
+    "footprints present but no gated candidate could be re-derived to danger edges")
 HOLDOUT_NO_APPLY_REASON = "no APPLY rounds"
 HOLDOUT_NOT_WIRED_REASON = "holdout not wired for this run"
 
@@ -373,6 +388,138 @@ def _holdout_regression_rate(rounds: "list[dict]") -> dict:
     }
 
 
+# ── metric 9: selective_retest_savings (选择性重测节省) ─────────────────────────
+
+
+def _load_footprints(eval_dir: str) -> "dict[str, tuple[set, set]]":
+    """Union each task's per-attempt coverage footprint from one eval's
+    ``footprints.jsonl`` (written opt-in by the bridge under --collect-footprints).
+
+    Returns ``{task_id: (touched_node_ids, observed_edge_keys)}`` unioned across
+    attempts — a union is conservative (wider footprint → more retest → less
+    saving claimed).  ``{}`` when the file is absent (footprints not collected)
+    or unreadable; malformed lines are skipped, never raised on.
+    """
+    out: "dict[str, tuple[set, set]]" = {}
+    if not eval_dir:
+        return out
+    p = Path(eval_dir) / "footprints.jsonl"
+    if not p.is_file():
+        return out
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or not obj.get("task_id"):
+            continue
+        tid = obj["task_id"]
+        nodes = set(obj.get("touched_node_ids") or [])
+        edges = set(obj.get("observed_edge_keys") or [])
+        if tid in out:
+            n0, e0 = out[tid]
+            out[tid] = (n0 | nodes, e0 | edges)
+        else:
+            out[tid] = (nodes, edges)
+    return out
+
+
+def _selective_retest_savings(rounds: "list[dict]", gate_rows: "list[dict]") -> dict:
+    """Budget a selective retest would save vs. re-evaluating the whole bed.
+
+    THESIS graph-IR read-out.  For each GATED candidate: the danger set of its
+    edit (``danger_edge_set`` over ``operator.edits(parent_snapshot)``) is
+    intersected with every bed task's PARENT-baseline coverage footprint.  A task
+    whose footprint misses the danger set can inherit the parent's score, so the
+    per-candidate saving is ``1 − |retest| / |bed|`` — the fraction of the full
+    re-evaluation the intersection lets us skip.  The headline ``value`` is the
+    mean over every scored gated candidate; per-candidate detail rides alongside.
+
+    Both inputs are read-only artefacts the runner already produced: the parent
+    snapshot is re-derived from the round's ``parent_config`` on disk (same basis
+    as metric 3's re-hash), and the footprints from the round's
+    ``baseline_eval_dir/footprints.jsonl``.  This is the offline reading of the
+    same danger∩footprint call :class:`experiments.variant_pool.selective_retest.
+    SelectiveRetestEngine` makes live at eval time.
+
+    Honest ``null`` (never ``0.0``): no footprints collected anywhere, or none of
+    the gated candidates could be re-derived to edits.
+    """
+    gated_by_round: "dict[str, list[dict]]" = {}
+    for g in gate_rows:
+        if g.get("decision") == "GATED":
+            gated_by_round.setdefault(g.get("round_id", ""), []).append(g)
+
+    per_candidate: "list[dict]" = []
+    skipped: "list[dict]" = []
+    total_savings = 0.0
+    n_scored = 0
+    footprints_seen = 0
+
+    for r in rounds:
+        gated = gated_by_round.get(r.get("round_id", ""), [])
+        if not gated:
+            continue
+        footprints = _load_footprints(r.get("baseline_eval_dir", ""))
+        if not footprints:
+            continue
+        footprints_seen += 1
+        n_bed = len(footprints)
+        try:
+            parent_snap = to_graph(
+                HarnessConfig.from_yaml_file(Path(r.get("parent_config", ""))))
+        except Exception as exc:  # noqa: BLE001 — a bad parent config skips the round
+            skipped.append({"round_id": r.get("round_id", ""),
+                            "reason": f"parent snapshot: {type(exc).__name__}: {exc}"})
+            continue
+        for g in gated:
+            cand_id = g.get("candidate_id", "")
+            op, reason = parse_proposal({"operator": g.get("operator", ""),
+                                         "params": g.get("operator_params") or {}})
+            if op is None:
+                skipped.append({"candidate_id": cand_id, "reason": reason})
+                continue
+            try:
+                danger_nodes, danger_edges = danger_edge_set(
+                    op.edits(parent_snap), parent_snap)
+            except Exception as exc:  # noqa: BLE001 — inapplicable edit skips the candidate
+                skipped.append({"candidate_id": cand_id,
+                                "reason": f"danger set: {type(exc).__name__}: {exc}"})
+                continue
+            retest = sorted(
+                tid for tid, (fn, fe) in footprints.items()
+                if intersects_footprint(danger_nodes, danger_edges, fn, fe))
+            savings = 1.0 - (len(retest) / n_bed) if n_bed else 0.0
+            total_savings += savings
+            n_scored += 1
+            per_candidate.append({
+                "round_id": r.get("round_id", ""),
+                "candidate_id": cand_id,
+                "operator": g.get("operator", ""),
+                "bed_tasks": n_bed,
+                "retest_tasks": retest,
+                "savings": savings,
+            })
+
+    if footprints_seen == 0:
+        return {"value": None, "reason": SELECTIVE_NO_FOOTPRINTS_REASON}
+    if n_scored == 0:
+        return {"value": None, "reason": SELECTIVE_NO_SCORE_REASON, "skipped": skipped}
+    return {
+        "value": total_savings / n_scored,
+        "candidates_scored": n_scored,
+        "per_candidate": per_candidate,
+        "skipped": skipped,
+    }
+
+
 # ── top-level entry point ────────────────────────────────────────────────────
 
 
@@ -400,7 +547,7 @@ def compute_process_metrics(report_path: Path, ledger_path: Path) -> dict:
         "reward": _reward(rounds),                                 # 6 单位评测/千token增益
         "time_to_first_improvement": _time_to_first_improvement(rounds),  # 7 首个改进到达
         "holdout_regression_rate": _holdout_regression_rate(rounds),  # 8 留出集回归率
-        "selective_retest_savings": {"value": None, "reason": SELECTIVE_REASON},  # 9 选择性重测节省
+        "selective_retest_savings": _selective_retest_savings(rounds, gate_rows),  # 9 选择性重测节省
         "skipped_inputs": skipped,
     }
 
@@ -478,7 +625,15 @@ def render_text(metrics: dict) -> str:
                 out.append(f"     {a['round_id']}: regressed={a['regressed_tasks']}"
                            f" unlocked={a['unlocked_tasks']}")
     sr = metrics["selective_retest_savings"]
-    out.append(f"9. selective_retest_saving null  ({sr['reason']})")
+    if sr["value"] is None:
+        out.append(f"9. selective_retest_saving null  ({sr['reason']})")
+    else:
+        out.append(f"9. selective_retest_saving {_fmt(sr['value'])}"
+                   f"  [{sr['candidates_scored']} gated candidate(s) scored]")
+        for c in sr["per_candidate"]:
+            out.append(f"     {c['round_id']}/{c['candidate_id']} ({c['operator']}):"
+                       f" saving={_fmt(c['savings'])}"
+                       f" [{len(c['retest_tasks'])}/{c['bed_tasks']} retest]")
 
     out.append("")
     out.append(f"skipped_inputs: {len(metrics['skipped_inputs'])}")

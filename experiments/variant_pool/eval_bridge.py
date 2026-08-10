@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -50,6 +51,8 @@ from experiments.variant_pool.shadow_evolution import parse_proposal
 if TYPE_CHECKING:  # annotations only — never imported at runtime
     from experiments.variant_pool.shadow_evolution import CandidateRecord
     from harnessx.graph.types import GraphSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 # ── path safety ──────────────────────────────────────────────────────────────
@@ -340,6 +343,7 @@ class GaiaTaskBed:
         max_steps: int,
         concurrency: int = 2,
         out_dir: Path,
+        collect_footprints: bool = False,
     ) -> None:
         self._model = model
         self._meta_model = meta_model
@@ -351,6 +355,10 @@ class GaiaTaskBed:
         self._concurrency = concurrency
         self._out_dir = Path(out_dir)
         self._eval_seq = 0  # monotonic per-evaluate id → unique eval dir/journal
+        #: S5 opt-in: collect per-attempt coverage footprints to
+        #: ``eval_dir/footprints.jsonl`` (offline input to metric 9). Default off
+        #: — never changes evaluation behaviour or cost when unset.
+        self._collect_footprints = bool(collect_footprints)
 
     async def evaluate(
         self, config_path: Path, task_ids: "list[str] | None" = None
@@ -401,6 +409,26 @@ class GaiaTaskBed:
         # the config, so any template seeding still happens — into the fresh root.
         round_config = round_config.copy(workspace=workspace)
 
+        # S5 footprint collection (opt-in; default off, best-effort). The snapshot
+        # is re-derived from the on-disk config so its node-id namespace is
+        # IDENTICAL to the parent snapshot metric 9 rebuilds via
+        # ``to_graph(HarnessConfig.from_yaml_file(parent_config))`` — the two
+        # sides of the danger∩footprint intersection therefore share ids.
+        # Any failure here degrades to "no footprints" and never breaks eval.
+        footprint_snapshot: Any = None
+        footprint_records: "list[dict]" = []
+        footprint_lock = asyncio.Lock()
+        if self._collect_footprints:
+            try:
+                from harnessx.graph import to_graph
+
+                footprint_snapshot = to_graph(
+                    HarnessConfig.from_yaml_file(Path(config_path)))
+            except Exception as exc:  # noqa: BLE001 — observation must never break eval
+                logger.warning(
+                    "footprint snapshot failed for %s: %s", config_path, exc)
+                footprint_snapshot = None
+
         provider = _make_provider(self._model, self._provider_id)
         model_config = ModelConfig(main=provider)
         # Judge runs on --meta-model, mirroring run.py. With full ground truth,
@@ -421,15 +449,44 @@ class GaiaTaskBed:
 
         async def _one(task: Any) -> "tuple[str, dict]":
             async def _rollout(tk: Any, attempt_idx: int) -> dict:
-                return await _rollout_once(
+                if footprint_snapshot is None:
+                    return await _rollout_once(
+                        tk,
+                        attempt_idx,
+                        label="taskbed",
+                        model_config=model_config,
+                        round_config=round_config,
+                        pipeline_eval=pipeline_eval,
+                        max_cost=self._max_cost,
+                    )
+                # Per-attempt observer on a PRIVATE config copy: the trace lives
+                # on this instance, so concurrent attempts never cross-contaminate
+                # and each harness single-owner-claims its own observer. add_runtime_reg
+                # rebinds the copy's reg tuple, leaving round_config untouched.
+                from harnessx.graph.footprint import compute_footprint
+                from harnessx.graph.observer import ObservationProcessor
+
+                obs = ObservationProcessor(task_id=(tk.task_id or ""))
+                attempt_config = round_config.copy()
+                attempt_config.add_runtime_reg(obs)
+                record = await _rollout_once(
                     tk,
                     attempt_idx,
                     label="taskbed",
                     model_config=model_config,
-                    round_config=round_config,
+                    round_config=attempt_config,
                     pipeline_eval=pipeline_eval,
                     max_cost=self._max_cost,
                 )
+                try:
+                    fp = compute_footprint(obs.flush(), footprint_snapshot)
+                    row = {"attempt": attempt_idx, **fp.to_dict()}
+                    async with footprint_lock:
+                        footprint_records.append(row)
+                except Exception as exc:  # noqa: BLE001 — best-effort artefact
+                    logger.warning(
+                        "footprint capture failed for %s: %s", tk.task_id, exc)
+                return record
 
             async def _finalize(tk: Any, attempt_idx: int, record: dict) -> dict:
                 # Land each rollout's trajectory as the audit "first scene",
@@ -478,6 +535,19 @@ class GaiaTaskBed:
 
         # Persist the merged per-task records as this eval's audit ledger.
         _write_eval_records(eval_dir / "records.jsonl", (m for _, m in pairs))
+
+        # Persist collected footprints (opt-in) — one JSON line per (task,
+        # attempt), each a serialized CoverageFootprint. metric 9 reads these
+        # from the round's baseline eval_dir. Best-effort: a write failure warns
+        # but never fails the evaluation it merely instruments.
+        if self._collect_footprints and footprint_records:
+            try:
+                fp_path = eval_dir / "footprints.jsonl"
+                with fp_path.open("w", encoding="utf-8") as fh:
+                    for row in footprint_records:
+                        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            except OSError as exc:
+                logger.warning("footprint write failed: %s", exc)
 
         pass_rate, cost, tokens = _aggregate_per_task(per_task)
         return TaskBedResult(
