@@ -32,6 +32,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from experiments.variant_pool.envelope_gate import Envelope, judge_candidate
 from harnessx.graph.identity import deployment_hash, genotype_hash
 from harnessx.graph.operators import (
     InsertProcessor,
@@ -175,12 +176,19 @@ def run_shadow_round(
     round_id: str,
     evaluation_scope: "dict | None" = None,
     materialize: bool = True,
+    envelope: "Envelope | None" = None,
 ) -> RoundResult:
     """Run one shadow round: normalize → hard gate → ledger, nothing else.
 
     Proposals beyond ``MAX_CANDIDATES_PER_ROUND`` are explicitly REJECTED
     with a capacity reason (recorded, never silently dropped).  The parent
     snapshot is never mutated; no config is written anywhere.
+
+    ``envelope`` (#33) turns on the envelope-aware reachability gate: a
+    parameter edit whose EVERY changed param is provably dead in the experiment
+    envelope (old and new both unreachable ⇒ runtime no-op) is REJECTED before
+    the bed.  ``None`` (the default) leaves the gate byte-identical to its
+    pre-#33 behavior — the check simply never runs.
     """
     parent_geno = genotype_hash(parent_snapshot)
     # Parent's own dangling `_after_` references (soft deps the builder already
@@ -195,6 +203,18 @@ def run_shadow_round(
     parsed = 0
     gate_passed = 0
     seen_genotypes: set[str] = set()
+
+    def _parent_param(node_id: str, param: str) -> "Any | None":
+        """#33 old-value source: the parent node's stored ctor kwarg (``None``
+        when the node or param is absent — insufficient evidence ⇒ gate passes).
+        """
+        node = parent_snapshot.nodes.get(node_id)
+        if node is None:
+            return None
+        ck = node.metadata.get("_ctor_kwargs_")
+        if not isinstance(ck, dict):
+            return None
+        return ck.get(param)
 
     for i, raw in enumerate(proposals):
         candidate_id = f"{round_id}/c{i}"
@@ -299,6 +319,33 @@ def run_shadow_round(
                            + (f" | {rationale}" if rationale else "")),
             ))
             continue
+
+        # #33 envelope-aware reachability gate — the final gate check. Reject a
+        # candidate whose EVERY changed param is provably dead in the experiment
+        # envelope (old and new both unreachable ⇒ runtime no-op; measuring it
+        # banks only noise, as the v4 max_usd 40→50 lazy winner did). Only
+        # provably-dead edits are rejected — unknown processors/params, missing
+        # parent values, and any binding endpoint all pass (never raises).
+        if envelope is not None:
+            dead = judge_candidate(
+                op_name, dict(raw.get("params", {})), _parent_param, envelope)
+            if dead:
+                detail = "; ".join(dead)
+                records.append(CandidateRecord(
+                    **base, operator=op_name,
+                    operator_params=dict(raw.get("params", {})),
+                    boundary_signature=getattr(op, "replacement_signature", ""),
+                    decision="REJECT", decided_by="gate",
+                    validation_passed=False,
+                    validation_issues=[{
+                        "layer": "envelope", "error_type": "envelope_dead",
+                        "message": detail,
+                    }],
+                    validation_warnings=warns,
+                    rationale=(f"ENVELOPE_DEAD: {detail}"
+                               + (f" | {rationale}" if rationale else "")),
+                ))
+                continue
 
         gate_passed += 1
         g, d = genotype_hash(result), deployment_hash(result)

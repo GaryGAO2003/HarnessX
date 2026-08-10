@@ -54,6 +54,7 @@ from typing import Callable
 from harnessx.core.harness import HarnessConfig
 from harnessx.graph import GraphSnapshot, NodeType, to_graph
 
+from experiments.variant_pool.envelope_gate import Envelope
 from experiments.variant_pool.eval_bridge import (
     StubTaskBed,
     TaskBed,
@@ -221,6 +222,7 @@ async def run_rehearsal(
     holdout_bed: "TaskBed | None" = None,
     holdout_task_ids: "list[str] | None" = None,
     bed_policy: str = "all",
+    envelope: "Envelope | None" = None,
 ) -> RehearsalReport:
     """Run ``rounds`` shadow-evolution rounds and return the raw-facts report.
 
@@ -329,7 +331,8 @@ async def run_rehearsal(
 
         # (4) hard gate — only GATED survivors are materialized/evaluated.
         round_result = run_shadow_round(
-            snapshot, proposals, ledger, round_id=round_id, materialize=True
+            snapshot, proposals, ledger, round_id=round_id, materialize=True,
+            envelope=envelope,
         )
         gated = round_result.gated_records
         rr.n_gated = len(gated)
@@ -506,6 +509,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provider-id", default=None)
     p.add_argument("--max-cost", type=float, default=0.5)
     p.add_argument("--max-steps", type=int, default=20)
+    # #33 envelope-aware reachability gate. ON by default — an INTENTIONAL
+    # default-behavior change (user decision #33): the gate now statically
+    # rejects candidates whose every changed param is provably dead in the
+    # (max_cost, max_steps) envelope, before any bed spend. Passing this flag
+    # feeds a None envelope, disabling the check (reserved for the paper's
+    # ablation arm) and restoring the byte-identical pre-#33 gate.
+    p.add_argument("--no-envelope-gate", action="store_true",
+                   help="disable the #33 envelope-aware reachability gate "
+                        "(ablation arm; default = gate ON)")
     p.add_argument("--pass-k", type=int, default=1)
     # GAIA task-bed eval concurrency (the bed's internal Semaphore). Default 2 =
     # the value the bed used implicitly before this was wired; exposed so a long
@@ -628,6 +640,12 @@ def main(argv: "list[str] | None" = None) -> int:
         else:
             proposer = None
 
+    # #33: the reachability gate runs inside the SAME (max_cost, max_steps)
+    # envelope the task bed enforces per attempt. --no-envelope-gate feeds None,
+    # turning the check off (ablation arm).
+    envelope = (None if args.no_envelope_gate
+                else Envelope(max_cost_usd=args.max_cost, max_steps=args.max_steps))
+
     report = asyncio.run(run_rehearsal(
         Path(args.parent),
         rounds=args.rounds,
@@ -641,6 +659,7 @@ def main(argv: "list[str] | None" = None) -> int:
         task_ids=args.task_ids,
         holdout_bed=holdout_bed,
         bed_policy=args.bed_policy,
+        envelope=envelope,
     ))
 
     print(json.dumps({
