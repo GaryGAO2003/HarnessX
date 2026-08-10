@@ -418,7 +418,9 @@ def main(argv: "list[str] | None" = None) -> int:
             out_dir=out_dir / "taskbed",
         )
         if args.mode == "b":
-            llm_call = _make_sync_llm_call(args.model, args.provider_id)
+            # arm discipline: the proposer runs on the META model (same tier
+            # and budget as the A arm's evolver), never the task model.
+            llm_call = _make_sync_llm_call(args.meta_model, args.provider_id)
 
             def proposer(snapshot: GraphSnapshot) -> ExtractionResult:
                 return llm_propose(
