@@ -7,6 +7,8 @@ call.  Same directory / style as ``tests/graph/test_eval_bridge.py``.
 """
 
 import asyncio
+import json
+import logging
 
 import pytest
 
@@ -282,6 +284,74 @@ def test_cli_dry_run_r_mode(tmp_path):
     report = json.loads((out / "report.json").read_text(encoding="utf-8"))
     assert report["mode"] == "r"
     assert len(report["round_reports"]) == 1
+
+
+# ── SERPER_API_KEY blind-spot guard (search stack parity) ────────────────────
+
+_ARM_PARITY_FRAGMENT = "arm parity at risk"
+
+
+def test_warn_if_no_serper_key_warns_and_returns_false(monkeypatch, caplog):
+    from experiments.variant_pool.rehearsal import _warn_if_no_serper_key
+
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    with caplog.at_level(
+        logging.WARNING, logger="experiments.variant_pool.rehearsal"
+    ):
+        present = _warn_if_no_serper_key()
+
+    assert present is False
+    hits = [r for r in caplog.records if _ARM_PARITY_FRAGMENT in r.getMessage()]
+    assert len(hits) == 1
+    assert hits[0].levelno == logging.WARNING
+
+
+def test_warn_if_no_serper_key_silent_when_present(monkeypatch, caplog):
+    from experiments.variant_pool.rehearsal import _warn_if_no_serper_key
+
+    monkeypatch.setenv("SERPER_API_KEY", "test-key")
+    with caplog.at_level(
+        logging.WARNING, logger="experiments.variant_pool.rehearsal"
+    ):
+        present = _warn_if_no_serper_key()
+
+    assert present is True
+    assert [r for r in caplog.records if _ARM_PARITY_FRAGMENT in r.getMessage()] == []
+
+
+def test_cli_dry_run_records_serper_key_and_never_warns(
+    tmp_path, monkeypatch, capsys, caplog
+):
+    """--dry-run needs no key: the summary records serper_key_present for BOTH
+    env states, and neither run emits the arm-parity warning (dry-run never
+    reaches the real-eval guard)."""
+    from experiments.variant_pool.rehearsal import main
+
+    parent = _write_parent(tmp_path)
+
+    def _run_dry(out_name):
+        with caplog.at_level(
+            logging.WARNING, logger="experiments.variant_pool.rehearsal"
+        ):
+            rc = main(["--parent", str(parent), "--rounds", "1", "--mode", "r",
+                       "--dry-run", "--seed", "3",
+                       "--out-dir", str(tmp_path / out_name)])
+        assert rc == 0
+        return json.loads(capsys.readouterr().out)
+
+    # key absent -> flag False, no warning
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    caplog.clear()
+    summary = _run_dry("o1")
+    assert summary["serper_key_present"] is False
+    assert [r for r in caplog.records if _ARM_PARITY_FRAGMENT in r.getMessage()] == []
+
+    # key present -> flag True, still no warning under --dry-run
+    monkeypatch.setenv("SERPER_API_KEY", "test-key")
+    caplog.clear()
+    summary = _run_dry("o2")
+    assert summary["serper_key_present"] is True
+    assert [r for r in caplog.records if _ARM_PARITY_FRAGMENT in r.getMessage()] == []
 
 
 # ── parent normalization: lineage starts at the genotype fixed point ─────────

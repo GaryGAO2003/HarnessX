@@ -112,6 +112,29 @@ async def _search_serper(query: str, max_results: int, api_key: str) -> list[dic
     return results
 
 
+#: Set once the missing-key warning has fired, so the silent fall-through to the
+#: built-in scrape chain is flagged exactly ONCE per process instead of on every
+#: search. Without this, a run with no ``SERPER_API_KEY`` uses Serper for nothing
+#: and leaves no trace at all — the blind spot this guards.
+_warned_no_key = False
+
+
+def _warn_missing_key_once() -> None:
+    """Warn (once per process) that ``SERPER_API_KEY`` is unset, so ``WebSearch``
+    silently runs on the built-in scrape chain and Serper is never used.
+
+    Behaviour is unchanged — the caller still falls back — this only leaves the
+    one log line that the silent path was previously missing.
+    """
+    global _warned_no_key
+    if not _warned_no_key:
+        _warned_no_key = True
+        logger.warning(
+            "SERPER_API_KEY not set: WebSearch runs on the built-in scrape "
+            "chain (Serper never used)"
+        )
+
+
 async def _serper_web_search(query: str, max_results: int = 5) -> str:
     """Serper-first ``WebSearch``. Falls back to the built-in fallback chain.
 
@@ -133,6 +156,9 @@ async def _serper_web_search(query: str, max_results: int = 5) -> str:
                 return _format_results(results)
         except Exception as e:  # noqa: BLE001 - any Serper failure falls back
             logger.warning("Serper search failed: %s (falling back to built-in chain)", e)
+    else:
+        # No key at all: the fall-through below is otherwise completely silent.
+        _warn_missing_key_once()
 
     # No key / empty / error -> the built-in WebSearch fallback chain runs with
     # its own circuit breaker + provider ladder, unchanged.

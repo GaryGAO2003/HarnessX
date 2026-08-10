@@ -44,6 +44,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -64,6 +66,8 @@ from experiments.variant_pool.shadow_evolution import (
     record_evaluation,
     run_shadow_round,
 )
+
+logger = logging.getLogger(__name__)
 
 #: A proposer is any ``snapshot -> ExtractionResult`` — the LLM transport and
 #: ``max_candidates`` are bound by the caller (CLI / test), so the runner stays
@@ -402,6 +406,31 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _serper_key_present() -> bool:
+    """Whether ``SERPER_API_KEY`` is set. Recorded in the run summary so a run
+    that silently degraded to the built-in scrape chain is auditable afterwards.
+    """
+    return bool(os.environ.get("SERPER_API_KEY"))
+
+
+def _warn_if_no_serper_key() -> bool:
+    """Warn — without blocking — when a real evaluation is about to run with no
+    ``SERPER_API_KEY``. WebSearch then silently degrades to the built-in scrape
+    chain, so the A/B arms no longer share a search stack (arm parity breaks).
+
+    Running a no-key control on purpose is legal, but it must leave a trace; this
+    is the CLI-side mirror of the once-per-process guard in ``serper_search``.
+    Returns key presence so the caller need not re-read the environment.
+    """
+    present = _serper_key_present()
+    if not present:
+        logger.warning(
+            "real evaluation without SERPER_API_KEY: search will silently "
+            "degrade to the scrape chain; arm parity at risk"
+        )
+    return present
+
+
 def main(argv: "list[str] | None" = None) -> int:
     args = _build_parser().parse_args(argv)
     out_dir = Path(args.out_dir)
@@ -429,6 +458,9 @@ def main(argv: "list[str] | None" = None) -> int:
                 "--model, --meta-model and --provider-id are required "
                 "unless --dry-run is set"
             )
+        # A real run with no key silently degrades to the scrape chain and
+        # breaks arm parity — warn, but do not block (no-key controls are legal).
+        _warn_if_no_serper_key()
         from experiments.variant_pool.eval_bridge import GaiaTaskBed
 
         task_bed = GaiaTaskBed(
@@ -471,6 +503,7 @@ def main(argv: "list[str] | None" = None) -> int:
     print(json.dumps({
         "mode": report.mode,
         "rounds": report.rounds,
+        "serper_key_present": _serper_key_present(),
         "final_parent_config": report.final_parent_config,
         "rounds_report": [
             {"round_id": rr.round_id, "parse_ok": rr.parse_ok,
