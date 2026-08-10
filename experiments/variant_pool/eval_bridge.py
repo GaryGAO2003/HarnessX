@@ -66,16 +66,25 @@ def _fs_safe(name: str) -> str:
 # ── materialization: GATED record → runnable config.yaml ─────────────────────
 
 
+#: Base-config keys that never graft: ``processors`` is the graph's own layer;
+#: ``tracer`` is RUN infrastructure, not arm-invariant behavior — inheriting
+#: the parent's journal spec makes every evaluation share one session, so
+#: ``cumulative_cost_usd``/``cumulative_tokens`` accumulate ACROSS evaluate()
+#: calls (observed live: candidate costs formed an arithmetic progression).
+_NO_GRAFT_KEYS = frozenset({"processors", "tracer"})
+
+
 def graft_base_fields(config_dict: dict, base_config: "Path | dict | None") -> dict:
     """Carry every NON-graph top-level field over from *base_config*.
 
     The graph IR owns exactly the composition layer (``processors``); a real
-    run config also carries ``tool_registry`` / ``workspace`` / ``tracer`` /
-    sandbox fields the graph never sees.  Evolution edits only the composition
-    layer, so those fields are arm-invariant and must pass through unchanged —
-    a materialized candidate without them runs TOOLLESS and fails every task
+    run config also carries ``tool_registry`` / ``workspace`` / sandbox fields
+    the graph never sees.  Evolution edits only the composition layer, so
+    those fields are arm-invariant and must pass through unchanged — a
+    materialized candidate without them runs TOOLLESS and fails every task
     at step 2 (observed live on the first paid smoke).  Grafting is
     genotype-neutral: none of these keys enter the graph or its hashes.
+    ``tracer`` deliberately does NOT graft (see ``_NO_GRAFT_KEYS``).
     """
     if base_config is None:
         return config_dict
@@ -85,7 +94,8 @@ def graft_base_fields(config_dict: dict, base_config: "Path | dict | None") -> d
         base = yaml.safe_load(Path(base_config).read_text(encoding="utf-8")) or {}
     else:
         base = dict(base_config)
-    return {**{k: v for k, v in base.items() if k != "processors"}, **config_dict}
+    return {**{k: v for k, v in base.items() if k not in _NO_GRAFT_KEYS},
+            **config_dict}
 
 
 def materialize_candidate(

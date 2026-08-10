@@ -240,3 +240,18 @@ def test_materialize_grafts_base_config_fields(tmp_path):
     out2 = graft_base_fields(projected, base_path)
     assert out2["tool_registry"] == {"builtin": ["Read"]}
     assert graft_base_fields(projected, None) == projected
+
+
+def test_graft_excludes_tracer(tmp_path):
+    """tracer is run infrastructure, never grafted - a shared journal session
+    accumulates cost across evaluate() calls (observed live: candidate costs
+    formed an arithmetic progression)."""
+    from experiments.variant_pool.eval_bridge import graft_base_fields
+
+    base = {"tool_registry": {"builtin": ["Read"]},
+            "tracer": {"_target_": "harnessx.tracing.journal.HarnessJournal",
+                       "base_dir": "old_runs/session"},
+            "processors": []}
+    out = graft_base_fields({"processors": [{"_target_": "x.P"}]}, base)
+    assert "tracer" not in out
+    assert out["tool_registry"] == {"builtin": ["Read"]}
