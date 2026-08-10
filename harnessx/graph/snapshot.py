@@ -203,35 +203,81 @@ def _extract_declaration(proc_dict: dict, target: str) -> "ComponentDecl":
     )
 
 
-def _warn_wkd_drift(proc_dict: dict, target: str, wkd) -> None:
-    """Warn when dict metadata contradicts WELL_KNOWN_DECLARATIONS (约束 #6).
+# Per-process dedup: (target, frozenset(reported keys)) already logged once.
+# WKD↔class consistency is a static property, so re-reporting the same target
+# with the same key set on every to_graph() call is pure noise — one line per
+# distinct diagnosis for the life of the process.  Tests clear this to isolate.
+_WKD_DRIFT_SEEN: set = set()
 
-    Builder-serialized values are class ground truth at build time; a mismatch
-    usually means the class changed and the WKD table was not updated — stale
-    WKD silently diverges the L4.6/L5.6 chain order from the runtime execution
-    order (I7).  Explicit registration overrides also trip this: it is a
-    diagnostic warning, not an error.  ``_hook_`` is skipped — the builder
-    writes it precisely on registration overrides, which are legitimate.
+
+def _warn_wkd_drift(proc_dict: dict, target: str, wkd) -> None:
+    """Diagnose dict metadata vs WELL_KNOWN_DECLARATIONS (约束 #6).
+
+    Two distinct, separately-worded diagnoses — a serialized key can either
+    *contradict* the WKD or be *absent* from the dict, and only the first is a
+    real drift signal:
+
+    - **value drift** (key present, value ≠ WKD) → WARNING.  Builder-serialized
+      values are class ground truth at build time, so a live mismatch usually
+      means the class changed and the WKD table was not updated; stale WKD
+      silently diverges the L4.6/L5.6 chain order from the runtime execution
+      order (I7).  Explicit registration overrides also land here.
+
+    - **legacy absence** (key missing) → INFO.  Pre-v5.3 configs serialized only
+      ``_target_`` / ``_hook_``; the v5.3 builder now writes the full metadata
+      block (``builder.py`` L2.1, "key presence == declared").  A missing key is
+      therefore an old on-disk shape, *not* a class↔WKD mismatch — that
+      consistency is enforced separately (test_declaration_l3), so absence is the
+      norm for historical corpora and must never spam WARNING.
+
+    ``_hook_`` is never inspected — the builder writes it precisely on
+    registration overrides, which are legitimate.  Both diagnoses dedup per
+    process on ``(target, frozenset(keys))`` (their key sets are disjoint, so a
+    warning never masks an info for the same target).
     """
-    drifted: list[str] = []
-    if "_hooks_" in proc_dict and isinstance(proc_dict["_hooks_"], (list, tuple)) \
+    value_drift: list[str] = []
+    legacy_missing: list[str] = []
+
+    if "_hooks_" not in proc_dict:
+        legacy_missing.append("_hooks_")
+    elif isinstance(proc_dict["_hooks_"], (list, tuple)) \
             and tuple(proc_dict["_hooks_"]) != wkd.hooks:
-        drifted.append("_hooks_")
-    if "_order_" in proc_dict:
+        value_drift.append("_hooks_")
+
+    if "_order_" not in proc_dict:
+        legacy_missing.append("_order_")
+    else:
         try:
             if int(proc_dict["_order_"]) != wkd.order:
-                drifted.append("_order_")
+                value_drift.append("_order_")
         except (TypeError, ValueError):
             pass
-    if "_singleton_group_" in proc_dict and isinstance(proc_dict["_singleton_group_"], str) \
+
+    if "_singleton_group_" not in proc_dict:
+        legacy_missing.append("_singleton_group_")
+    elif isinstance(proc_dict["_singleton_group_"], str) \
             and proc_dict["_singleton_group_"] != wkd.singleton_group:
-        drifted.append("_singleton_group_")
-    if drifted:
-        _log.warning(
-            "WKD drift for %s: dict keys %s differ from WELL_KNOWN_DECLARATIONS "
-            "(class metadata may have changed without a WKD update)",
-            target, drifted,
-        )
+        value_drift.append("_singleton_group_")
+
+    if value_drift:
+        key = (target, frozenset(value_drift))
+        if key not in _WKD_DRIFT_SEEN:
+            _WKD_DRIFT_SEEN.add(key)
+            _log.warning(
+                "WKD drift for %s: dict keys %s differ from WELL_KNOWN_DECLARATIONS "
+                "(class metadata may have changed without a WKD update)",
+                target, value_drift,
+            )
+    if legacy_missing:
+        key = (target, frozenset(legacy_missing))
+        if key not in _WKD_DRIFT_SEEN:
+            _WKD_DRIFT_SEEN.add(key)
+            _log.info(
+                "WKD note for %s: dict keys %s absent - serialized dict predates "
+                "v5.3 metadata (legacy config); class<->WKD consistency is enforced "
+                "separately",
+                target, legacy_missing,
+            )
 
 
 # ── runtime overlay (L5.1 / L5.1b / L5.3) ────────────────────────────────────

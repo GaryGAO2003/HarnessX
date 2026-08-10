@@ -11,11 +11,20 @@ from unittest.mock import patch
 import pytest
 
 from harnessx.core.harness import HarnessConfig
-from harnessx.graph.snapshot import _extract_declaration, to_graph
+from harnessx.graph.snapshot import _WKD_DRIFT_SEEN, _extract_declaration, to_graph
 from harnessx.graph.types import EdgeType, NodeType
 
 CG = "harnessx.processors.control.cost_guard.CostGuardProcessor"
 MR = "harnessx.processors.multi_model.model_router.ModelRouterProcessor"
+
+
+@pytest.fixture(autouse=True)
+def _reset_wkd_drift_dedup():
+    """The WKD-drift dedup set is per-process; clear it so each test's
+    warning/info assertions see a clean slate regardless of run order."""
+    _WKD_DRIFT_SEEN.clear()
+    yield
+    _WKD_DRIFT_SEEN.clear()
 
 
 def _cfg(procs):
@@ -216,6 +225,7 @@ def test_extract_malformed_values_degrade_safely():
 
 
 def test_wkd_drift_warns():
+    # _order_ present but ≠ WKD → real value drift → WARNING (retained).
     with patch("harnessx.graph.snapshot._log.warning") as mock_warn:
         to_graph(_cfg([{"_target_": CG, "_order_": 999}]))
     assert mock_warn.call_count == 1
@@ -227,3 +237,46 @@ def test_wkd_matching_values_no_warning():
         to_graph(_cfg([{"_target_": CG, "_order_": 10,
                         "_singleton_group_": "cost_guard"}]))
     mock_warn.assert_not_called()
+
+
+def test_wkd_drift_deduped_across_calls():
+    # Same (target, key set) across two to_graph() calls → a single WARNING.
+    cfg = _cfg([{"_target_": CG, "_order_": 999}])
+    with patch("harnessx.graph.snapshot._log.warning") as mock_warn:
+        to_graph(cfg)
+        to_graph(cfg)
+    assert mock_warn.call_count == 1
+
+
+def test_wkd_legacy_absent_keys_are_info_not_warning():
+    # Pre-v5.3 shape: _hooks_/_order_/_singleton_group_ all absent → INFO only,
+    # never WARNING, with the legacy-config wording.
+    with patch("harnessx.graph.snapshot._log.warning") as mock_warn, \
+            patch("harnessx.graph.snapshot._log.info") as mock_info:
+        to_graph(_cfg([{"_target_": CG, "_hook_": "*"}]))
+    mock_warn.assert_not_called()
+    assert mock_info.call_count == 1
+    msg = str(mock_info.call_args)
+    assert "predates" in msg and "legacy config" in msg
+    for k in ("_hooks_", "_order_", "_singleton_group_"):
+        assert k in msg
+
+
+def test_wkd_legacy_info_also_deduped_across_calls():
+    cfg = _cfg([{"_target_": CG, "_hook_": "*"}])
+    with patch("harnessx.graph.snapshot._log.info") as mock_info:
+        to_graph(cfg)
+        to_graph(cfg)
+    assert mock_info.call_count == 1
+
+
+def test_wkd_mixed_drift_and_absence_split_by_level():
+    # _order_ present-and-wrong (drift → WARNING); _hooks_/_singleton_group_
+    # absent (legacy → INFO).  Disjoint key sets → both fire, one each.
+    with patch("harnessx.graph.snapshot._log.warning") as mock_warn, \
+            patch("harnessx.graph.snapshot._log.info") as mock_info:
+        to_graph(_cfg([{"_target_": CG, "_order_": 999}]))
+    assert mock_warn.call_count == 1
+    assert "_order_" in str(mock_warn.call_args)
+    assert mock_info.call_count == 1
+    assert "_hooks_" in str(mock_info.call_args)
