@@ -128,11 +128,25 @@ def test_measured_from_result_is_all_numeric():
         pass_rate=0.5, total_cost_usd=0.05, total_tokens=3500,
     )
     measured = measured_from_result(result)
-    assert measured == {"pass_rate": 0.5, "n_tasks": 2,
-                        "cost_usd": 0.05, "tokens": 3500}
+    assert measured == {"pass_rate": 0.5, "n_tasks": 2, "cost_usd": 0.05,
+                        "tokens": 3500, "truncation_rate": 0.0}
     # every value clears the record_evaluation numeric gate (non-bool number)
     assert all(isinstance(v, (int, float)) and not isinstance(v, bool)
                for v in measured.values())
+
+
+def test_measured_from_result_scores_truncation_rate():
+    # exit_reason=="budget_exceeded" records over the total → the fragility signal
+    result = TaskBedResult(
+        per_task={
+            "t1": {"passed": True, "exit_reason": "done"},
+            "t2": {"passed": False, "exit_reason": "budget_exceeded"},
+            "t3": {"passed": False, "exit_reason": "budget_exceeded"},
+            "t4": {"passed": False, "exit_reason": "loop_detected"},
+        },
+        pass_rate=0.25,
+    )
+    assert measured_from_result(result)["truncation_rate"] == pytest.approx(0.5)
 
 
 def test_measured_from_result_flags_infra_failure():

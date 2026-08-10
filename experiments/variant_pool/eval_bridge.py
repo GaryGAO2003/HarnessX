@@ -531,6 +531,8 @@ class GaiaTaskBed:
                 "n_att": int(merged.get("n_att") or 0),
                 "cost_usd": float(merged.get("cost_usd") or 0.0),
                 "tokens": int(merged.get("total_tokens") or 0),
+                # carried so measured_from_result can score fragility (truncation)
+                "exit_reason": str(merged.get("exit_reason") or ""),
             }
 
         # Persist the merged per-task records as this eval's audit ledger.
@@ -571,11 +573,18 @@ def measured_from_result(result: TaskBedResult) -> dict:
     contributes an explicit ``1`` flag so a load-failed evaluation is still a
     valid (all-zero) numeric record the runner can reject on.
     """
+    n = len(result.per_task)
+    truncated = sum(1 for r in result.per_task.values()
+                    if r.get("exit_reason") == "budget_exceeded")
     measured = {
         "pass_rate": float(result.pass_rate),
-        "n_tasks": int(len(result.per_task)),
+        "n_tasks": int(n),
         "cost_usd": float(result.total_cost_usd),
         "tokens": int(result.total_tokens),
+        # fraction of records that ran out of budget — the fragility signal the
+        # rehearsal settlement vetoes on (a candidate must not truncate more than
+        # its parent baseline).
+        "truncation_rate": (truncated / n) if n else 0.0,
     }
     if result.infra_failed:
         measured["infra_failed"] = 1

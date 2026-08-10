@@ -339,9 +339,27 @@ async def run_rehearsal(
             ))
         rr.n_evaluated = len(outcomes)
 
-        # (6) K=1 Global selection. infra_failed candidates can never win; the
-        # single best challenger promotes iff it strictly beats parent+min_delta.
-        eligible = [o for o in outcomes if not o.infra_failed]
+        # (6) K=1 Global selection with a fragility gate. Two eligibility
+        # conditions: a challenger must not have failed infra, AND it must not
+        # truncate (exit_reason budget_exceeded) more than the parent's same-round
+        # baseline — trading pass_rate for a higher run-out rate is more fragile,
+        # not better. The veto is an eligibility FILTER, not a demotion of the
+        # argmax: the best ELIGIBLE challenger promotes iff it strictly beats
+        # parent+min_delta, so a vetoed top scorer lets a lower-scoring eligible
+        # one win, and if none are eligible the parent survives unchanged.
+        parent_trunc = float(rr.baseline_measured.get("truncation_rate", 0.0))
+        vetoed: "dict[str, str]" = {}
+        eligible: "list[CandidateOutcome]" = []
+        for o in outcomes:
+            if o.infra_failed:
+                continue
+            cand_trunc = float(o.measured.get("truncation_rate", 0.0))
+            if cand_trunc > parent_trunc:
+                vetoed[o.candidate_id] = (
+                    f"FRAGILITY_VETO: truncation_rate {cand_trunc:.3f} > parent "
+                    f"baseline {parent_trunc:.3f}")
+                continue
+            eligible.append(o)
         winner_o: "CandidateOutcome | None" = None
         if eligible:
             best = max(eligible, key=lambda o: o.pass_rate)
@@ -351,7 +369,8 @@ async def run_rehearsal(
         for o in outcomes:
             decision = "APPLY" if o is winner_o else "REJECT"
             record_evaluation(
-                ledger, o.candidate_id, decision=decision, measured=o.measured
+                ledger, o.candidate_id, decision=decision, measured=o.measured,
+                rationale=vetoed.get(o.candidate_id, ""),
             )
             o.decision = decision
             rr.candidates.append(o)

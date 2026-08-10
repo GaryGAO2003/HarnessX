@@ -168,6 +168,87 @@ def test_no_winner_keeps_parent(tmp_path):
     assert decisions == {"REJECT"}
 
 
+# ── fragility veto (block 2): a fragile top scorer cannot promote ────────────
+
+
+class _FragilityBed:
+    """Parent baseline is clean (no truncation); candidate c0 is the top scorer
+    but may truncate (exit_reason budget_exceeded), candidate c1 scores lower.
+    Keyed on the candidate-id path segment the runner writes (``.../c0/...``)."""
+
+    def __init__(self, *, c0_trunc, c1_trunc):
+        self._c0_trunc = c0_trunc
+        self._c1_trunc = c1_trunc
+
+    @staticmethod
+    def _bed(pass_rate, truncated):
+        er = "budget_exceeded" if truncated else "done"
+        return TaskBedResult(
+            per_task={"t1": {"passed": True, "exit_reason": er},
+                      "t2": {"passed": False, "exit_reason": er}},
+            pass_rate=pass_rate)
+
+    async def evaluate(self, config_path, task_ids=None):
+        p = str(config_path).replace("\\", "/")
+        if "/rounds/" not in p:
+            return self._bed(0.5, truncated=False)          # parent: clean
+        # key on the candidate segment ONLY (the tmp_path prefix can itself
+        # contain "c0" via pytest's dir-name truncation, so never match on it)
+        seg = p.split("/rounds/", 1)[-1]
+        if "c0" in seg:
+            return self._bed(0.9, truncated=self._c0_trunc)  # top scorer
+        return self._bed(0.7, truncated=self._c1_trunc)      # runner-up
+
+
+def _two_reorders(snapshot):
+    return ExtractionResult(proposals=[
+        {"operator": "rewire_ordering",
+         "params": {"node_id": "proc:runtime_probe", "order": 20},
+         "rationale": "c0"},
+        {"operator": "rewire_ordering",
+         "params": {"node_id": "proc:runtime_probe", "order": 30},
+         "rationale": "c1"},
+    ], error="")
+
+
+def test_fragility_veto_promotes_clean_runner_up(tmp_path):
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    # c0 has the highest pass_rate (0.9) but truncates; the clean c1 (0.7) wins.
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=_FragilityBed(c0_trunc=True, c1_trunc=False),
+        proposer=_two_reorders, ledger=ledger, out_dir=tmp_path / "out"))
+
+    rr = report.round_reports[0]
+    applied = [c for c in rr.candidates if c.decision == "APPLY"]
+    assert len(applied) == 1
+    assert applied[0].measured["pass_rate"] == pytest.approx(0.7)   # runner-up
+    # the fragile top scorer is REJECTed with a FRAGILITY_VETO rationale naming
+    # both truncation rates
+    veto = [r for r in ledger.records()
+            if r.record_kind == "evaluation" and "FRAGILITY_VETO" in r.rationale]
+    assert len(veto) == 1
+    assert veto[0].measured["pass_rate"] == pytest.approx(0.9)
+    assert veto[0].measured["truncation_rate"] == pytest.approx(1.0)
+    assert "1.000" in veto[0].rationale and "0.000" in veto[0].rationale
+
+
+def test_fragility_veto_all_fragile_no_winner(tmp_path):
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    # both candidates truncate above the clean parent baseline → none eligible
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=_FragilityBed(c0_trunc=True, c1_trunc=True),
+        proposer=_two_reorders, ledger=ledger, out_dir=tmp_path / "out"))
+
+    rr = report.round_reports[0]
+    assert rr.winner == ""
+    assert rr.candidates and all(c.decision == "REJECT" for c in rr.candidates)
+    decisions = {r.decision for r in ledger.records()
+                 if r.record_kind == "evaluation"}
+    assert decisions == {"REJECT"}
+
+
 # ── parse failure does not abort the run ─────────────────────────────────────
 
 
