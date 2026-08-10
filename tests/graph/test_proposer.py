@@ -221,3 +221,24 @@ def test_llm_propose_operator_instance_parses_from_extracted():
     op = RewireOrdering(**res.proposals[0]["params"])
     assert op.order == 7
     assert op.node_id == PROBE_NODE_ID
+
+
+def test_prompt_includes_tunable_ctor_params():
+    """mutate proposals must be groundable: the prompt lists each node's ctor
+    kwargs with (truncated) current values - the live smoke's only proposal
+    died at S0 with empty param_changes because the model had nothing to
+    ground on."""
+    from harnessx.core.harness import HarnessConfig
+    from harnessx.graph.snapshot import to_graph
+
+    snap = to_graph(HarnessConfig(processors=[{
+        "_target_": "harnessx.processors.control.cost_guard.CostGuardProcessor",
+        "_hook_": "before_model",
+        "max_usd": 42.5,
+        "long_note": "x" * 200,
+    }]))
+    prompt = build_proposer_prompt(snap)
+    assert "Tunable constructor params" in prompt
+    assert "max_usd" in prompt and "42.5" in prompt
+    assert "x" * 81 not in prompt          # long values truncated
+    assert "param_changes MUST be non-empty" in prompt

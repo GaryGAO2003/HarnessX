@@ -167,6 +167,22 @@ def build_proposer_prompt(
         graph_bom(snapshot), ensure_ascii=False, separators=(",", ":")
     )
 
+    # Tunable ctor params per processor node — without this the model cannot
+    # ground mutate_processor_params and emits empty param_changes (observed
+    # live: the only smoke proposal died at S0 "param_changes is empty").
+    # Long values (prompt strings…) are truncated: the model needs the key
+    # and the value's shape, not the full text.
+    def _short(v: Any) -> Any:
+        s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
+        return (s[:80] + "…") if len(s) > 80 else v
+
+    tunable = {}
+    for nid in sorted(snapshot.nodes):
+        kwargs = snapshot.nodes[nid].metadata.get("_ctor_kwargs_") or {}
+        if isinstance(kwargs, dict) and kwargs:
+            tunable[nid] = {k: _short(v) for k, v in sorted(kwargs.items())}
+    tunable_json = json.dumps(tunable, ensure_ascii=False, separators=(",", ":"))
+
     vocab = operator_vocabulary()
     op_lines = []
     for entry in vocab:
@@ -186,6 +202,8 @@ def build_proposer_prompt(
         "operator specifications.\n\n"
         "## Parent graph (bill of materials)\n"
         f"{bom_json}\n\n"
+        "## Tunable constructor params per processor node (current values)\n"
+        f"{tunable_json}\n\n"
         "## Operator vocabulary (the ONLY admissible proposals)\n"
         f"{op_block}\n\n"
         "## Output contract (hard requirements)\n"
@@ -193,7 +211,9 @@ def build_proposer_prompt(
         f"Each object has EXACTLY these keys: {allowed}.\n"
         "  - \"operator\": one operator name from the vocabulary above.\n"
         "  - \"params\": an object matching that operator's params schema; every "
-        "node id MUST be an id that appears in the BOM above.\n"
+        "node id MUST be an id that appears in the BOM above. For "
+        "mutate_processor_params, param_changes MUST be non-empty and only use "
+        "keys listed for that node in the tunable-params section.\n"
         "  - \"rationale\": one short sentence that MUST reference at least one "
         "node id present in the BOM above.\n"
         f"Never emit the keys {{{forbidden}}}, and never emit Python / YAML / "
