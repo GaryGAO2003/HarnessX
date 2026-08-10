@@ -19,6 +19,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 
+from .declaration import WELL_KNOWN_DECLARATIONS
 from .edit import GraphEdit, GraphEditType
 from .types import GraphSnapshot, NodeType
 from .validate import ValidationIssue, ValidationReport, transactional_apply
@@ -37,6 +38,48 @@ def _persistent_processor(snapshot: GraphSnapshot, node_id: str, op: str):
         raise OperatorError(f"{op}: node {node_id!r} is {node.node_type.value}, "
                             "not a processor")
     return node
+
+
+def _effective_order(node) -> int:
+    """A processor's effective ``_order_`` under the SAME chain the graph sorts by.
+
+    Fallback chain mirrors ``snapshot._order_parse`` (L4.6): explicit dict
+    ``_order_`` → the well-known default for its ``_target_`` (never the 50
+    "unknown" sentinel) → 0.  Keeping this identical to the sorter is what lets
+    order-arithmetic below provably reproduce a claimed ``after`` in the
+    EXECUTES_BEFORE chain.
+    """
+    meta = node.metadata
+    if "_order_" in meta:
+        try:
+            return int(meta["_order_"])
+        except (TypeError, ValueError):
+            pass
+    target = meta.get("_target_")
+    if isinstance(target, str):
+        wkd = WELL_KNOWN_DECLARATIONS.get(target)
+        if wkd is not None and wkd.order != 50:
+            return wkd.order
+    return 0
+
+
+def _known_singleton_groups(snapshot: GraphSnapshot) -> "dict[str, str]":
+    """Map each *explicit* ``_singleton_group_`` → a representative processor id,
+    over persistent AND runtime processors.
+
+    Mirrors the ``known_sgs`` set the S2 validator builds (metadata only, no WKD
+    fallback), so any group name written into ``_after_`` here resolves there
+    with no ``unresolved_after`` warning.
+    """
+    groups: "dict[str, str]" = {}
+    for nodes in (snapshot.nodes, snapshot.runtime_nodes):
+        for nid, node in nodes.items():
+            if node.node_type is not NodeType.PROCESSOR:
+                continue
+            sg = node.metadata.get("_singleton_group_")
+            if isinstance(sg, str) and sg:
+                groups.setdefault(sg, nid)
+    return groups
 
 
 # ── operators ───────────────────────────────────────────────────────────────
@@ -139,7 +182,19 @@ class ReplaceSameSingletonGroup:
 
 @dataclass(frozen=True)
 class RewireOrdering:
-    """Change a processor's ``_order_`` and/or ``_after_`` metadata."""
+    """Change a processor's ``_order_`` and/or ``_after_`` metadata.
+
+    Invariant (P0 fix): a claimed ``X after Y`` must be *provably* reflected in
+    the effective ordering or no edit is produced.  Each ``after`` reference is
+    resolved against the parent graph — a ``proc:<id>`` whose target carries a
+    singleton_group is translated to that group name (the only form the graph
+    resolves ``_after_`` by); a target with no group is expressed arithmetically
+    (edited ``_order_`` = target's effective order + 1); a target absent from the
+    graph is fail-closed.  A bare group-name reference must already name a
+    singleton_group present in the graph.  This prevents a ``proc:``-namespaced
+    reference from being silently ignored as an unresolved soft dep (a no-op
+    edit that the ledger would otherwise bank as a real candidate).
+    """
 
     node_id: str
     order: "int | None" = None
@@ -150,14 +205,55 @@ class RewireOrdering:
         if self.order is None and self.after is None:
             raise OperatorError("RewireOrdering: nothing to change (order and after both None)")
         changes: dict = {}
+
+        order_floor: "int | None" = None
+        if self.after is not None:
+            if not all(isinstance(a, str) and a for a in self.after):
+                raise OperatorError("RewireOrdering: after entries must be non-empty strs")
+            known_groups = _known_singleton_groups(snapshot)
+            resolved_after: "list[str]" = []
+            for ref in self.after:
+                if ref.startswith("proc:"):
+                    target = snapshot.nodes.get(ref) or snapshot.runtime_nodes.get(ref)
+                    if target is None:
+                        raise OperatorError(
+                            f"RewireOrdering: _after_ reference {ref!r} resolves to no "
+                            "node in the graph — the claimed ordering cannot hold")
+                    sg = target.metadata.get("_singleton_group_")
+                    if isinstance(sg, str) and sg:
+                        # graph resolves _after_ by group name → translate the id
+                        if sg not in resolved_after:
+                            resolved_after.append(sg)
+                    else:
+                        # no singleton_group → _after_ could never name it; make the
+                        # ordering hold arithmetically (order strictly past the target)
+                        floor = _effective_order(target) + 1
+                        order_floor = floor if order_floor is None else max(order_floor, floor)
+                else:
+                    # bare group name — must already exist or the graph drops it as
+                    # an unresolved soft dep (the exact silent no-op we fail closed on)
+                    if ref not in known_groups:
+                        raise OperatorError(
+                            f"RewireOrdering: _after_ reference {ref!r} is not a "
+                            "singleton_group present in the graph")
+                    if ref not in resolved_after:
+                        resolved_after.append(ref)
+            if resolved_after:
+                changes["_after_"] = resolved_after
+
         if self.order is not None:
             if not isinstance(self.order, int):
                 raise OperatorError(f"RewireOrdering: order must be int, got {self.order!r}")
             changes["_order_"] = self.order
-        if self.after is not None:
-            if not all(isinstance(a, str) and a for a in self.after):
-                raise OperatorError("RewireOrdering: after entries must be non-empty strs")
-            changes["_after_"] = list(self.after)
+        if order_floor is not None:
+            # order arithmetic must clear every no-group target (and any explicit
+            # order the caller also gave) so the claimed after actually holds
+            changes["_order_"] = max(order_floor, changes.get("_order_", order_floor))
+
+        if not changes:
+            raise OperatorError(
+                "RewireOrdering: nothing to change (references produced no effective edit)")
+
         return [GraphEdit(
             edit_type=GraphEditType.MUTATE_INACTIVE,
             target_node_id=self.node_id,

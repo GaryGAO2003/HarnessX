@@ -183,6 +183,17 @@ def build_proposer_prompt(
             tunable[nid] = {k: _short(v) for k, v in sorted(kwargs.items())}
     tunable_json = json.dumps(tunable, ensure_ascii=False, separators=(",", ":"))
 
+    # singleton_group per processor node — ordering references (rewire_ordering
+    # `after`) resolve by group name, so the model must see which nodes carry a
+    # group ("none" = no group, reference such a node by its proc:id instead).
+    groups = {}
+    for nid in sorted(snapshot.nodes):
+        if not nid.startswith("proc:"):
+            continue
+        sg = snapshot.nodes[nid].metadata.get("_singleton_group_")
+        groups[nid] = sg if isinstance(sg, str) and sg else "none"
+    groups_json = json.dumps(groups, ensure_ascii=False, separators=(",", ":"))
+
     vocab = operator_vocabulary()
     op_lines = []
     for entry in vocab:
@@ -204,6 +215,8 @@ def build_proposer_prompt(
         f"{bom_json}\n\n"
         "## Tunable constructor params per processor node (current values)\n"
         f"{tunable_json}\n\n"
+        "## singleton_group per processor node (\"none\" = no group)\n"
+        f"{groups_json}\n\n"
         "## Operator vocabulary (the ONLY admissible proposals)\n"
         f"{op_block}\n\n"
         "## Output contract (hard requirements)\n"
@@ -216,6 +229,9 @@ def build_proposer_prompt(
         "keys listed for that node in the tunable-params section.\n"
         "  - \"rationale\": one short sentence that MUST reference at least one "
         "node id present in the BOM above.\n"
+        "For rewire_ordering, an `after` reference may be a proc:id OR a "
+        "singleton_group name, but the target MUST exist in the graph above "
+        "(reference a node that has \"none\" for its group by its proc:id).\n"
         f"Never emit the keys {{{forbidden}}}, and never emit Python / YAML / "
         "config / Mermaid / diagram / diff / patch payloads — proposals are "
         "typed operator specs, never code or config. Output no prose, no code "

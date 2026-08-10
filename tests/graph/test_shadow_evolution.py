@@ -160,6 +160,26 @@ def test_round_full_materialize_with_real_target(tmp_path):
     assert result.records[0].decision == "GATED"
 
 
+def test_gate_rejects_candidate_adding_dangling_after(tmp_path):
+    # Insert a processor whose _after_ names a group not in the graph: validation
+    # only WARNS (soft dep), so the candidate would otherwise be GATED — but the
+    # edit is a silent no-op, so the gate must REJECT it (fail-closed) and name
+    # the dangling reference in the rationale.
+    ledger = ShadowLedger(tmp_path / "s.jsonl")
+    result = run_shadow_round(_parent(), [
+        {"operator": "insert_processor",
+         "params": {"spec": {"_target_": "x.Ghost", "_hooks_": ["step_end"],
+                             "_singleton_group_": "ghost", "_after_": ["nowhere"]}},
+         "rationale": "chain after a group that is not present"},
+    ], ledger, round_id="r1", materialize=False)
+    rec = result.records[0]
+    assert rec.decision == "REJECT"
+    assert rec.validation_issues[0]["error_type"] == "unresolved_after"
+    assert "nowhere" in rec.validation_issues[0]["message"]
+    assert "nowhere" in rec.rationale                # dangling ref named in rationale
+    assert result.gated_records == []                # never a gate survivor
+
+
 # ── evaluation decisions (上线门禁) ──────────────────────────────────────────
 
 

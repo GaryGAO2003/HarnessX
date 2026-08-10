@@ -43,6 +43,7 @@ from harnessx.graph.operators import (
     apply_operator,
 )
 from harnessx.graph.types import GraphSnapshot
+from harnessx.graph.validate import validate_snapshot
 
 MAX_CANDIDATES_PER_ROUND = 4
 
@@ -182,6 +183,13 @@ def run_shadow_round(
     snapshot is never mutated; no config is written anywhere.
     """
     parent_geno = genotype_hash(parent_snapshot)
+    # Parent's own dangling `_after_` references (soft deps the builder already
+    # tolerates). A candidate is only faulted for `unresolved_after` entries it
+    # ADDS on top of this baseline — a pre-existing one is inherited, not caused.
+    parent_unresolved = {
+        w.message for w in validate_snapshot(parent_snapshot).warnings
+        if w.error_type == "unresolved_after"
+    }
     scope = dict(evaluation_scope or {})
     records: list[CandidateRecord] = []
     parsed = 0
@@ -263,6 +271,32 @@ def run_shadow_round(
                 } for w in dfa.witnesses],
                 validation_warnings=warns,
                 rationale=rationale,
+            ))
+            continue
+
+        # A candidate must not introduce a NEW dangling `_after_` reference: the
+        # builder would silently drop it as an unresolved soft dep, so the edit is
+        # a no-op the ledger would otherwise bank as a real candidate. Reject any
+        # `unresolved_after` warning absent from the parent baseline (fail-closed).
+        new_unresolved = [w for w in warns
+                          if w["error_type"] == "unresolved_after"
+                          and w["message"] not in parent_unresolved]
+        if new_unresolved:
+            dangling = "; ".join(w["message"] for w in new_unresolved)
+            records.append(CandidateRecord(
+                **base, operator=op_name,
+                operator_params=dict(raw.get("params", {})),
+                boundary_signature=getattr(op, "replacement_signature", ""),
+                decision="REJECT", decided_by="gate",
+                validation_passed=False,
+                validation_issues=[{
+                    "layer": "S2", "error_type": "unresolved_after",
+                    "message": "candidate introduces dangling _after_ reference(s) "
+                               f"absent from parent: {dangling}",
+                }],
+                validation_warnings=warns,
+                rationale=(f"REJECT: new dangling _after_ reference(s) — {dangling}"
+                           + (f" | {rationale}" if rationale else "")),
             ))
             continue
 

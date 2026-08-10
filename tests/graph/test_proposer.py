@@ -115,6 +115,24 @@ def test_prompt_appends_extra_context_verbatim():
     assert marker in prompt
 
 
+def test_prompt_lists_singleton_group_per_processor():
+    # each processor node is annotated with its singleton_group ("none" if absent)
+    snap = to_graph(HarnessConfig(processors=[
+        serialized_dict(PROBE_TARGET, hook="task_start", singleton_group="probe", order=10),
+        serialized_dict("tests.graph.fixtures.OrderedProbe", hook="task_start", order=20),
+    ]))
+    prompt = build_proposer_prompt(snap)
+    assert "singleton_group per processor" in prompt
+    assert '"proc:runtime_probe":"probe"' in prompt
+    assert '"proc:ordered_probe":"none"' in prompt          # no group → none
+
+
+def test_prompt_states_ordering_reference_contract():
+    prompt = build_proposer_prompt(_parent())
+    assert "singleton_group name" in prompt
+    assert "MUST exist in the graph" in prompt
+
+
 # ── extraction (robust, non-gating) ──────────────────────────────────────────
 
 

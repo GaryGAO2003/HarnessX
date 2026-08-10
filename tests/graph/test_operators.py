@@ -21,7 +21,7 @@ from harnessx.graph.operators import (
 from harnessx.graph.identity import deployment_hash, genotype_hash
 from harnessx.graph.snapshot import to_graph
 from harnessx.graph.transform import graph_to_config_dict
-from harnessx.graph.types import Node, NodeType
+from harnessx.graph.types import EdgeType, Node, NodeType
 
 from tests.graph.fixtures import serialized_dict
 
@@ -164,6 +164,66 @@ def test_rewire_creating_cross_order_conflict_fails_closed():
         "proc:runtime_probe", after=("ordered",)), materialize=False)
     assert result is None
     assert any(i.error_type == "order_conflict" for i in report.issues)
+
+
+def _chain(snap) -> "list[tuple[str, str]]":
+    return [(e.source_id, e.target_id) for e in snap.edges
+            if e.edge_type == EdgeType.EXECUTES_BEFORE]
+
+
+def test_rewire_proc_ref_with_group_translates_to_group_name():
+    # two procs at the SAME order in one hook — the `after` breaks the tie.
+    snap = to_graph(HarnessConfig(processors=[
+        serialized_dict(PROBE_TARGET, hook="task_start", singleton_group="probe", order=10),
+        serialized_dict(ORDERED_TARGET, hook="task_start", singleton_group="ordered", order=10),
+    ]))
+    # reference the target by proc:id — must translate to its singleton_group.
+    result, report = apply_operator(snap, RewireOrdering(
+        "proc:runtime_probe", after=("proc:ordered_probe",)), materialize=False)
+    assert report.passed, report.reason()
+    assert result.nodes["proc:runtime_probe"].metadata["_after_"] == ["ordered"]
+    # (i) no unresolved_after warning — the reference resolves in-graph
+    assert not [w for w in report.warnings if w.error_type == "unresolved_after"]
+    # (i) the re-graphed EXECUTES_BEFORE chain reflects the new order (ordered→probe,
+    # flipping the seq-tie default of probe→ordered)
+    regraphed = to_graph(HarnessConfig(**graph_to_config_dict(result)))
+    assert ("proc:ordered_probe", "proc:runtime_probe") in _chain(regraphed)
+
+
+def test_rewire_proc_ref_without_group_uses_order_arithmetic():
+    # target carries NO singleton_group → `after` cannot be a group name; the
+    # operator lifts the edited node's _order_ past the target's effective order.
+    snap = to_graph(HarnessConfig(processors=[
+        serialized_dict(PROBE_TARGET, hook="task_start", singleton_group="probe", order=10),
+        serialized_dict(ORDERED_TARGET, hook="task_start", order=10),   # no group
+    ]))
+    result, report = apply_operator(snap, RewireOrdering(
+        "proc:runtime_probe", after=("proc:ordered_probe",)), materialize=False)
+    assert report.passed, report.reason()
+    meta = result.nodes["proc:runtime_probe"].metadata
+    assert meta["_order_"] == 11                       # target order 10 + 1
+    assert not meta.get("_after_")                     # no group → no _after_ written
+    regraphed = to_graph(HarnessConfig(**graph_to_config_dict(result)))
+    assert ("proc:ordered_probe", "proc:runtime_probe") in _chain(regraphed)
+
+
+def test_rewire_proc_ref_missing_target_fails_closed():
+    # target absent from the graph → operator rejects, no candidate produced.
+    result, report = apply_operator(_snap(), RewireOrdering(
+        "proc:runtime_probe", after=("proc:does_not_exist",)), materialize=False)
+    assert result is None
+    assert any(i.error_type == "operator_precondition" for i in report.issues)
+    assert "resolves to no node" in report.reason()
+
+
+def test_rewire_bare_group_missing_fails_closed():
+    # a bare group-name reference that names no group in the graph → reject
+    # (would otherwise land as a silently-dropped unresolved soft dep).
+    result, report = apply_operator(_snap(), RewireOrdering(
+        "proc:runtime_probe", after=("nonexistent_group",)), materialize=False)
+    assert result is None
+    assert any(i.error_type == "operator_precondition" for i in report.issues)
+    assert "not a singleton_group" in report.reason()
 
 
 # ── SwapBundle ──────────────────────────────────────────────────────────────
