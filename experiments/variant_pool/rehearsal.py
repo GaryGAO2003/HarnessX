@@ -108,6 +108,13 @@ class RoundReport:
     winner: str = ""                # winning candidate_id, "" when parent survives
     wall_clock_s: float = 0.0
     error: str = ""                 # proposer error text when parse_ok is False
+    #: Holdout read-outs — populated ONLY on an APPLY round (cost discipline).
+    #: Each is ``asdict(TaskBedResult)`` for the OUTGOING parent / promoted
+    #: winner measured on the disjoint holdout set; per_task detail rides inside
+    #: (metric 8 tallies regression per task, so the aggregate is not enough).
+    #: Empty ``{}`` on every round that does not promote.
+    holdout_before: dict = field(default_factory=dict)
+    holdout_after: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -207,6 +214,8 @@ async def run_rehearsal(
     min_delta: float = 0.0,
     task_ids: "list[str] | None" = None,
     normalize: bool = True,
+    holdout_bed: "TaskBed | None" = None,
+    holdout_task_ids: "list[str] | None" = None,
 ) -> RehearsalReport:
     """Run ``rounds`` shadow-evolution rounds and return the raw-facts report.
 
@@ -218,6 +227,18 @@ async def run_rehearsal(
     ``proposer`` defaults to :func:`stub_proposer` (zero-API).  The report is
     flushed to ``out_dir/report.json`` after every round so a crash mid-run
     still leaves the completed rounds on disk.
+
+    ``holdout_bed`` (optional, same :class:`TaskBed` protocol as ``task_bed``,
+    pointed at a task set DISJOINT from the evolution bed) turns on the holdout
+    regression read-out — the metric-8 signal against the fix-one-break-one
+    treadmill (THESIS B-arm pre-registered endpoint「留出回归率↓」: how much a
+    promoted generation regressed on tasks it never evolved against).  Cost
+    discipline: ONLY a round that promotes (APPLY) pays for it — the runner then
+    evaluates the OUTGOING parent and the promoted winner on the holdout set and
+    stores both (``asdict(TaskBedResult)``, per_task detail included) into that
+    round's ``holdout_before`` / ``holdout_after``.  ``mode="f0"`` never
+    promotes, so it never touches the holdout bed; every no-APPLY round leaves
+    the two fields empty.  ``holdout_task_ids`` optionally restricts the subset.
     """
     parent_config = Path(parent_config)
     out_dir = Path(out_dir)
@@ -333,6 +354,19 @@ async def run_rehearsal(
         # (7) winner's materialized config seeds the next round (lineage on disk).
         if winner_o is not None:
             rr.winner = winner_o.candidate_id
+            # (7a) Holdout regression read-out (metric 8), cost discipline: only
+            # a promoting round pays for it.  Evaluate the OUTGOING parent
+            # (``current_parent`` — still the pre-promotion incumbent) and the
+            # winner on the disjoint holdout set; ``asdict`` keeps per_task so the
+            # per-task regression tally downstream has题级明细.  Measured before
+            # ``current_parent`` advances to the winner below. f0 never reaches
+            # here (it ``continue``s above), so f0 never touches the holdout bed.
+            if holdout_bed is not None:
+                before = await holdout_bed.evaluate(current_parent, holdout_task_ids)
+                after = await holdout_bed.evaluate(
+                    Path(winner_o.config_path), holdout_task_ids)
+                rr.holdout_before = asdict(before)
+                rr.holdout_after = asdict(after)
             current_parent = Path(winner_o.config_path)
 
         rr.wall_clock_s = time.time() - t0
@@ -395,6 +429,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-candidates", type=int, default=4)
     p.add_argument("--min-delta", type=float, default=0.0)
     p.add_argument("--task-ids", nargs="*", default=None)
+    # holdout regression read-out (metric 8): a second bed on the disjoint set
+    p.add_argument("--holdout-data-path",
+                   default="recipe/gaia_evolver/data/holdout6.json",
+                   help="disjoint holdout task set for the regression read-out")
+    p.add_argument("--no-holdout", action="store_true",
+                   help="disable the holdout regression read-out")
     # real-run (non-dry-run) knobs
     p.add_argument("--data-path", default="recipe/gaia_evolver/data/calib6.json")
     p.add_argument("--model", default=None)
@@ -436,6 +476,7 @@ def main(argv: "list[str] | None" = None) -> int:
     out_dir = Path(args.out_dir)
     ledger = ShadowLedger(Path(args.ledger) if args.ledger
                           else out_dir / "shadow.jsonl")
+    holdout_bed: "TaskBed | None" = None
 
     def _random_proposer() -> "Proposer":
         # R arm: uniform random legal edits, seeded — needs NO proposer model
@@ -473,6 +514,22 @@ def main(argv: "list[str] | None" = None) -> int:
             max_steps=args.max_steps,
             out_dir=out_dir / "taskbed",
         )
+        # Second bed on the disjoint holdout set (metric 8). Built only when the
+        # read-out is enabled, the mode can promote (f0 never does), and the data
+        # file is present — same params as the main bed, its own out_dir so the
+        # two evaluations never collide. dry-run builds no holdout bed (zero-API).
+        holdout_path = Path(args.holdout_data_path)
+        if not args.no_holdout and args.mode != "f0" and holdout_path.exists():
+            holdout_bed = GaiaTaskBed(
+                model=args.model,
+                meta_model=args.meta_model,
+                provider_id=args.provider_id,
+                data_path=holdout_path,
+                pass_k=args.pass_k,
+                max_cost=args.max_cost,
+                max_steps=args.max_steps,
+                out_dir=out_dir / "holdout_taskbed",
+            )
         if args.mode == "b":
             # arm discipline: the proposer runs on the META model (same tier
             # and budget as the A arm's evolver), never the task model.
@@ -498,12 +555,14 @@ def main(argv: "list[str] | None" = None) -> int:
         max_candidates=args.max_candidates,
         min_delta=args.min_delta,
         task_ids=args.task_ids,
+        holdout_bed=holdout_bed,
     ))
 
     print(json.dumps({
         "mode": report.mode,
         "rounds": report.rounds,
         "serper_key_present": _serper_key_present(),
+        "holdout_wired": holdout_bed is not None,
         "final_parent_config": report.final_parent_config,
         "rounds_report": [
             {"round_id": rr.round_id, "parse_ok": rr.parse_ok,

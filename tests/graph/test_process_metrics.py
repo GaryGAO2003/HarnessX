@@ -53,6 +53,23 @@ class _PathBed:
         )
 
 
+class _HoldoutStub:
+    """Holdout bed: distinct per_task maps for the outgoing parent (before) vs
+    the promoted winner (after), keyed on the ``/rounds/`` path split."""
+
+    def __init__(self, *, before, after):
+        self._before = before
+        self._after = after
+
+    async def evaluate(self, config_path, task_ids=None):
+        is_candidate = "/rounds/" in str(config_path).replace("\\", "/")
+        mapping = self._after if is_candidate else self._before
+        per_task = {t: {"passed": p} for t, p in mapping.items()}
+        n = len(mapping)
+        pass_rate = (sum(1 for p in mapping.values() if p) / n) if n else 0.0
+        return TaskBedResult(per_task=per_task, pass_rate=pass_rate)
+
+
 def _run(parent, *, rounds, bed, proposer, ledger_path, out_dir, **kw):
     ledger = ShadowLedger(ledger_path)
     return asyncio.run(run_rehearsal(
@@ -171,6 +188,62 @@ def test_deferred_metrics_present_but_null(tmp_path):
         assert key in m
         assert m[key]["value"] is None
         assert m[key]["reason"]
+
+
+# ── metric 8: holdout_regression_rate — real compute + both null branches ────
+
+
+def test_holdout_regression_rate_computed(tmp_path):
+    """A promotion that breaks one holdout task the parent had passed reads a
+    regression rate of 1/2 (parent passed t1,t2; winner broke t2) and reports
+    the freshly-unlocked task (t3) alongside."""
+    parent = _write_parent(tmp_path)
+    out, ledger_path = tmp_path / "out", tmp_path / "shadow.jsonl"
+    holdout = _HoldoutStub(before={"t1": True, "t2": True, "t3": False},
+                           after={"t1": True, "t2": False, "t3": True})
+
+    _run(parent, rounds=1, bed=_PathBed(parent_pr=0.3, cand_pr=0.9),
+         proposer=stub_proposer, ledger_path=ledger_path, out_dir=out,
+         holdout_bed=holdout)
+
+    m = compute_process_metrics(out / "report.json", ledger_path)
+    ho = m["holdout_regression_rate"]
+    assert ho["value"] == pytest.approx(0.5)      # 1 regressed / 2 parent-passed
+    assert ho["regressed"] == 1
+    assert ho["baseline_passed"] == 2
+    assert ho["per_apply"][0]["regressed_tasks"] == ["t2"]
+    assert ho["per_apply"][0]["unlocked_tasks"] == ["t3"]
+    # value branch renders without crashing (ASCII table)
+    assert isinstance(render_text(m), str)
+
+
+def test_holdout_null_reason_no_apply(tmp_path):
+    """No promotion at all → null with the 'no APPLY rounds' reason even when a
+    holdout bed is wired (it is simply never paid)."""
+    parent = _write_parent(tmp_path)
+    out, ledger_path = tmp_path / "out", tmp_path / "shadow.jsonl"
+
+    _run(parent, rounds=1, bed=StubTaskBed(pass_rate=0.5),
+         proposer=stub_proposer, ledger_path=ledger_path, out_dir=out,
+         holdout_bed=_HoldoutStub(before={"t1": True}, after={"t1": True}))
+
+    ho = compute_process_metrics(out / "report.json", ledger_path)["holdout_regression_rate"]
+    assert ho["value"] is None
+    assert ho["reason"] == "no APPLY rounds"
+
+
+def test_holdout_null_reason_not_wired_when_apply_without_holdout(tmp_path):
+    """A promotion with no holdout bed wired → the second null branch: APPLY
+    happened but the round carries no holdout data (a --no-holdout run)."""
+    parent = _write_parent(tmp_path)
+    out, ledger_path = tmp_path / "out", tmp_path / "shadow.jsonl"
+
+    _run(parent, rounds=1, bed=_PathBed(parent_pr=0.3, cand_pr=0.9),
+         proposer=stub_proposer, ledger_path=ledger_path, out_dir=out)
+
+    ho = compute_process_metrics(out / "report.json", ledger_path)["holdout_regression_rate"]
+    assert ho["value"] is None
+    assert ho["reason"] == "holdout not wired for this run"
 
 
 # ── malformed ledger line is counted, never silently dropped ─────────────────

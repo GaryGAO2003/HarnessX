@@ -65,6 +65,28 @@ class _InfraFailCandidateBed:
         return TaskBedResult(per_task={"t1": {"passed": True}}, pass_rate=0.4)
 
 
+class _HoldoutStub:
+    """Holdout bed with distinct per_task maps for the outgoing parent (before)
+    vs the promoted winner (after), keyed on the ``/rounds/`` path split like
+    ``_PathBed``.  ``calls`` counts evaluate() so a test can prove it was — or
+    was not — touched (cost discipline)."""
+
+    def __init__(self, *, before, after):
+        self._before = before
+        self._after = after
+        self.calls = 0
+
+    async def evaluate(self, config_path, task_ids=None):
+        self.calls += 1
+        is_candidate = "/rounds/" in str(config_path).replace("\\", "/")
+        mapping = self._after if is_candidate else self._before
+        per_task = {t: {"passed": p, "cost_usd": 0.0, "tokens": 10}
+                    for t, p in mapping.items()}
+        n = len(mapping)
+        pass_rate = (sum(1 for p in mapping.values() if p) / n) if n else 0.0
+        return TaskBedResult(per_task=per_task, pass_rate=pass_rate)
+
+
 # ── B arm end-to-end ─────────────────────────────────────────────────────────
 
 
@@ -439,3 +461,81 @@ def test_normalize_grafts_non_graph_fields(tmp_path):
     assert nd["tool_registry"] == d["tool_registry"]
     assert nd["workspace"] == d["workspace"]
     assert nd["processors"]                      # composition layer normalized
+
+
+# ── holdout regression read-out (metric 8 wiring) ────────────────────────────
+
+
+def test_apply_round_records_holdout_before_after(tmp_path):
+    """A promoting round evaluates the outgoing parent AND the winner on the
+    holdout bed, landing both per_task read-outs on the RoundReport."""
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    holdout = _HoldoutStub(before={"t1": True, "t2": True, "t3": False},
+                           after={"t1": True, "t2": False, "t3": True})
+
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=_PathBed(parent_pr=0.3, cand_pr=0.9),
+        proposer=stub_proposer, ledger=ledger, out_dir=tmp_path / "out",
+        holdout_bed=holdout))
+
+    rr = report.round_reports[0]
+    assert rr.winner                            # promotion happened
+    assert holdout.calls == 2                    # outgoing parent + winner, once each
+    # per_task detail rides inside each field (regression is scored per task)
+    assert rr.holdout_before["per_task"]["t2"]["passed"] is True
+    assert rr.holdout_after["per_task"]["t2"]["passed"] is False
+    assert rr.holdout_after["per_task"]["t3"]["passed"] is True
+
+
+def test_no_apply_round_leaves_holdout_empty(tmp_path):
+    """No promotion → the holdout bed is never paid and both fields stay empty."""
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    holdout = _HoldoutStub(before={"t1": True}, after={"t1": True})
+
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=2, task_bed=StubTaskBed(pass_rate=0.5),
+        proposer=stub_proposer, ledger=ledger, out_dir=tmp_path / "out",
+        holdout_bed=holdout))
+
+    for rr in report.round_reports:
+        assert rr.winner == ""
+        assert rr.holdout_before == {} and rr.holdout_after == {}
+    assert holdout.calls == 0                     # cost discipline: no APPLY, no pay
+
+
+def test_f0_never_evaluates_holdout(tmp_path):
+    """f0 never promotes, so it must never touch the holdout bed (a bed that
+    raises on evaluate proves the round loop never calls it under f0)."""
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+
+    class _ExplodingHoldout:
+        async def evaluate(self, config_path, task_ids=None):
+            raise AssertionError("f0 must never touch the holdout bed")
+
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=2, task_bed=StubTaskBed(pass_rate=0.5),
+        proposer=stub_proposer, ledger=ledger, out_dir=tmp_path / "out",
+        mode="f0", normalize=False, holdout_bed=_ExplodingHoldout()))
+
+    assert len(report.round_reports) == 2
+    for rr in report.round_reports:
+        assert rr.holdout_before == {} and rr.holdout_after == {}
+
+
+def test_cli_holdout_flags_parse_and_dry_run_smoke(tmp_path):
+    """--holdout-data-path / --no-holdout reach the arg layer with the right
+    defaults, and a dry-run with --no-holdout still completes (dry-run builds
+    no holdout bed either way — zero-API behaviour unchanged)."""
+    from experiments.variant_pool.rehearsal import _build_parser, main
+
+    args = _build_parser().parse_args(["--parent", "p", "--out-dir", "o"])
+    assert args.holdout_data_path.endswith("holdout6.json")
+    assert args.no_holdout is False
+
+    parent = _write_parent(tmp_path)
+    rc = main(["--parent", str(parent), "--rounds", "1", "--mode", "b",
+               "--dry-run", "--no-holdout", "--out-dir", str(tmp_path / "o")])
+    assert rc == 0

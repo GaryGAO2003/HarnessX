@@ -15,7 +15,10 @@ bridge's own re-graph assertion.
 Division-by-zero convention (no metric ever raises on empty input):
   * rate / ratio metrics       → ``0.0`` on an empty denominator;
   * event-index / time metric 7 → ``null`` when the promotion never occurs;
-  * deferred metrics 8 / 9      → ``null`` with a standing reason (honest absence).
+  * holdout metric 8           → ``null`` (honest absence) with a reason when no
+                                 APPLY round carries holdout data; a real rate
+                                 otherwise;
+  * deferred metric 9          → ``null`` with a standing reason.
 
 No silent caps: any malformed input line (bad JSON, wrong shape, missing file)
 is counted into ``skipped_inputs`` with a reason — never dropped silently.
@@ -30,9 +33,12 @@ from pathlib import Path
 from harnessx.core.harness import HarnessConfig
 from harnessx.graph import genotype_hash, to_graph
 
-#: Standing reasons for the two metrics that are structurally not wired yet.
-HOLDOUT_REASON = "requires holdout task set (not wired into rehearsal yet)"
+#: Standing reason for metric 9 (still structurally not wired) plus the two
+#: honest-null branches of metric 8 (now computed, but null when there is
+#: nothing to read: no promotion at all, or promotions with no holdout data).
 SELECTIVE_REASON = "requires footprint∩danger-edge wiring into the round loop"
+HOLDOUT_NO_APPLY_REASON = "no APPLY rounds"
+HOLDOUT_NOT_WIRED_REASON = "holdout not wired for this run"
 
 
 # ── input loading (skips counted, never silent) ──────────────────────────────
@@ -305,6 +311,68 @@ def _time_to_first_improvement(rounds: "list[dict]") -> dict:
             "reason": "no APPLY promotion occurred in any round"}
 
 
+# ── metric 8: holdout_regression_rate (留出集回归率) ───────────────────────────
+
+
+def _holdout_regression_rate(rounds: "list[dict]") -> dict:
+    """Share of holdout ground a promotion lost, summed over every APPLY round.
+
+    THESIS B-arm pre-registered endpoint「留出回归率↓」: how much each promoted
+    generation regressed on the DISJOINT holdout set — the read-out against a
+    fix-one-break-one treadmill.  The runner measures it ONLY on APPLY rounds
+    (:mod:`experiments.variant_pool.rehearsal`), storing the outgoing parent /
+    promoted winner per-task holdout outcomes in ``holdout_before`` /
+    ``holdout_after``; regression is per task, so the aggregate ``pass_rate``
+    alone would not do.
+
+    Per APPLY round: ``regressed`` = tasks the outgoing parent passed and the
+    winner then failed; ``unlocked`` = the reverse (parent failed → winner
+    passed, reported for context).  The rate is ``Σ regressed / Σ(#tasks the
+    outgoing parent passed)`` — the denominator is the holdout ground each
+    promotion could have lost, summed over every APPLY round.  Honest ``null``
+    (never ``0.0``) when there is nothing to read: no APPLY round at all, or
+    APPLY rounds that carry no holdout data (a ``--no-holdout`` run).
+    """
+    per_apply: "list[dict]" = []
+    total_regressed = 0
+    total_baseline_passed = 0
+    n_apply = 0
+    n_with_holdout = 0
+    for r in rounds:
+        if not any(c.get("decision") == "APPLY" for c in (r.get("candidates") or [])):
+            continue
+        n_apply += 1
+        before = (r.get("holdout_before") or {}).get("per_task") or {}
+        after = (r.get("holdout_after") or {}).get("per_task") or {}
+        if not before and not after:
+            continue                            # APPLY round, holdout not wired
+        n_with_holdout += 1
+        regressed = sorted(
+            t for t, row in before.items()
+            if row.get("passed") and not (after.get(t) or {}).get("passed"))
+        unlocked = sorted(
+            t for t, row in after.items()
+            if row.get("passed") and not (before.get(t) or {}).get("passed"))
+        total_regressed += len(regressed)
+        total_baseline_passed += sum(1 for row in before.values() if row.get("passed"))
+        per_apply.append({
+            "round_id": r.get("round_id", ""),
+            "regressed_tasks": regressed,
+            "unlocked_tasks": unlocked,
+        })
+    if n_apply == 0:
+        return {"value": None, "reason": HOLDOUT_NO_APPLY_REASON}
+    if n_with_holdout == 0:
+        return {"value": None, "reason": HOLDOUT_NOT_WIRED_REASON}
+    return {
+        "value": (total_regressed / total_baseline_passed)
+        if total_baseline_passed else 0.0,
+        "regressed": total_regressed,
+        "baseline_passed": total_baseline_passed,
+        "per_apply": per_apply,
+    }
+
+
 # ── top-level entry point ────────────────────────────────────────────────────
 
 
@@ -331,7 +399,7 @@ def compute_process_metrics(report_path: Path, ledger_path: Path) -> dict:
         "genotype_diversity": _genotype_diversity(rounds, gate_rows),  # 5 基因型多样性
         "reward": _reward(rounds),                                 # 6 单位评测/千token增益
         "time_to_first_improvement": _time_to_first_improvement(rounds),  # 7 首个改进到达
-        "holdout_regression_rate": {"value": None, "reason": HOLDOUT_REASON},  # 8 留出集回归率
+        "holdout_regression_rate": _holdout_regression_rate(rounds),  # 8 留出集回归率
         "selective_retest_savings": {"value": None, "reason": SELECTIVE_REASON},  # 9 选择性重测节省
         "skipped_inputs": skipped,
     }
@@ -400,7 +468,15 @@ def render_text(metrics: dict) -> str:
                    f"  wall={tt['cumulative_wall_clock_s']:.2f}s")
 
     ho = metrics["holdout_regression_rate"]
-    out.append(f"8. holdout_regression_rate null  ({ho['reason']})")
+    if ho["value"] is None:
+        out.append(f"8. holdout_regression_rate null  ({ho['reason']})")
+    else:
+        out.append(f"8. holdout_regression_rate {_fmt(ho['value'])}"
+                   f"  [{ho['regressed']}/{ho['baseline_passed']} holdout tasks regressed]")
+        for a in ho["per_apply"]:
+            if a["regressed_tasks"] or a["unlocked_tasks"]:
+                out.append(f"     {a['round_id']}: regressed={a['regressed_tasks']}"
+                           f" unlocked={a['unlocked_tasks']}")
     sr = metrics["selective_retest_savings"]
     out.append(f"9. selective_retest_saving null  ({sr['reason']})")
 
