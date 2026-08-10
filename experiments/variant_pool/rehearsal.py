@@ -247,9 +247,16 @@ async def run_rehearsal(
         # (1) parent config → typed graph snapshot (lineage always via on-disk file)
         snapshot = to_graph(HarnessConfig.from_yaml_file(current_parent))
 
-        # (3) propose — a parse failure does NOT abort the run: the parent
-        # survives and the loop advances to the next round.
-        extraction = active_proposer(snapshot)
+        # (3) propose — neither a parse failure nor a proposer TRANSPORT
+        # failure (auth / network / provider exception) aborts the run: both
+        # are a round-level parse_ok=False, the parent survives and the loop
+        # advances (parse 率 counts them; a long run must outlive one bad
+        # round).
+        try:
+            extraction = active_proposer(snapshot)
+        except Exception as exc:  # noqa: BLE001 — transport is out of our hands
+            extraction = ExtractionResult(
+                proposals=[], error=f"proposer transport: {type(exc).__name__}: {exc}")
         proposals = list(extraction.proposals or [])
         if extraction.error or not proposals:
             rr.parse_ok = False

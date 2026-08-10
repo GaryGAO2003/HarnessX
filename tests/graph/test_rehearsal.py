@@ -322,3 +322,25 @@ def test_partial_metadata_parent_normalizes_to_fixed_point(tmp_path):
     rt = metrics["roundtrip_rate"]
     assert rt["candidates"] >= 1
     assert rt["value"] == 1.0, rt
+
+
+def test_proposer_transport_exception_survives_round(tmp_path):
+    """An auth/network exception from the proposer must not abort the
+    rehearsal - it is a round-level parse failure (observed live: a stale
+    gateway key killed the whole run at round 0)."""
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+
+    def exploding_proposer(snapshot):
+        raise RuntimeError("AuthenticationError: invalid proxy token")
+
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=2, task_bed=StubTaskBed(pass_rate=0.5),
+        proposer=exploding_proposer, ledger=ledger, out_dir=tmp_path / "out"))
+
+    assert len(report.round_reports) == 2
+    for rr in report.round_reports:
+        assert rr.parse_ok is False
+        assert "proposer transport" in rr.error
+        assert rr.baseline_measured
+    assert ledger.records() == []
