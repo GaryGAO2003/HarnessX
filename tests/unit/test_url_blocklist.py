@@ -239,6 +239,13 @@ class TestInstallBlocklistEnv:
         assert val == ",".join(GAIA_ANSWER_DOMAINS)
         # It is now live for the matcher (subdomain of neurometric.ai).
         assert is_blocked("https://leaderboard.neurometric.ai/t/1") is True
+        # Third-party GAIA mirrors on the HF dataset tree are covered (the
+        # ghx_6x3_v3 leak channel), as is the dataset-viewer rows API…
+        assert is_blocked("https://huggingface.co/datasets/m-ric/GAIA_annotated/viewer") is True
+        assert is_blocked("https://datasets-server.huggingface.co/rows?dataset=m-ric%2Fagents") is True
+        # …while the rest of the Hub stays reachable.
+        assert is_blocked("https://huggingface.co/models") is False
+        assert is_blocked("https://huggingface.co/m-ric") is False
 
     def test_preserves_explicit_override(self, monkeypatch):
         from experiments.variant_pool.anti_contamination import install_blocklist_env
