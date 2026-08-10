@@ -659,3 +659,208 @@ def test_round_report_carries_baseline_eval_dir(tmp_path):
         parent, rounds=1, task_bed=StubTaskBed(pass_rate=0.5), proposer=stub_proposer,
         ledger=ShadowLedger(tmp_path / "shadow2.jsonl"), out_dir=tmp_path / "out2"))
     assert report2.round_reports[0].baseline_eval_dir == ""
+
+
+# ── top1 bed policy: one candidate on the bed per round ───────────────────────
+
+
+def _three_reorders(snapshot):
+    """Three legal, distinct reorders of the one probe node → three GATED
+    candidates in a fixed proposal order (c0/c1/c2), like ``_two_reorders``."""
+    return ExtractionResult(proposals=[
+        {"operator": "rewire_ordering",
+         "params": {"node_id": "proc:runtime_probe", "order": 20},
+         "rationale": "c0"},
+        {"operator": "rewire_ordering",
+         "params": {"node_id": "proc:runtime_probe", "order": 30},
+         "rationale": "c1"},
+        {"operator": "rewire_ordering",
+         "params": {"node_id": "proc:runtime_probe", "order": 40},
+         "rationale": "c2"},
+    ], error="")
+
+
+class _CountingBed:
+    """Counts evaluate() calls, split parent-baseline vs candidate on the
+    ``/rounds/`` path marker (like ``_PathBed``), so a test can prove exactly how
+    many candidates reached the bed. Candidates score ``cand_pr`` and optionally
+    truncate; the parent baseline scores ``parent_pr`` and never truncates."""
+
+    def __init__(self, *, parent_pr=0.5, cand_pr=0.5, cand_trunc=False):
+        self._parent_pr = parent_pr
+        self._cand_pr = cand_pr
+        self._cand_trunc = cand_trunc
+        self.parent_calls = 0
+        self.cand_calls = 0
+
+    async def evaluate(self, config_path, task_ids=None):
+        if "/rounds/" in str(config_path).replace("\\", "/"):
+            self.cand_calls += 1
+            er = "budget_exceeded" if self._cand_trunc else "done"
+            return TaskBedResult(
+                per_task={"t1": {"passed": self._cand_pr > 0.5, "exit_reason": er}},
+                pass_rate=self._cand_pr)
+        self.parent_calls += 1
+        return TaskBedResult(
+            per_task={"t1": {"passed": self._parent_pr > 0.5, "exit_reason": "done"}},
+            pass_rate=self._parent_pr)
+
+
+def test_top1_measures_only_first_survivor(tmp_path):
+    """top1: 3 GATED candidates → exactly ONE reaches the bed (parent 1 +
+    candidate 1 = 2 evals/round); the other two get BED_SKIPPED evaluation rows.
+    The gate phase is untouched — all three are GATED and gate-logged."""
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    bed = _CountingBed(parent_pr=0.5, cand_pr=0.5)
+
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=bed, proposer=_three_reorders,
+        ledger=ledger, out_dir=tmp_path / "out", normalize=False,
+        bed_policy="top1"))
+
+    rr = report.round_reports[0]
+    assert rr.n_gated == 3                        # gate phase unchanged
+    assert rr.n_evaluated == 1                    # only the first survivor measured
+    # per-round bed load under top1: parent rebaseline + exactly one candidate
+    assert bed.parent_calls == 1
+    assert bed.cand_calls == 1
+
+    gated = [r for r in ledger.records()
+             if r.record_kind == "gate" and r.decision == "GATED"]
+    assert len(gated) == 3                        # 3 gate rows, still all GATED
+    ev = [r for r in ledger.records() if r.record_kind == "evaluation"]
+    assert len(ev) == 3                           # bijection: one eval row per GATED
+    skipped = [r for r in ev if "BED_SKIPPED" in r.rationale]
+    assert len(skipped) == 2
+    assert all(r.decision == "REJECT" for r in skipped)
+    # skipped rows inherit the gate genotype but carry no measurement
+    assert all(r.genotype_hash for r in skipped)
+    assert all("pass_rate" not in r.measured for r in skipped)
+
+
+def test_top1_winner_applies_and_advances_lineage(tmp_path):
+    """top1 settlement — the single measured candidate strictly beats the parent
+    rebaseline → APPLY, and lineage advances to its materialized config."""
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    bed = _CountingBed(parent_pr=0.3, cand_pr=0.9)
+
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=bed, proposer=_three_reorders,
+        ledger=ledger, out_dir=tmp_path / "out", normalize=False,
+        bed_policy="top1"))
+
+    rr = report.round_reports[0]
+    assert rr.n_evaluated == 1
+    applied = [c for c in rr.candidates if c.decision == "APPLY"]
+    assert len(applied) == 1
+    assert applied[0].candidate_id == rr.winner
+    assert applied[0].pass_rate == pytest.approx(0.9)
+    assert report.final_parent_config == applied[0].config_path
+    apply_rows = [r for r in ledger.records()
+                  if r.record_kind == "evaluation" and r.decision == "APPLY"]
+    assert len(apply_rows) == 1
+    skipped = [r for r in ledger.records()
+               if r.record_kind == "evaluation" and "BED_SKIPPED" in r.rationale]
+    assert len(skipped) == 2                      # the two unmeasured survivors
+
+
+def test_top1_veto_yields_no_apply_and_no_substitute(tmp_path):
+    """top1 settlement — the one measured candidate scores high but truncates
+    above the parent baseline → vetoed. No other candidate was measured, so none
+    can substitute: the round produces no APPLY and lineage stays frozen."""
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    bed = _CountingBed(parent_pr=0.5, cand_pr=0.9, cand_trunc=True)
+
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=bed, proposer=_three_reorders,
+        ledger=ledger, out_dir=tmp_path / "out", normalize=False,
+        bed_policy="top1"))
+
+    rr = report.round_reports[0]
+    assert rr.winner == ""                        # no promotion
+    assert bed.cand_calls == 1                    # still only one measurement
+    assert report.final_parent_config == str(parent)          # lineage frozen
+    ev = [r for r in ledger.records() if r.record_kind == "evaluation"]
+    assert {r.decision for r in ev} == {"REJECT"}             # nothing applied
+    assert len([r for r in ev if "FRAGILITY_VETO" in r.rationale]) == 1
+    assert len([r for r in ev if "BED_SKIPPED" in r.rationale]) == 2
+
+
+def test_all_policy_measures_every_survivor(tmp_path):
+    """Default bed_policy="all" is unchanged: every GATED candidate is measured
+    (3 candidate evals) and no BED_SKIPPED row is ever written."""
+    parent = _write_parent(tmp_path)
+    ledger = ShadowLedger(tmp_path / "shadow.jsonl")
+    bed = _CountingBed(parent_pr=0.5, cand_pr=0.5)
+
+    report = asyncio.run(run_rehearsal(
+        parent, rounds=1, task_bed=bed, proposer=_three_reorders,
+        ledger=ledger, out_dir=tmp_path / "out", normalize=False))
+
+    rr = report.round_reports[0]
+    assert rr.n_gated == 3 and rr.n_evaluated == 3
+    assert bed.cand_calls == 3                     # all three on the bed
+    ev = [r for r in ledger.records() if r.record_kind == "evaluation"]
+    assert len(ev) == 3
+    assert not any("BED_SKIPPED" in r.rationale for r in ev)
+
+
+# ── --concurrency knob → GaiaTaskBed (default 2 = current) ────────────────────
+
+
+def test_gaia_taskbed_concurrency_default_and_override(tmp_path):
+    """GaiaTaskBed._concurrency defaults to 2 (current) and honours an override —
+    the value the bed's internal Semaphore is sized from."""
+    from experiments.variant_pool.eval_bridge import GaiaTaskBed
+
+    default_bed = GaiaTaskBed(
+        model="m", meta_model="mm", provider_id="p",
+        data_path=tmp_path / "d.json", max_cost=0.5, max_steps=20,
+        out_dir=tmp_path / "bed")
+    assert default_bed._concurrency == 2
+
+    wide_bed = GaiaTaskBed(
+        model="m", meta_model="mm", provider_id="p",
+        data_path=tmp_path / "d.json", max_cost=0.5, max_steps=20,
+        concurrency=5, out_dir=tmp_path / "bed5")
+    assert wide_bed._concurrency == 5
+
+
+def test_cli_concurrency_reaches_every_bed(tmp_path, monkeypatch):
+    """--concurrency is threaded to every GaiaTaskBed the CLI builds — the main
+    bed AND the holdout bed — and defaults to 2 when the flag is absent. A spy
+    replaces the real bed so no recipe/model surface is touched."""
+    import experiments.variant_pool.eval_bridge as eb
+    from experiments.variant_pool import rehearsal as R
+
+    built: list = []
+
+    class _SpyBed:
+        def __init__(self, *a, concurrency=2, **k):
+            self._concurrency = concurrency
+            built.append(concurrency)
+
+        async def evaluate(self, config_path, task_ids=None):
+            return TaskBedResult(per_task={"t1": {"passed": False}}, pass_rate=0.0)
+
+    monkeypatch.setattr(eb, "GaiaTaskBed", _SpyBed)
+
+    parent = _write_parent(tmp_path)
+    data = tmp_path / "data.json"          # holdout must exist so both beds build
+    data.write_text("[]", encoding="utf-8")
+    base_argv = [
+        "--parent", str(parent), "--mode", "r", "--rounds", "1",
+        "--model", "m", "--meta-model", "mm", "--provider-id", "p",
+        "--data-path", str(data), "--holdout-data-path", str(data),
+    ]
+
+    assert R.main(base_argv + ["--concurrency", "5",
+                               "--out-dir", str(tmp_path / "o5")]) == 0
+    assert built == [5, 5]                  # main bed + holdout bed, both widened
+
+    built.clear()
+    assert R.main(base_argv + ["--out-dir", str(tmp_path / "o2")]) == 0
+    assert built == [2, 2]                  # default unchanged

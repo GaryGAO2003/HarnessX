@@ -220,6 +220,7 @@ async def run_rehearsal(
     normalize: bool = True,
     holdout_bed: "TaskBed | None" = None,
     holdout_task_ids: "list[str] | None" = None,
+    bed_policy: str = "all",
 ) -> RehearsalReport:
     """Run ``rounds`` shadow-evolution rounds and return the raw-facts report.
 
@@ -243,6 +244,17 @@ async def run_rehearsal(
     round's ``holdout_before`` / ``holdout_after``.  ``mode="f0"`` never
     promotes, so it never touches the holdout bed; every no-APPLY round leaves
     the two fields empty.  ``holdout_task_ids`` optionally restricts the subset.
+
+    ``bed_policy`` selects how many gate survivors reach the task bed.  ``"all"``
+    (default, current behaviour) measures every GATED candidate.  ``"top1"``
+    measures ONLY the first-in-proposal-order survivor and settles the round on
+    that single measurement — parent rebaseline, fragility veto and the strict
+    ``> parent+min_delta`` compare are all unchanged, the ``outcomes`` list just
+    holds one real measurement.  The remaining GATED survivors skip the bed but
+    still get exactly one REJECT evaluation row each (rationale ``BED_SKIPPED``),
+    so the gate/evaluation ledger bijection the audit depends on holds.  The gate
+    phase is identical under both policies — every candidate is proposed, gated
+    and gate-logged.
     """
     parent_config = Path(parent_config)
     out_dir = Path(out_dir)
@@ -322,10 +334,17 @@ async def run_rehearsal(
         gated = round_result.gated_records
         rr.n_gated = len(gated)
 
-        # (5) materialize + measure every gate survivor.
+        # (5) materialize + measure gate survivors. Default "all" bed policy
+        # measures every GATED candidate; "top1" sends ONLY the first
+        # (proposal-order) survivor to the bed and settles the round on that one
+        # measurement. Remaining survivors skip the bed but are still booked one
+        # REJECT evaluation row each (BED_SKIPPED) after settlement, keeping the
+        # gate/evaluation ledger bijection the audit relies on intact.
         rounds_dir = out_dir / "rounds" / round_id
+        bed_records = gated[:1] if bed_policy == "top1" else gated
+        skipped_records = gated[len(bed_records):]
         outcomes: "list[CandidateOutcome]" = []
-        for rec in gated:
+        for rec in bed_records:
             cfg_path = materialize_candidate(
                 snapshot, rec, rounds_dir, base_config=current_parent)
             cand_result = await task_bed.evaluate(cfg_path, task_ids)
@@ -374,6 +393,20 @@ async def run_rehearsal(
             )
             o.decision = decision
             rr.candidates.append(o)
+
+        # (6b) top1 skip book-keeping: a GATED candidate the bed policy never
+        # measured still owes exactly one evaluation row (gate/eval bijection).
+        # It is a REJECT with a BED_SKIPPED rationale and a placeholder measured —
+        # record_evaluation requires >=1 numeric metric, so this is a marker, not
+        # a measurement (it carries no pass_rate and can never promote); the
+        # genotype_hash on the row is inherited from the gate record. skipped_records
+        # is [] under the "all" policy, so this loop is a no-op there.
+        for rec in skipped_records:
+            record_evaluation(
+                ledger, rec.candidate_id, decision="REJECT",
+                measured={"bed_skipped": 1},
+                rationale="BED_SKIPPED: top1 bed policy",
+            )
 
         # (7) winner's materialized config seeds the next round (lineage on disk).
         if winner_o is not None:
@@ -452,6 +485,13 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="shadow ledger JSONL (default: <out-dir>/shadow.jsonl)")
     p.add_argument("--max-candidates", type=int, default=4)
     p.add_argument("--min-delta", type=float, default=0.0)
+    # candidate -> bed policy. "all" (default) measures every GATED survivor —
+    # the current B-arm behaviour, byte-for-byte. "top1" measures only the first
+    # proposal-order survivor (arm parity: one config on the full bed per round,
+    # like the A arm); the rest skip the bed with a BED_SKIPPED evaluation row.
+    p.add_argument("--bed-policy", choices=["all", "top1"], default="all",
+                   help="which GATED candidates reach the task bed "
+                        "(all=every survivor [current]; top1=only the first)")
     p.add_argument("--task-ids", nargs="*", default=None)
     # holdout regression read-out (metric 8): a second bed on the disjoint set
     p.add_argument("--holdout-data-path",
@@ -467,6 +507,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-cost", type=float, default=0.5)
     p.add_argument("--max-steps", type=int, default=20)
     p.add_argument("--pass-k", type=int, default=1)
+    # GAIA task-bed eval concurrency (the bed's internal Semaphore). Default 2 =
+    # the value the bed used implicitly before this was wired; exposed so a long
+    # full-bed run can widen it without touching the default smoke behaviour.
+    p.add_argument("--concurrency", type=int, default=2,
+                   help="GAIA task-bed eval concurrency (default 2 = current)")
     # selective_retest_savings (metric 9): collect per-task coverage footprints
     # to each eval's footprints.jsonl. Default off — pure instrumentation, no
     # change to evaluation behaviour or cost when unset. Dry-run ignores it
@@ -547,6 +592,7 @@ def main(argv: "list[str] | None" = None) -> int:
             pass_k=args.pass_k,
             max_cost=args.max_cost,
             max_steps=args.max_steps,
+            concurrency=args.concurrency,
             out_dir=out_dir / "taskbed",
             collect_footprints=args.collect_footprints,
         )
@@ -564,6 +610,7 @@ def main(argv: "list[str] | None" = None) -> int:
                 pass_k=args.pass_k,
                 max_cost=args.max_cost,
                 max_steps=args.max_steps,
+                concurrency=args.concurrency,
                 out_dir=out_dir / "holdout_taskbed",
                 collect_footprints=args.collect_footprints,
             )
@@ -593,6 +640,7 @@ def main(argv: "list[str] | None" = None) -> int:
         min_delta=args.min_delta,
         task_ids=args.task_ids,
         holdout_bed=holdout_bed,
+        bed_policy=args.bed_policy,
     ))
 
     print(json.dumps({
