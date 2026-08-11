@@ -760,3 +760,10 @@ Z 相应改成：
 - **缝合恢复**：Windows 缝合 4 文件被并行 re-vendor 抹掉（期间套件红 5 无人察觉），从会话 transcript 逐字恢复重提交（`5a2eaa4`）。tests/unit 2 失败为预先存在（stop_hook / sandbox timeout，无缝合也复现），未动。
 - **流程复盘 → 四条 SOP**：脏树不发车、发车落 commit hash；风险清单不清零不发车（off-by-one 是清单上预警过的未验证项）；验证即 commit、审批管 push（缝合差点丢就是攥在工作树等拍板）；单分支单会话、commit 前 tests/aegis 必绿。
 - **悬决**：现版 L0 数据产生于 off-by-one 未修态（与官方自己跑实验的状态一致，作"官方原样"成立）；若要阶梯站在修复版底座，需重跑 L0（~1h，DS 实付个位数美元），否则 L0/L1 间混入回归账修复这一非旗标差异，归因需注记。
+
+## G1c — 注入清单 + 钉的 Windows 化（3789746，L2 smoke 调查产物）
+
+- **Digester 验证盲区闭死**：官方从不落盘 Digester session，其注入指针在生产无物证（L2 首验只能靠 Planner journal + 旁证链）。`_record_injection` 现把每次真实注入写进 `R{n}/graph_evidence/injections.json`（角色/任务/路径），有记录 ⇔ 有注入。
+- **钉的第一次假阳性（事变四，良性）**：pin 红了但 `git status` 干净——六个 vendored 文件被官方 pilot 的快照/恢复机制在阶段边界以文本模式回写（mtime 铁证：L0 收尾 22:06:57 / L1 启动 22:12:33 / L2 critic 22:48:30；disk−blob 差恰=行数，每行 +\r）。**内容零篡改，纯 EOL 翻写，Windows 上每跑一次 pilot 必现**。裸字节钉在 Windows 不可用 → 三处哈希器统一改 CRLF→LF 规范化后再 sha256，manifest 从 git-clean 树重建。接受的交换：仅翻换行的攻击不再被抓（Python/MD 语义惰性）。改后变异探针：critic.md 追加 1 字节 → 钉红；还原 → 绿。
+- 侦查排除项：L1 Evolver 的 trace 无任何 aegis 路径引用（Bash 190/Write 42 都没碰）——改写者不是进化环，是官方自家机制。
+- 套件 70 过，lint 净。L2 smoke 全程未受影响（另进程）。
