@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..core.processor import PROCESSOR_HOOK_NAMES
@@ -74,6 +75,87 @@ def _compute_slug(target: str) -> str:
             slug += "_"
         slug += ch.lower()
     return slug
+
+
+@dataclass(frozen=True)
+class ProcNodeIds:
+    """Result of the single PROCESSOR node-id authority (both schemes).
+
+    - ``persistent`` — ``(dict_ref, "proc:…")`` for every serialized processor
+      dict, in ``config.processors`` order with the per-target disambiguation
+      counter (count-all: every dict with a non-empty ``_target_``).
+    - ``runtime`` — ``(proc, "rt:…")`` for every runtime-overlay processor,
+      canonical ``_rt_procs`` first then instance-plugin procs (id-deduped).
+    """
+
+    persistent: list
+    runtime: list
+
+
+def assign_processor_node_ids(config: "HarnessConfig") -> ProcNodeIds:
+    """THE authority for PROCESSOR node-id assignment (L4.0 / L5.1).
+
+    This is the ONLY place either the persistent ``proc:`` scheme or the
+    runtime-overlay ``rt:`` scheme is formed.  ``to_graph``,
+    ``_add_runtime_overlay``, ``_add_executes_before_edges`` and
+    ``build_node_binding`` all derive their ids from here — there is no second
+    per-target walk kept in sync by comment.
+    """
+    # ── persistent proc: ids (config order, count-all per target) ───────────
+    persistent: list = []
+    seen_targets: dict[str, int] = {}
+    for proc_dict in config.processors or []:
+        if not isinstance(proc_dict, dict):
+            continue
+        target = proc_dict.get("_target_", "")
+        if not target:
+            continue
+        seen_targets[target] = seen_targets.get(target, 0) + 1
+        index = seen_targets[target]
+        node_id = f"proc:{_compute_slug(target)}"
+        if index > 1:
+            node_id = f"{node_id}__{index}"
+        persistent.append((proc_dict, node_id))
+
+    # ── runtime-overlay rt: ids (canonical _rt_procs, then plugin procs) ─────
+    # rt: ids can only collide with other rt: ids — the prefix is disjoint from
+    # proc:/hook:/slot:, so seeding the disambiguation set with the persistent
+    # nodes (as the overlay's node_id_seen does) never affects an rt: id.  An
+    # empty set reproduces the overlay's ids exactly.
+    runtime: list = []
+    rt_seen: set[str] = set()
+    canonical_ids: set[int] = set()
+
+    def _rt_id(proc: object) -> str:
+        cls = type(proc)
+        target = getattr(proc, "__hx_target__", "") or f"{cls.__module__}.{cls.__qualname__}"
+        base_id = f"rt:{_compute_slug(target)}"
+        node_id = base_id
+        suffix = 0
+        while node_id in rt_seen:
+            suffix += 1
+            node_id = f"{base_id}__rt{suffix}"
+        rt_seen.add(node_id)
+        return node_id
+
+    for reg in (coerce_runtime_reg(p) for p in config._rt_procs):
+        if reg is None:
+            continue  # defensive: dict should not appear in _rt_procs
+        canonical_ids.add(id(reg.proc))
+        runtime.append((reg.proc, _rt_id(reg.proc)))
+
+    for plugin in config.plugins or []:
+        if isinstance(plugin, dict):
+            continue  # dict plugin (YAML): not enumerable on pure read (L4.5)
+        for proc in getattr(plugin, "processors", []) or []:
+            if id(proc) in canonical_ids:
+                continue  # same instance already in _rt_procs
+            reg = coerce_runtime_reg(proc)
+            if reg is None:
+                continue
+            runtime.append((reg.proc, _rt_id(reg.proc)))
+
+    return ProcNodeIds(persistent=persistent, runtime=runtime)
 
 
 def _extract_declaration(proc_dict: dict, target: str) -> "ComponentDecl":
@@ -298,7 +380,10 @@ def _add_runtime_overlay(
     from ..core.processor import MultiHookProcessor
     from ..core.processor import get_graph_metadata
 
-    node_id_seen: set[str] = set(snapshot.nodes) | set(snapshot.runtime_nodes)
+    # rt: node ids come from the single authority (assign_processor_node_ids) —
+    # keyed by proc identity, in the same canonical-then-plugin order this
+    # overlay walks below.  No id is formed here.
+    rt_ids = {id(proc): nid for proc, nid in assign_processor_node_ids(config).runtime}
     canonical_ids: set[int] = set()
     proc_id_to_node: "dict[int, str]" = {}
 
@@ -322,13 +407,7 @@ def _add_runtime_overlay(
             meta["_hooks_"] = list(PROCESSOR_HOOK_NAMES)  # bare "*" → all 8
         # else: keep dispatch-derived _hooks_ (MHP + "*")
 
-        node_id = f"rt:{_compute_slug(target)}"
-        suffix = 0
-        base_id = node_id
-        while node_id in node_id_seen:
-            suffix += 1
-            node_id = f"{base_id}__rt{suffix}"
-        node_id_seen.add(node_id)
+        node_id = rt_ids[id(reg.proc)]
 
         extra = dict(meta)
         extra["_runtime_only"] = True
@@ -451,7 +530,11 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
     # 3. processor nodes + ATTACHED_TO edges (decl-driven — L3.1 / L4.1)
     from .declaration import WELL_KNOWN_DECLARATIONS
 
-    seen_targets: dict[str, int] = {}  # target → count for disambiguation
+    # Persistent proc: node ids come from the single authority — no second
+    # per-target walk here (L4.0).  Keyed by dict identity; both this loop and
+    # the authority skip the same non-dict / empty-target entries, so every
+    # proc_dict that reaches node creation has an entry.
+    persistent_ids = {id(d): nid for d, nid in assign_processor_node_ids(config).persistent}
     proc_node_ids: list[str] = []
 
     for proc_dict in config.processors:
@@ -514,12 +597,7 @@ def to_graph(config: "HarnessConfig", *, source_hash: str = "") -> GraphSnapshot
         if ctor_kwargs:
             meta["_ctor_kwargs_"] = ctor_kwargs
 
-        # Disambiguate duplicate targets (same class used multiple times)
-        seen_targets[target] = seen_targets.get(target, 0) + 1
-        index = seen_targets[target]
-        node_id = f"proc:{_compute_slug(target)}"
-        if index > 1:
-            node_id = f"{node_id}__{index}"
+        node_id = persistent_ids[id(proc_dict)]
 
         snapshot.nodes[node_id] = Node(
             node_id=node_id,
@@ -788,9 +866,11 @@ def _add_executes_before_edges(
             ))
 
     # ── L4.6: persistent-relative chain (main edges, genotype) ──────────────
-    # config.processors is the SerializedReg dict_ref view (same order as the
-    # canonical SerializedRegs), so walking it reproduces the main loop's
-    # per-target index and thus the proc: node ids.
+    # proc: node ids come from the single authority (assign_processor_node_ids)
+    # — this walk no longer re-derives them (that duplicate scheme is gone).
+    # The per-target `index` is still computed here, but only as the L4.6
+    # persistent-seq (chain tiebreak); it is not the node id.
+    persistent_ids = {id(d): nid for d, nid in assign_processor_node_ids(config).persistent}
     seen_targets: dict[str, int] = {}
     persistent: list[RoutingEnvelope] = []
     persistent_id: dict = {}
@@ -804,10 +884,8 @@ def _add_executes_before_edges(
         if bucket == "":
             continue  # explicit empty bucket: no chain (never executes)
         seen_targets[target] = seen_targets.get(target, 0) + 1
-        index = seen_targets[target]
-        node_id = f"proc:{_compute_slug(target)}"
-        if index > 1:
-            node_id = f"{node_id}__{index}"
+        index = seen_targets[target]  # L4.6 persistent-seq (tiebreak), not the id
+        node_id = persistent_ids[id(proc_dict)]
         sg = proc_dict.get("_singleton_group_")
         if not sg:
             from .declaration import WELL_KNOWN_DECLARATIONS

@@ -57,7 +57,8 @@ from .operators import (
     SwapBundle,
     apply_operator,
 )
-from .snapshot import to_graph
+from .snapshot import assign_processor_node_ids, to_graph
+from .binding import build_node_binding
 from .transform import graph_to_config_dict
 from .validate import (
     ValidationIssue,
@@ -93,6 +94,9 @@ __all__ = [
     "graph_bom",
     # snapshot
     "to_graph",
+    "assign_processor_node_ids",
+    # node binding (M2a)
+    "build_node_binding",
     # identity
     "genotype_hash",
     "deployment_hash",
