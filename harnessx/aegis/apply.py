@@ -121,7 +121,7 @@ def validate_applied_config(
         if not inside:
             raise ApplyError(
                 "prompt-bucket candidate must reference a scratch-dir "
-                f"*_path field; found paths: {sorted(tpaths)!r} (scratch_dir="
+                f"template_path field; found paths: {sorted(tpaths)!r} (scratch_dir="
                 f"{scratch_abs!s})"
             )
     return ApplyResult(applied_path=p, canonicalized=True)

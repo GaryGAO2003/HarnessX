@@ -526,7 +526,7 @@ def backfill_rejected_revivals(run_root: Path, all_briefs_dirs: list[Path]) -> P
                 continue
             archived_cid = m.group(1)
             # Derive round from directory path: .../R<n>/briefs/B-R<n>-NN.md
-            r_match = re.search(r"/R(\d+)/briefs/", str(p))
+            r_match = re.search(r"/R(\d+)/briefs/", p.as_posix())
             if not r_match:
                 continue
             revivals.setdefault(archived_cid, []).append(

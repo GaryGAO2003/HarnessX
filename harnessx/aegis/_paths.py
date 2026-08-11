@@ -84,4 +84,8 @@ def api_reference_files() -> tuple[str, ...]:
         if p.exists():
             paths.add(p.resolve())
 
-    return tuple(str(p) for p in sorted(paths))
+    root = str(HARNESSX_SRC_ROOT)
+    return tuple(
+        root + "/" + p.relative_to(HARNESSX_SRC_ROOT).as_posix()
+        for p in sorted(paths)
+    )

@@ -40,6 +40,11 @@ def _resolve(value: str) -> Path | None:
 # directory directly", not "defeat a determined bypass attempt".
 _ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])(/[A-Za-z0-9_][A-Za-z0-9_./\-]*)")
 
+# Windows-style absolute paths (drive letter + separator, mixed \\ or /).
+# Kept separate from the POSIX matcher so POSIX behavior is untouched; on
+# non-Windows hosts these tokens simply fail _resolve()'s is_absolute() check.
+_WIN_ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z]:[\\/][A-Za-z0-9_.\\/-]*)")
+
 
 class ReadScopeGateProcessor(MultiHookProcessor):
     """Block tool calls that target restricted root directories.
@@ -70,14 +75,17 @@ class ReadScopeGateProcessor(MultiHookProcessor):
         hint_message: str = "",
     ) -> None:
         self._blocked_roots: tuple[Path, ...] = tuple(Path(x).resolve() for x in (blocked_roots or ()) if x)
-        self._allowed_files: tuple[Path, ...] = tuple(Path(x).resolve() for x in (allowed_files or ()) if x)
+        # Keep allowed_files in their original string form so the processor
+        # serializes the caller's paths verbatim (Windows callers may pass
+        # mixed \\ and / separators); resolve lazily only for membership.
+        self._allowed_files: tuple[str, ...] = tuple(str(x) for x in (allowed_files or ()) if x)
+        self._allowed_resolved: frozenset = frozenset(Path(x).resolve() for x in self._allowed_files)
         self._hint = hint_message
 
     def _is_blocked(self, path: Path) -> bool:
         resolved = path.resolve()
-        for exc in self._allowed_files:
-            if resolved == exc:
-                return False
+        if resolved in self._allowed_resolved:
+            return False
         for root in self._blocked_roots:
             try:
                 resolved.relative_to(root)
@@ -87,7 +95,7 @@ class ReadScopeGateProcessor(MultiHookProcessor):
         return False
 
     def _blocked_msg(self, path: str) -> str:
-        allowed = ", ".join(str(p) for p in self._allowed_files) or "(none)"
+        allowed = ", ".join(self._allowed_files) or "(none)"
         msg = f"Read-scope gate: access to `{path}` is restricted.\n"
         if self._hint:
             msg += f"{self._hint}\n"
@@ -132,15 +140,16 @@ class ReadScopeGateProcessor(MultiHookProcessor):
                 # Extract every absolute path token from the command and
                 # reject if any resolves under a blocked root. Trusted-agent
                 # scoping — doesn't try to defeat obfuscation.
-                for abs_path_match in _ABS_PATH_RE.finditer(cmd):
-                    candidate = abs_path_match.group(1)
-                    p = _resolve(candidate)
-                    if p is not None and self._is_blocked(p):
-                        yield dataclasses.replace(
-                            event,
-                            approved=False,
-                            synthetic_result=self._blocked_msg(candidate),
-                        )
-                        return
+                for regex in (_ABS_PATH_RE, _WIN_ABS_PATH_RE):
+                    for abs_path_match in regex.finditer(cmd):
+                        candidate = abs_path_match.group(1)
+                        p = _resolve(candidate)
+                        if p is not None and self._is_blocked(p):
+                            yield dataclasses.replace(
+                                event,
+                                approved=False,
+                                synthetic_result=self._blocked_msg(candidate),
+                            )
+                            return
 
         yield event
