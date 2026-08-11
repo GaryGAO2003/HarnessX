@@ -775,3 +775,10 @@ Z 相应改成：
 - **Evolver 空转**（三炉产出率 1/3）：200 步顶格/724 万 token/零候选；Critic 的 strategy_concern 精确到 trace 指针，还引用了 Evolver 自己没做完的 Pending-Actions（"Write candidates/manifest for C-R1-03"——三个候选全胎死）。正式跑前旋钮：meta 换 reasoner / 提预算 / 接受空轮率——随床位决定一起拍。
 - 噪声在册：digest 锚点缩写警告（官方校验器抓住）、ResourceWarning 惯犯。injections.json 缺席符合预期（本炉跑的是 G1c 前的代码）。
 - **L4 smoke 已点**（hard3 ×2 轮，gate + 全栈旗标 + G1c 清单首次生产）。
+
+## L4 smoke 收官——阶梯 smoke 序列 L0→L1→L2→L4 四级全绿
+
+- 这炉 R0 硬题碰巧通过（1/1）→ 无失败任务 → 无锥、无 Digester 注入。**injections.json 生产首秀且作用域分毫不差**：只记 Planner（facts.md 一条）——failed-only 规则的生产反证。
+- **Evolver 正常交货**：exit=done 42 步、322 万 tok、2 候选（Flash 产率 2/4 轮）。五官方门全过 → **第六道门对两个候选各落一份诚实放行记录**（"PASSED THROUGH (unverifiable — not checked)"，ok:True/checked:False，原因=replay U 不可得），**decision: ship 真上船**，R1 1/1。
+- **候选图表面生产首跑**：`graph_evidence/candidates/C-R1-0{1,2}.md`，prompt 桶如实报 0 图编辑（不动处理器拓扑）——不是 bug 是正确语义。
+- 至此四级各自的全部验证点均已生产实证。剩余：meta=V4-Pro 验证炉（已点，`.env` GAIA_META_MODEL=deepseek-v4-pro，用户令"换v4pro"）；床位/环境两个决定。
