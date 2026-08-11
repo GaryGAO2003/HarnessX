@@ -36,6 +36,9 @@ jobs:
       - name: Run integration tests
         run: pytest tests/integration -x -q
 
+      - name: Run graph + core tests
+        run: pytest tests/graph tests/core -x -q
+
   # ── Lint & format check ──────────────────────────────────────────────────────
   lint:
     name: ruff (lint + format)
