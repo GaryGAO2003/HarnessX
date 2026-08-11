@@ -165,6 +165,7 @@ from experiments.variant_pool.critic import (
 )
 from experiments.variant_pool.evidence import (
     EvidenceStore,
+    LEVER_BAN_WINDOW,
     RejectedCandidate,
     TaskDigest,
     ship_outcome_from_manifest,
@@ -885,6 +886,109 @@ _PAPER_CRITIC_PROMPT = (
 _PAPER_EVOLVER_GUIDANCE = _apply_truncation_bridges(
     _PAPER_APP_B1_EVOLVER, _PAPER_EVOLVER_BRIDGES
 )
+
+
+# ---------------------------------------------------------------------------
+# P1-1/R1 — render the paper App B.1 prompt placeholders at BUILD time
+# ---------------------------------------------------------------------------
+#
+# The pypdf extraction preserved the paper's Jinja-style placeholders verbatim:
+# ``{{ round }}`` / ``{{ round_minus_1 }}`` / ``{{ reputation_summary }}`` /
+# ``{{ candidates_dir }}`` and a ``{ % if round >= 2 %} … { % endif %}`` block.
+# The spacing artifacts (``{ %`` with a space) make the block invalid Jinja, so it
+# can never self-render; the upstream paper harness rendered these per round, and
+# our runtime never did — the model literally read the raw braces. This is a bug
+# fix, not a content change: the ``_PAPER_APP_B1_*`` constants above stay
+# BYTE-IDENTICAL (the P1-1 fidelity tests pin that they still carry the braces),
+# and the substitution happens here, on a copy, where each prompt is assembled.
+
+#: The two literal conditional markers, exactly as extracted (spaces included).
+_PLANNER_COND_OPEN = "{ % if round >= 2 %}"
+_PLANNER_COND_CLOSE = "{ % endif %}"
+
+#: Honest no-data text for ``{{ reputation_summary }}`` when the EvidenceStore has
+#: recorded no ships and no rejections yet (round 1 / a fresh run). The no-data vs
+#: zero-rate distinction is load-bearing (commits 4e0810f, fd04bb4): an empty
+#: store says so here, and a lever with ships but no *realized* prediction renders
+#: "n/a" below — never a fabricated 0.00.
+_REPUTATION_EMPTY = "no candidates recorded yet; no reputation history to report"
+
+#: ``{{ candidates_dir }}`` — the paper's Evolver writes per-candidate manifests
+#: under a ``candidates_dir/``; our runtime instead instructs the meta-agent to
+#: write into its ``output_dir`` scratch (``output_dir/config.yaml`` +
+#: ``_meta_scratch/manifest.yaml`` + ``candidates.md``), and the OURS manifest
+#: brief already governs those exact filenames. The placeholder therefore resolves
+#: to the contract's own scratch-dir token; the paper's ``C-R<round>-<NN>.md``
+#: filename is superseded by the OURS brief injected at ``_produce_paper_candidate``.
+_EVOLVER_CANDIDATES_DIR = "output_dir"
+
+
+def _reputation_summary(evidence: EvidenceStore, round_idx: int, *, window: int = LEVER_BAN_WINDOW) -> str:
+    """Per-bucket proposed→shipped→yield signal for the paper Planner placeholder.
+
+    Ships carry ``levers`` and became recordable in fd04bb4; rejected candidates do
+    NOT carry a lever in the store, so a rejection cannot be attributed to a bucket
+    — the per-bucket counts come from ships (the lever-bearing records) and
+    rejections are surfaced only as an unattributed window total. Counts are over
+    the ban window (``round_idx - window <= r < round_idx``); the yield is the
+    cumulative ``hit_rate`` (the paper's ban rule is likewise recency-windowed but
+    cumulative-rated), which is ``None`` — rendered "n/a", never a false 0.0 — for
+    a lever with no realized prediction.
+    """
+    ships = list(evidence.iter_ships())
+    rejected = evidence.rejected_candidates()
+    if not ships and not rejected:
+        return _REPUTATION_EMPTY
+    low = round_idx - window
+    window_ships = [ship for ship in ships if low <= ship.round_idx < round_idx]
+    window_rejected = [rec for rec in rejected if low <= int(rec.get("round_idx", -1)) < round_idx]
+    shipped_counts: dict[str, int] = {}
+    for ship in window_ships:
+        for lever in ship.levers:
+            shipped_counts[lever] = shipped_counts.get(lever, 0) + 1
+    parts = []
+    for lever in sorted(shipped_counts):
+        rate = evidence.hit_rate(lever)
+        yield_text = "yield n/a (no realized predictions yet)" if rate is None else f"yield {rate:.2f}"
+        parts.append(f"{lever}: {shipped_counts[lever]} shipped over last {window} rounds, {yield_text}")
+    summary = "; ".join(parts) if parts else f"no levers shipped in the last {window} rounds"
+    if window_rejected:
+        summary += f" (+{len(window_rejected)} rejected candidate(s) this window, not lever-tagged in the store)"
+    return summary
+
+
+def _render_paper_prompt(
+    text: str,
+    *,
+    round_idx: int,
+    candidates_dir: str | None = None,
+    reputation_summary: str | None = None,
+) -> str:
+    """Substitute the paper App B.1 placeholders. Pure, deterministic, no jinja2.
+
+    ``{{ round }}`` / ``{{ round_minus_1 }}`` take ``round_idx`` and its
+    predecessor; the ``{ % if round >= 2 %} … { % endif %}`` block keeps its
+    contents (both markers dropped) at ``round_idx >= 2`` and is removed whole
+    below it; ``{{ candidates_dir }}`` and ``{{ reputation_summary }}`` take the
+    passed values, the reputation defaulting to the honest no-data text so the
+    placeholder can never survive. A prompt without a given placeholder (the OURS
+    reconstruction prompts) is returned unchanged.
+    """
+    if _PLANNER_COND_OPEN in text:
+        if round_idx >= 2:
+            text = text.replace(_PLANNER_COND_OPEN, "")
+            text = re.sub(re.escape(_PLANNER_COND_CLOSE) + r"\n?", "", text)
+        else:
+            pattern = re.escape(_PLANNER_COND_OPEN) + r".*?" + re.escape(_PLANNER_COND_CLOSE) + r"\n?"
+            text = re.sub(pattern, "", text, flags=re.DOTALL)
+    text = text.replace("{{ round_minus_1 }}", str(round_idx - 1))
+    text = text.replace("{{ round }}", str(round_idx))
+    if candidates_dir is not None:
+        text = text.replace("{{ candidates_dir }}", candidates_dir)
+    if "{{ reputation_summary }}" in text:
+        filled = reputation_summary if reputation_summary is not None else _REPUTATION_EMPTY
+        text = text.replace("{{ reputation_summary }}", filled)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -4290,6 +4394,11 @@ class _LLMPlanner:
     #: path byte-identical, including the empty-landscape result and its notes.
     planner_retry: int = 0
     execution: _AdapterExecution = field(default_factory=_AdapterExecution)
+    #: P1-1/R1 — EvidenceStore backing the paper Planner's ``{{ reputation_summary }}``
+    #: (per-bucket proposed→shipped→yield from ships). ``None`` (the default) keeps
+    #: every existing construction working and renders the honest no-data text; the
+    #: recipe passes the run's store in paper mode.
+    evidence: EvidenceStore | None = None
 
     async def plan(
         self,
@@ -4340,7 +4449,7 @@ class _LLMPlanner:
         valid_ids = {digest.task_id for digest in digests}
         error: str | None = None
         for _attempt in range(2):
-            prompt = self._build_prompt(summary, truncation=truncation, retry_error=error)
+            prompt = self._build_prompt(summary, round_idx=context.round_idx, truncation=truncation, retry_error=error)
             text = await self._complete(prompt)
             parsed, error = self._parse_plan_json(text)
             if parsed is not None:
@@ -4503,11 +4612,20 @@ class _LLMPlanner:
         self,
         summary: str,
         *,
+        round_idx: int,
         truncation: tuple[str, ...],
         retry_error: str | None,
     ) -> str:
         parts = [
-            self.prompt,
+            _render_paper_prompt(
+                self.prompt,
+                round_idx=round_idx,
+                reputation_summary=(
+                    _reputation_summary(self.evidence, round_idx)
+                    if self.evidence is not None and "{{ reputation_summary }}" in self.prompt
+                    else None
+                ),
+            ),
             f"\n\nROUND EVIDENCE:\n{summary}",
         ]
         if truncation:
@@ -4842,7 +4960,7 @@ class _LLMCritic:
         summary, truncation = self._build_input(context, candidates)
         error: str | None = None
         for _attempt in range(2):
-            prompt = self._build_prompt(summary, truncation=truncation, retry_error=error)
+            prompt = self._build_prompt(summary, round_idx=context.round_idx, truncation=truncation, retry_error=error)
             text = await self._complete(prompt)
             parsed, error = self._parse_review_json(text)
             if parsed is not None:
@@ -4952,11 +5070,12 @@ class _LLMCritic:
         self,
         summary: str,
         *,
+        round_idx: int,
         truncation: tuple[str, ...],
         retry_error: str | None,
     ) -> str:
         parts = [
-            self.prompt,
+            _render_paper_prompt(self.prompt, round_idx=round_idx),
             f"\n\nROUND PORTFOLIO + EVIDENCE:\n{summary}",
         ]
         if truncation:
@@ -6108,6 +6227,7 @@ class VariantPoolRecipe:
                 else _LLM_PLANNER_PROMPT
             ),
             planner_retry=int(getattr(self.args, "planner_retry", 0)),
+            evidence=self.evidence,
         )
 
     @property
@@ -6458,7 +6578,13 @@ class VariantPoolRecipe:
             revision,
         )
         paper_guidance = (
-            _PAPER_EVOLVER_GUIDANCE if self.aegis_prompts == "paper" else None
+            _render_paper_prompt(
+                _PAPER_EVOLVER_GUIDANCE,
+                round_idx=context.round_idx,
+                candidates_dir=_EVOLVER_CANDIDATES_DIR,
+            )
+            if self.aegis_prompts == "paper"
+            else None
         )
         try:
             outcome = await _evolve_candidate_with_retry(

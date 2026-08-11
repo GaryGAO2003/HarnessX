@@ -217,8 +217,8 @@ def test_build_prompt_uses_the_configured_prompt():
     paper = rvp._LLMPlanner(
         provider=object(), k_t=1, fallback=object(), prompt=rvp._PAPER_PLANNER_PROMPT
     )
-    ours_prompt = ours._build_prompt("EVID", truncation=(), retry_error=None)
-    paper_prompt = paper._build_prompt("EVID", truncation=(), retry_error=None)
+    ours_prompt = ours._build_prompt("EVID", round_idx=1, truncation=(), retry_error=None)
+    paper_prompt = paper._build_prompt("EVID", round_idx=1, truncation=(), retry_error=None)
     assert ours_prompt.startswith(rvp._LLM_PLANNER_PROMPT)
     assert "cross-trace synthesis layer" not in ours_prompt  # OURS text, not paper
     assert "cross-trace synthesis layer" in paper_prompt  # paper verbatim
