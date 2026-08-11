@@ -1520,6 +1520,22 @@ class Harness:
 
                 _unfold_rec = UnfoldRecorder(run_id=state.run_id, session_id=session_id or state.run_id)
                 _unfold_token = install_unfold_recorder(_unfold_rec)
+            # v6 M9: run identity — genotype + deployment computed here (moments 1
+            # and 2: the config, and thus its runtime overlay, are frozen before any
+            # step runs), the phenotype folded in at run end.  Opt-in
+            # (HARNESSX_GHX_IDENTITY) and free when off — to_graph is never called.
+            _run_identity = None
+            from ..graph.identity_record import identity_enabled
+
+            if identity_enabled():
+                try:
+                    from ..graph.identity_record import begin_run_identity
+
+                    _run_identity = begin_run_identity(
+                        self.config, run_id=state.run_id, session_id=session_id or state.run_id
+                    )
+                except Exception:
+                    _log.warning("run_loop: failed to compute run identity (genotype/deployment)", exc_info=True)
             try:
                 end_event, trajectory, interrupted_at = await run_loop(
                     task=task,
@@ -1545,15 +1561,29 @@ class Harness:
 
             # Persist U before any post-loop slot cleanup below touches
             # slot_provenance.  Non-fatal: a recording/write failure must not
-            # sink an otherwise-successful run.
+            # sink an otherwise-successful run.  U is finalized once here and the
+            # same graph feeds the phenotype projection below.
+            _u_base_dir = getattr(_journal, "base_dir", "sessions") if _journal is not None else "sessions"
+            _unfolded = None
             if _unfold_rec is not None:
                 try:
                     from ..graph.unfold import write_unfolded
 
-                    _u_base_dir = getattr(_journal, "base_dir", "sessions") if _journal is not None else "sessions"
-                    write_unfolded(_unfold_rec.finalize(state), base_dir=_u_base_dir)
+                    _unfolded = _unfold_rec.finalize(state)
+                    write_unfolded(_unfolded, base_dir=_u_base_dir)
                 except Exception:
                     _log.warning("run_loop: failed to persist unfolded graph U", exc_info=True)
+
+            # v6 M9 moment 3: fold U's observed edges into the phenotype, or record
+            # its honest absence when U was not taken (unfold off).  Non-fatal.
+            if _run_identity is not None:
+                try:
+                    from ..graph.identity_record import finalize_run_identity, write_identity
+
+                    finalize_run_identity(_run_identity, _unfolded)
+                    write_identity(_run_identity, base_dir=_u_base_dir)
+                except Exception:
+                    _log.warning("run_loop: failed to persist run identity", exc_info=True)
 
             # Auto-backfill terminal reward into all trajectory steps.
             # EvaluationProcessor writes eval_result onto task_end; backfill_rewards
