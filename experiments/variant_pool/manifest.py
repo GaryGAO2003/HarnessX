@@ -258,6 +258,23 @@ class AttributionSignature(BaseModel):
     tool_name: str | None = None
     expected_min_calls: int = 1
 
+    def expected_graph_node_id(self) -> str | None:
+        """The base unfolded-graph (U) node id whose execution proves this fired.
+
+        v6 M7 — the handle the W19 *graph existence query*
+        (:func:`check_attribution_in_graph`) looks up in U. Only ``tool_call``
+        resolves today: a tool invocation is the node ``tool:<tool_name>`` in U
+        (M5). ``processor_invocation`` and ``prompt_feature`` carry no node
+        handle in the Table-9 schema, so they return ``None`` and the query
+        cannot bind them — the check then falls back, recorded, to the
+        structural W19 declaration gate rather than silently claiming U proved
+        anything.
+        """
+        if self.type == "tool_call":
+            name = (self.tool_name or "").strip()
+            return f"tool:{name}" if name else None
+        return None
+
 
 class ChangeManifest(BaseModel):
     """One candidate's change manifest (Table 9 p.36 + template p.32).
@@ -341,12 +358,20 @@ class ChangeManifest(BaseModel):
     # Gate stage 1 — manifest completeness (§4.3 p.10)
     # ------------------------------------------------------------------
 
-    def validate_complete(self) -> list[str]:
+    def validate_complete(self, *, unfolded: Any = None) -> list[str]:
         """Everything wrong with this manifest, as human-readable strings.
 
         Empty list = complete = gate stage 1 passes. Each entry starts with the
         offending field name so the archived rejection reason (§4.3 "archived
         with rejection reason") reads cleanly.
+
+        ``unfolded`` (v6 M7, optional) is the run's unfolded graph U. When given,
+        the W19 attribution check stops being a string-shaped declaration gate
+        and becomes a *graph existence query* — the declared signature must name
+        a node that actually executed in U (see
+        :func:`check_attribution_in_graph`). It is strictly additive: the default
+        ``None`` reproduces today's behaviour byte-for-byte, so every existing
+        caller (the gate's ``_manifest_complete`` among them) is unchanged.
 
         Paper-derived requirements: all Table 9 fields carry content; buckets
         and actions come from the paper's enumerations; ``capability_evidence``
@@ -387,7 +412,7 @@ class ChangeManifest(BaseModel):
         problems.extend(self._capability_evidence_problems())
         problems.extend(self._file_change_problems())
         problems.extend(self._predicted_impact_problems())
-        problems.extend(self._attribution_problems())
+        problems.extend(self._attribution_problems(unfolded))
 
         if not self.target_variant.strip():
             problems.append("target_variant: missing (ours; required under variant isolation)")
@@ -454,7 +479,7 @@ class ChangeManifest(BaseModel):
             )
         return problems
 
-    def _attribution_problems(self) -> list[str]:
+    def _attribution_problems(self, unfolded: Any = None) -> list[str]:
         signature = self.attribution_signature
         if signature is None or signature.type is None:
             # The repo journal's lens/lever/intent tags are not a paper
@@ -476,6 +501,17 @@ class ChangeManifest(BaseModel):
             problems.append(
                 f"attribution_signature: expected_min_calls must be >= 1, got {signature.expected_min_calls}"
             )
+        # v6 M7 — the W19 graph existence query. When an unfolded graph U is
+        # available, the declared signature must actually appear in it: string
+        # evidence that merely *looks* like a fired edit is no longer enough.
+        # Strictly additive — with no U (the default) this is skipped entirely
+        # and the structural declaration checks above are the whole gate, so the
+        # record honestly says the graph check was unavailable rather than
+        # claiming the stronger check ran (the 4e0810f failure mode).
+        if unfolded is not None:
+            result = check_attribution_in_graph(self, unfolded)
+            if result.available and result.satisfied is False:
+                problems.append(f"attribution_signature: {result.reason}")
         return problems
 
     # ------------------------------------------------------------------
@@ -706,6 +742,130 @@ def check_level2_roundtrip(
             f"{label} did not preserve the content: "
             f"{len(tool_output):,} chars in, {len(serialized):,} chars out"
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# W19 (v6 M7) — the attribution signature as a graph existence query
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AttributionGraphResult:
+    """What the W19 *graph existence query* found — and what actually happened.
+
+    The paper's attribution signature is the anti-reward-hacking clause: an edit
+    whose declared trace feature never fires did not run, and any improvement
+    credited to it is reward hacking rather than mechanism. As a string check it
+    only proves the manifest *declares* a feature; a candidate satisfies it by
+    emitting text that looks like evidence. Turned into a query over the unfolded
+    graph U it proves the edited node *executed* — text can no longer stand in.
+
+    This record is deliberately shaped like M6b's ``_DigesterInputProvenance``:
+    it says which check actually ran. ``available`` is ``True`` only when U was
+    present *and* the signature resolved to a concrete graph node, so the query
+    could really be answered; then ``satisfied`` is the answer. When ``available``
+    is ``False`` the query could not run (no U, or a signature type that names no
+    graph node) and ``reason`` says which — the structural declaration gate stood
+    in, and nothing here pretends U proved anything (the 4e0810f failure mode).
+    """
+
+    available: bool
+    satisfied: bool | None
+    reason: str
+    expected_node_id: str | None = None
+    observed_count: int = 0
+    expected_min_calls: int = 1
+    signature_type: str | None = None
+
+
+def _count_executed(unfolded: Any, base_node_id: str) -> int:
+    """How many invocations of ``base_node_id`` appear in an unfolded graph U.
+
+    U nodes carry their base (static) graph node id directly on
+    ``static_node_id`` (M2a is its sole authority; ``parse_unfolded_id`` recovers
+    the same base from the ``{static_node_id}@t{ordinal}`` node id). Tools are
+    ``tool:<name>`` (M5). Duck-typed on ``.nodes`` / ``.static_node_id`` so this
+    module keeps its stdlib-only import surface and never depends on the graph
+    package at import time.
+    """
+    return sum(1 for node in getattr(unfolded, "nodes", ()) if getattr(node, "static_node_id", None) == base_node_id)
+
+
+def check_attribution_in_graph(manifest: ChangeManifest, unfolded: Any) -> AttributionGraphResult:
+    """Answer W19 structurally: did the edited node actually execute in the run?
+
+    ``unfolded`` is the run's unfolded graph U (or ``None``). The query resolves
+    the declared :class:`AttributionSignature` to the base U node id it claims
+    fired (:meth:`AttributionSignature.expected_graph_node_id`) and counts that
+    node's invocations in U; the signature is *satisfied* when the count meets
+    ``expected_min_calls`` and *refused* when the node is absent (or fired too
+    few times) — the change was made but never ran.
+
+    Returns ``available=False`` (query could not run, structural gate stands) when
+    there is no declared signature, when the signature type names no graph node
+    (only ``tool_call`` resolves today), or when no U is available — each with a
+    concrete ``reason`` so a fallback records *why* rather than a bare miss.
+    """
+    signature = manifest.attribution_signature
+    sig_type = signature.type if signature is not None else None
+    if signature is None or signature.type is None:
+        return AttributionGraphResult(
+            available=False,
+            satisfied=None,
+            reason="no attribution_signature declared; the structural W19 gate applies",
+            signature_type=sig_type,
+        )
+
+    min_calls = signature.expected_min_calls
+    expected = signature.expected_graph_node_id()
+    if expected is None:
+        return AttributionGraphResult(
+            available=False,
+            satisfied=None,
+            reason=(
+                f"signature type {signature.type!r} names no graph node id "
+                "(the Table-9 schema carries none); kept the structural W19 declaration check"
+            ),
+            expected_min_calls=min_calls,
+            signature_type=sig_type,
+        )
+
+    if unfolded is None:
+        return AttributionGraphResult(
+            available=False,
+            satisfied=None,
+            reason=(
+                "no unfolded graph U available for this candidate's run (unfold recording "
+                "off, the file is absent, or a pre-unfold run); kept the structural W19 "
+                "declaration check"
+            ),
+            expected_node_id=expected,
+            expected_min_calls=min_calls,
+            signature_type=sig_type,
+        )
+
+    observed = _count_executed(unfolded, expected)
+    satisfied = observed >= min_calls
+    if satisfied:
+        reason = (
+            f"declared {signature.type} {expected!r} executed {observed} time(s) in the run "
+            f"(>= expected_min_calls={min_calls}); W19 graph existence query over U"
+        )
+    else:
+        reason = (
+            f"declared {signature.type} {expected!r} but it executed {observed} time(s) in the "
+            f"run (< expected_min_calls={min_calls}); the change was made but never ran "
+            "(W19 graph existence query over unfolded graph U)"
+        )
+    return AttributionGraphResult(
+        available=True,
+        satisfied=satisfied,
+        reason=reason,
+        expected_node_id=expected,
+        observed_count=observed,
+        expected_min_calls=min_calls,
+        signature_type=sig_type,
     )
 
 
