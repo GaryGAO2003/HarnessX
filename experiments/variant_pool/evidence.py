@@ -175,6 +175,15 @@ class ShipOutcome:
     predicted_at_risk: list[str] = field(default_factory=list)
     realized_flips: list[str] = field(default_factory=list)
     realized_regressions: list[str] = field(default_factory=list)
+    #: Has the realised side (``realized_flips`` / ``realized_regressions``) been
+    #: observed yet? ``True`` (the default) means it has, so this ship is scorable
+    #: evidence and everything below is byte-identical to pre-realisation records.
+    #: ``False`` marks a ship recorded at ship time whose predicted flips cannot
+    #: be checked until the FOLLOWING round's settled evaluation (§4.3 p.10 /
+    #: p.35). :meth:`hit_rate` skips an unrealised ship rather than reading its
+    #: still-empty ``realized_flips`` as a real zero — a rate computed before
+    #: realisation would be a false signal, not a low one.
+    realized: bool = True
     #: W19 — did the declared ``attribution_signature`` actually appear in the
     #: next round's traces? ``None`` = not checked yet.
     attribution_satisfied: bool | None = None
@@ -198,8 +207,14 @@ class ShipOutcome:
     def hit_rate(self) -> float | None:
         """``hits / predicted`` — ``None`` when nothing was predicted.
 
+        Also ``None`` while the ship is unrealised (:attr:`realized` is ``False``):
+        its predicted flips have not been scored against the next round yet, so it
+        carries no rate at all rather than a zero one.
+
         Paper check: C-R10-02 predicted seven and hit five -> 0.71 (p.37).
         """
+        if not self.realized:
+            return None
         if not self.predicted_flips:
             return None
         return len(self.hits) / len(self.predicted_flips)
@@ -217,6 +232,12 @@ class ShipOutcome:
             "attribution_satisfied": self.attribution_satisfied,
             "hit_rate": self.hit_rate,
         }
+        # Emitted ONLY while the realised side is still pending, so a scorable
+        # (realised) ship serializes byte-identically to pre-realisation
+        # ``ship_outcomes.json`` (the key is simply absent, which reads back as
+        # ``realized=True``).
+        if not self.realized:
+            payload["realized"] = False
         # Emitted ONLY when recording ran, so a ship with no graph-edit info
         # serializes byte-identically to pre-v6 ``ship_outcomes.json`` (the key
         # is simply absent, which reads back as ``None`` = unknown).
@@ -235,6 +256,7 @@ class ShipOutcome:
             predicted_at_risk=list(data.get("predicted_at_risk", [])),
             realized_flips=list(data.get("realized_flips", [])),
             realized_regressions=list(data.get("realized_regressions", [])),
+            realized=data.get("realized", True),
             attribution_satisfied=data.get("attribution_satisfied"),
             graph_nodes_touched=(
                 list(data["graph_nodes_touched"]) if data.get("graph_nodes_touched") is not None else None
@@ -418,6 +440,62 @@ class EvidenceStore:
         for record in self.ship_outcomes():
             yield ShipOutcome.from_dict(record)
 
+    def record_ship(self, outcome: ShipOutcome) -> bool:
+        """Append ``outcome`` unless this (candidate, round) already shipped.
+
+        The gate settles once per round, but a resumed or re-run round reconciles
+        the same decisions again; keying idempotence on the ship's
+        ``candidate_id`` (round-unique) with its ``round_idx`` keeps
+        ``ship_outcomes.json`` a set of distinct ships rather than a bag that
+        grows on every replay. Returns whether a new record was written.
+        """
+        for record in self.ship_outcomes():
+            if (
+                record.get("candidate_id") == outcome.candidate_id
+                and int(record.get("round_idx", -1)) == outcome.round_idx
+            ):
+                return False
+        self.append_ship(outcome)
+        return True
+
+    def realize_ship(
+        self,
+        candidate_id: str,
+        round_idx: int,
+        *,
+        realized_flips: Iterable[str],
+        realized_regressions: Iterable[str] = (),
+        attribution_satisfied: bool | None = None,
+    ) -> bool:
+        """Fill in a recorded ship's realised side once the next round scored it.
+
+        Only ships still marked unrealised are touched, so a re-run that realises
+        the same round twice is a no-op the second time — the first pass flips
+        :attr:`ShipOutcome.realized` to ``True`` and the match below skips it
+        thereafter. Returns whether a record changed.
+        """
+        records = self.ship_outcomes()
+        changed = False
+        for index, record in enumerate(records):
+            ship = ShipOutcome.from_dict(record)
+            if ship.candidate_id != candidate_id or ship.round_idx != round_idx:
+                continue
+            if ship.realized:
+                continue
+            ship.realized_flips = list(realized_flips)
+            ship.realized_regressions = list(realized_regressions)
+            ship.realized = True
+            if attribution_satisfied is not None:
+                ship.attribution_satisfied = attribution_satisfied
+            records[index] = ship.to_dict()
+            changed = True
+        if changed:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self.ship_outcomes_path.write_text(
+                json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        return changed
+
     # ------------------------------------------------------------------
     # rejected candidates
     # ------------------------------------------------------------------
@@ -458,6 +536,8 @@ class EvidenceStore:
         hits = 0
         predicted = 0
         for ship in self.iter_ships():
+            if not ship.realized:
+                continue
             if lever is not None and lever not in ship.levers:
                 continue
             if since_round is not None and ship.round_idx < since_round:
@@ -532,6 +612,7 @@ def ship_outcome_from_manifest(
     manifest: Any,
     round_idx: int,
     *,
+    realized: bool = True,
     realized_flips: Iterable[str] = (),
     realized_regressions: Iterable[str] = (),
     attribution_satisfied: bool | None = None,
@@ -543,6 +624,12 @@ def ship_outcome_from_manifest(
     :mod:`.evidence` and :mod:`.manifest` stay independent: the manifest is the
     prediction, the store is the record, and this is the one place they meet.
     ``manifest`` is duck-typed for that reason.
+
+    ``realized`` defaults ``True`` so scoring a ship whose outcome is already
+    known is unchanged. Pass ``realized=False`` at ship time — before the
+    following round has run — so the record carries its predicted flips without
+    the empty ``realized_flips`` being counted as a realised zero; realise it
+    later with :meth:`EvidenceStore.realize_ship`.
 
     ``graph_nodes_touched`` is threaded through untouched: ``None`` (the default)
     keeps the ship recorded-as-unknown for graph touches, a supplied iterable
@@ -556,6 +643,7 @@ def ship_outcome_from_manifest(
         levers=list(manifest.bucket),
         predicted_flips=list(manifest.predicted_impact.predicted_flips()),
         predicted_at_risk=list(manifest.predicted_impact.tasks_at_risk),
+        realized=realized,
         realized_flips=list(realized_flips),
         realized_regressions=list(realized_regressions),
         attribution_satisfied=attribution_satisfied,

@@ -163,7 +163,12 @@ from experiments.variant_pool.critic import (
     demoted_regression_concern,
     regressions_for_gate,
 )
-from experiments.variant_pool.evidence import EvidenceStore, RejectedCandidate, TaskDigest
+from experiments.variant_pool.evidence import (
+    EvidenceStore,
+    RejectedCandidate,
+    TaskDigest,
+    ship_outcome_from_manifest,
+)
 from experiments.variant_pool.experiment_lock import (
     DatasetSpec,
     EnvSpec,
@@ -5798,6 +5803,13 @@ class VariantPoolRecipe:
                 # keys the settled pass never touches, so it stays outside that
                 # method's double-record guard.
                 self._record_gate_complement(result, round_idx)
+                # Record this round's APPLY/FORK ships (unrealised), then score
+                # the PREVIOUS round's ships against this round's settled pass.
+                # Order is load-bearing: a ship's realised flips are only known
+                # one round after it shipped, and this round's settled pass is
+                # exactly that next-round evaluation for the prior round.
+                self._record_round_ships(result, round_idx)
+                self._realize_prior_ships(round_idx)
             self._ingest_report(result, round_idx)
             self._dump_round(result, round_idx)
             results.append(result)
@@ -7381,6 +7393,81 @@ class VariantPoolRecipe:
                 "settled active ledger did not receive exactly the fixed task set: "
                 f"missing={sorted(set(self._all_task_ids) - seen_tasks)}, "
                 f"extra={sorted(seen_tasks - set(self._all_task_ids))}"
+            )
+
+    def _record_round_ships(self, result: Any, round_idx: int) -> None:
+        """Record every APPLY/FORK ship of this round as an unrealised outcome.
+
+        The gate stays the sole shipping authority; this only witnesses its
+        APPLY/FORK decisions (``result.decisions``) and writes one
+        :class:`~experiments.variant_pool.evidence.ShipOutcome` per shipped
+        candidate, so ``ship_outcomes.json`` — the input the Critic's banned-lever
+        rule, the Planner's reputation signal and the graph node-edit history all
+        read — is no longer empty.
+
+        The ship is recorded *unrealised*: the manifest's predicted flips and
+        levers are known now, but whether those flips actually happened is only
+        visible in the following round's settled pass, so ``realized=False`` here
+        and :meth:`_realize_prior_ships` fills the realised side one round later.
+        Opaque C1 candidates (no manifest) and baseline "adopt my own config"
+        candidates never ship a scorable edit and are skipped. Recording is
+        idempotent on ``candidate_id``, so a resumed or re-run round does not
+        double-record.
+        """
+        decisions = getattr(result, "decisions", None) or {}
+        selected = getattr(result, "selected_candidate_ids", None) or {}
+        for vid, candidate_id in sorted(selected.items()):
+            if decisions.get(vid) not in (Decision.APPLY, Decision.FORK):
+                continue
+            candidate = self._round_candidates.get(candidate_id)
+            manifest = getattr(candidate, "manifest", None)
+            if manifest is None or getattr(candidate, "is_baseline", False):
+                continue
+            graph_edits = getattr(candidate, "graph_edits", None)
+            graph_nodes = (
+                None
+                if graph_edits is None
+                else sorted({nid for edit in graph_edits for nid in edit.affected_node_ids()})
+            )
+            self.evidence.record_ship(
+                ship_outcome_from_manifest(
+                    manifest,
+                    round_idx,
+                    realized=False,
+                    graph_nodes_touched=graph_nodes,
+                )
+            )
+
+    def _realize_prior_ships(self, round_idx: int) -> None:
+        """Score the previous round's ships against this round's settled pass.
+
+        A ship's hit-rate is "tasks flipped / predicted" measured against the
+        FOLLOWING round's evaluation (§4.3 p.10 / p.35), never its own — scoring a
+        ship on the rollouts that motivated it would be the false signal commit
+        4e0810f warned about. This round's settled active pass is exactly that
+        next-round evaluation for the ships that shipped last round, so each
+        unrealised prior-round ship is scored here: a predicted flip counts as
+        realised iff its task is solved somewhere in the settled pool this round,
+        and a predicted at-risk task counts as a realised regression iff it is
+        not. Only unrealised ships are touched, so re-running is a no-op.
+        """
+        prior = round_idx - 1
+        if prior < 0:
+            return
+        solved = {
+            task_id
+            for outcomes in self._active_round_pass.values()
+            for task_id, (n_pass, _n_att) in outcomes.items()
+            if int(n_pass) >= 1
+        }
+        for ship in self.evidence.iter_ships():
+            if ship.round_idx != prior or ship.realized:
+                continue
+            self.evidence.realize_ship(
+                ship.candidate_id,
+                prior,
+                realized_flips=[task for task in ship.predicted_flips if task in solved],
+                realized_regressions=[task for task in ship.predicted_at_risk if task not in solved],
             )
 
     def _safe_candidate_reuse(
