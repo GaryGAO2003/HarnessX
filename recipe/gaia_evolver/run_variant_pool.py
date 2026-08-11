@@ -101,6 +101,7 @@ from .run import (
     _build_trajectory_text,
     _compute_tool_counts,
     _compute_tool_stats,
+    _fs_safe,
     _make_provider,
     _pick_pivotal_tool,
     _rollout_once,
@@ -110,6 +111,10 @@ from .run import (
 
 # Repo parts (same sources run.py imports from).
 from harnessx.core.model_config import ModelConfig
+from harnessx.graph.causal import CONTROL as _U_CONTROL
+from harnessx.graph.causal import DATA as _U_DATA
+from harnessx.graph.causal import causal_cone, induced_subgraph, terminal_node
+from harnessx.graph.unfold import load_unfolded
 from harnessx.meta_harness import MetaAgent  # noqa: F401 - documented base of VariantPoolMetaAgent
 
 # Recipe-layer subclass that injects our candidate contract into TASK.md without
@@ -3035,6 +3040,28 @@ _LLM_DIGESTER_HEAD_CHARS = 12_000
 _LLM_DIGESTER_TAIL_CHARS = 20_000
 _LLM_DIGESTER_FRONTMATTER_CHARS = 4_000
 
+#: [OURS] v6 M6b — env gate for the graph-derived Digester input. Off by default,
+#: read at call time (never cached), mirroring :func:`~harnessx.graph.unfold.
+#: unfold_enabled`: a run pays nothing and behaves byte-identically to the text
+#: path unless ``HARNESSX_GHX_DIGEST_GRAPH`` is set. The graph path is a strict
+#: opt-in over an EXISTING unfolded graph U; with it off (the default) the
+#: Digester reads the serialized trajectory window exactly as before.
+_GRAPH_INPUT_ENABLE_VALUES = frozenset({"1", "true", "on", "yes"})
+
+
+def _digest_graph_input_enabled() -> bool:
+    """True when the Digester should build its per-task input from U when one exists."""
+    return os.environ.get("HARNESSX_GHX_DIGEST_GRAPH", "").strip().lower() in _GRAPH_INPUT_ENABLE_VALUES
+
+
+#: [OURS] v6 M6b — backstop cap on the serialized causal cone. Sized to the
+#: head+tail trajectory-window budget so a graph-derived input is never larger
+#: than the text window it replaces; a cone is much smaller in practice but is not
+#: bounded in principle, so the cap still applies and truncation is made VISIBLE
+#: (a marker in the text and a ``truncated`` flag in the recorded provenance),
+#: never silent.
+_LLM_DIGESTER_GRAPH_INPUT_CAP = _LLM_DIGESTER_HEAD_CHARS + _LLM_DIGESTER_TAIL_CHARS
+
 #: [OURS] Digester per-task prompt. Frozen/audited later, so it is a module
 #: constant carrying the instruction + inline JSON schema; the per-task evidence
 #: is appended at call time. The outcome is handed in as ground truth — the model
@@ -3184,6 +3211,33 @@ class _AdapterExecution:
 
 
 @dataclass
+class _DigesterInputProvenance:
+    """Per-task record of which Digester input path ACTUALLY executed (v6 M6b).
+
+    The Digester's input fidelity has two states a config field cannot tell apart:
+    a graph-derived causal cone (an unfolded graph U existed for the task's run) or
+    the serialized-and-truncated trajectory window (no U — recording off, file
+    missing, or a pre-unfold run). Commit 4e0810f is the standing warning that an
+    audit derived from CONFIGURATION lies when execution diverges (three AEGIS roles
+    read "model-backed" while silently deterministic), so this records what the task
+    ACTUALLY consumed — and, when the graph path was requested but unavailable and
+    the task fell back to text, the concrete ``reason`` why. Recorded ONLY when the
+    graph path is enabled; with it off nothing is appended, so the audit payload is
+    byte-identical to today.
+    """
+
+    task_id: str
+    source: str  # "graph" | "text"
+    reason: str | None = None  # why text, when graph was requested; None for graph
+    anchor: str | None = None  # terminal-node id the cone was anchored on (graph)
+    nodes: int = 0
+    control_edges: int = 0
+    data_edges: int = 0
+    chars: int = 0
+    truncated: bool = False
+
+
+@dataclass
 class _LLMDigester:
     """Model-backed Digester (paper §4.3), first of the three LLM-AEGIS roles.
 
@@ -3224,6 +3278,10 @@ class _LLMDigester:
     run_dir: Path
     fallback: _EvidenceDigester
     execution: _AdapterExecution = field(default_factory=_AdapterExecution)
+    # v6 M6b: opt-in graph-derived per-task input, plus the per-task provenance of
+    # which input path (graph cone / text window) each failed task actually used.
+    graph_input: bool = False
+    input_provenance: list = field(default_factory=list)
 
     async def digest(self, *, context: PipelineContext) -> DigesterRoundArtifact:
         base = _latest_settled_digests(self.evidence, self.pool, context)
@@ -3299,26 +3357,38 @@ class _LLMDigester:
         Provider exceptions propagate (they are wholesale). Only parse/validation
         failures are handled here: retry once with the error appended, then fall
         back to the deterministic digest for this task and return an audit note.
+
+        v6 M6b: when ``graph_input`` is on AND an unfolded graph U exists for this
+        task's run, the evidence section is built from the causal cone of the run's
+        terminal invocation instead of the serialized-and-truncated trajectory
+        window. Either path is recorded in ``input_provenance`` — graph, or text
+        with the reason the graph path was unavailable. With ``graph_input`` off
+        (the default) nothing is attempted or recorded and this is byte-identical to
+        before.
         """
-        window = self._trajectory_window(digest)
-        if window is None:
-            return digest, (
-                f"{digest.task_id}: no readable trajectory to interpret; kept "
-                "deterministic digest"
-            )
-        frontmatter, head, tail = window
         question = self._question_for(digest.task_id)
+        prompt_for = None
+        if self.graph_input:
+            prompt_for = self._graph_prompt_builder(context, digest, question)
+        if prompt_for is None:
+            window = self._trajectory_window(digest)
+            if window is None:
+                return digest, (f"{digest.task_id}: no readable trajectory to interpret; kept deterministic digest")
+            frontmatter, head, tail = window
+
+            def prompt_for(retry_error, _fm=frontmatter, _head=head, _tail=tail):
+                return self._build_task_prompt(
+                    digest=digest,
+                    question=question,
+                    frontmatter=_fm,
+                    head=_head,
+                    tail=_tail,
+                    retry_error=retry_error,
+                )
 
         error: str | None = None
         for _attempt in range(2):
-            prompt = self._build_task_prompt(
-                digest=digest,
-                question=question,
-                frontmatter=frontmatter,
-                head=head,
-                tail=tail,
-                retry_error=error,
-            )
+            prompt = prompt_for(error)
             text = await self._complete(prompt)
             parsed, error = self._parse_task_json(text)
             if parsed is not None:
@@ -3327,6 +3397,205 @@ class _LLMDigester:
             f"{digest.task_id}: LLM interpretation failed twice ({error}); kept "
             "deterministic digest"
         )
+
+    # -- graph-derived input (v6 M6b) -----------------------------------------
+
+    def _graph_prompt_builder(
+        self,
+        context: PipelineContext,
+        digest: TaskDigest,
+        question: str,
+    ):
+        """A ``prompt_for(retry_error)`` bound to the causal cone, or ``None``.
+
+        Resolves the unfolded graph U for this task's run, anchors on its terminal
+        invocation (the one that produced the final state — the honest anchor, since
+        U records that a tool RAN, not whether it failed, and the deterministic
+        digest carries no per-task implicated component to anchor on), and takes the
+        FULL ancestor cone: both the control skeleton and the data edges. The data
+        cone alone would drop exactly the ``tool_output_dropped`` class of failures
+        — a dropped tool result is the ABSENCE of a data edge (tool results land in
+        raw_messages, not slots), so component attribution needs the control chain
+        the full cone keeps. Records the chosen path either way; returns ``None`` (so
+        the caller uses the text window) when no usable U is available.
+        """
+        graph, reason = self._resolve_unfolded(context, digest)
+        if graph is None:
+            self.input_provenance.append(_DigesterInputProvenance(task_id=digest.task_id, source="text", reason=reason))
+            return None
+        anchor = terminal_node(graph)
+        if anchor is None:
+            self.input_provenance.append(
+                _DigesterInputProvenance(
+                    task_id=digest.task_id,
+                    source="text",
+                    reason="unfolded graph U has no invocations (empty run); nothing to anchor on",
+                )
+            )
+            return None
+        cone_ids = causal_cone(graph, [anchor], edge_types=None, include_anchors=True)
+        cone = induced_subgraph(graph, cone_ids)
+        cone_text, truncated = self._render_cone(cone, anchor)
+        self.input_provenance.append(
+            _DigesterInputProvenance(
+                task_id=digest.task_id,
+                source="graph",
+                anchor=anchor,
+                nodes=len(cone.nodes),
+                control_edges=len(cone.edges_of_type(_U_CONTROL)),
+                data_edges=len(cone.edges_of_type(_U_DATA)),
+                chars=len(cone_text),
+                truncated=truncated,
+            )
+        )
+
+        def prompt_for(retry_error, _cone_text=cone_text):
+            return self._build_task_prompt_graph(
+                digest=digest,
+                question=question,
+                cone_text=_cone_text,
+                retry_error=retry_error,
+            )
+
+        return prompt_for
+
+    def _resolve_unfolded(self, context: PipelineContext, digest: TaskDigest):
+        """``(UnfoldedGraph, None)`` for this task's run, or ``(None, reason)``.
+
+        The runner writes each task's U under ``<vround>/sessions/<label>-<task_id>
+        [-a<attempt>]/<run_id>_unfolded.jsonl`` — a sibling of the ``trajectories``
+        dir whose ``.md`` files feed the text path. There is no run_id in the digest
+        or the trajectory, so the U is located by the session directory (its name
+        embeds the fs-safe task id and the attempt tag parsed from the anchor file
+        name), then the single U file inside it. Every miss returns a concrete
+        reason rather than a bare ``None`` so a fall-back to text says WHY.
+        """
+        sessions_dir = self._sessions_dir(context, digest)
+        if sessions_dir is None:
+            return None, "no trajectories dir to locate the unfolded graph U beside"
+        if not sessions_dir.is_dir():
+            return None, "no sessions dir beside the trajectories dir (unfold recording off?)"
+        tail = f"-{_fs_safe(digest.task_id)}{self._attempt_suffix(digest)}"
+        session_dirs = [
+            child for child in sorted(sessions_dir.iterdir()) if child.is_dir() and child.name.endswith(tail)
+        ]
+        if not session_dirs:
+            return None, f"no session dir for task {digest.task_id!r} under {sessions_dir.name}/"
+        u_files: list[Path] = []
+        for session in session_dirs:
+            u_files.extend(sorted(session.glob("*_unfolded.jsonl")))
+        if not u_files:
+            return None, (
+                f"no unfolded graph U file for task {digest.task_id!r} (unfold recording off, or a pre-unfold run)"
+            )
+        try:
+            return load_unfolded(u_files[0]), None
+        except (OSError, ValueError, KeyError) as exc:
+            return None, f"unfolded graph U failed to load: {type(exc).__name__}: {exc}"
+
+    def _sessions_dir(self, context: PipelineContext, digest: TaskDigest):
+        traj_dir = getattr(context, "trajectories_dir", None)
+        if traj_dir is None:
+            traj_path = self._trajectory_path(digest)
+            if traj_path is None:
+                return None
+            traj_dir = traj_path.parent
+        return Path(traj_dir).parent / "sessions"
+
+    def _trajectory_path(self, digest: TaskDigest):
+        for anchor in digest.evidence_anchors:
+            path_part = str(anchor).split("#", 1)[0].strip()
+            if not path_part:
+                continue
+            path = Path(path_part)
+            if not path.is_absolute():
+                path = self.run_dir / path_part
+            if path.is_file():
+                return path
+        return None
+
+    def _attempt_suffix(self, digest: TaskDigest) -> str:
+        """The session-dir attempt tag (``""`` or ``-a<n>``) parsed from the anchor.
+
+        Attempt 0 writes ``<task_id>.md`` and a bare session dir; later attempts
+        write ``<task_id>.a<n>.md`` and a ``-a<n>`` session suffix carrying the SAME
+        number, so the file name recovers the tag.
+        """
+        marker = re.compile(rf"^{re.escape(digest.task_id)}\.a(\d+)\.md$")
+        for anchor in digest.evidence_anchors:
+            name = Path(str(anchor).split("#", 1)[0].strip()).name
+            match = marker.match(name)
+            if match:
+                return f"-a{match.group(1)}"
+        return ""
+
+    def _render_cone(self, cone, anchor: str) -> tuple[str, bool]:
+        """Compact, self-describing text for a causal cone; ``(text, truncated)``.
+
+        Tighter than a raw ``induced_subgraph`` JSON dump: invocations in ordinal
+        order (the total order that makes U a DAG), then the data-flow edges keyed by
+        slot with writer/reader ordinals, then any INVOKES frontier (subagent
+        boundaries the cone reached). Truncation to :data:`_LLM_DIGESTER_GRAPH_INPUT_CAP`
+        is appended as a visible marker, never silent.
+        """
+        ord_by_id = {node.id: node.ordinal for node in cone.nodes}
+        nodes = sorted(cone.nodes, key=lambda node: node.ordinal)
+        control = cone.edges_of_type(_U_CONTROL)
+        data = cone.edges_of_type(_U_DATA)
+        lines = [
+            f"run={cone.run_id} anchor={anchor} nodes={len(nodes)} control_edges={len(control)} data_edges={len(data)}",
+            "INVOCATIONS (ordinal: hook label [step]):",
+        ]
+        for node in nodes:
+            label = node.label or node.static_node_id
+            lines.append(f"  {node.ordinal}: {node.hook} {label} [step {node.step}]")
+        if data:
+            lines.append("DATA FLOW (slot: writer_ordinal -> reader_ordinal):")
+            for edge in data:
+                slot = edge.metadata.get("slot_key", "?")
+                writer = ord_by_id.get(edge.source, "?")
+                reader = ord_by_id.get(edge.target, "?")
+                lines.append(f"  {slot}: {writer} -> {reader}")
+        if cone.invokes:
+            lines.append("SUBAGENTS (INVOKES frontier: child_run_id from ordinal):")
+            for invokes in cone.invokes:
+                lines.append(f"  {invokes.child_run_id} from {ord_by_id.get(invokes.source, '?')}")
+        body = "\n".join(lines)
+        if len(body) <= _LLM_DIGESTER_GRAPH_INPUT_CAP:
+            return body, False
+        marker = f"\n... [graph-derived cone truncated to {_LLM_DIGESTER_GRAPH_INPUT_CAP} chars]"
+        return body[: _LLM_DIGESTER_GRAPH_INPUT_CAP - len(marker)] + marker, True
+
+    def _build_task_prompt_graph(
+        self,
+        *,
+        digest: TaskDigest,
+        question: str,
+        cone_text: str,
+        retry_error: str | None,
+    ) -> str:
+        """The per-task prompt with the causal cone standing in for the text window.
+
+        Reuses the frozen/audited instruction+schema constant verbatim; only the
+        evidence section is swapped (CAUSAL CONE instead of TRAJECTORY HEAD/TAIL), so
+        the graph path is the same task, same schema, different-fidelity evidence.
+        """
+        n_pass, n_att = digest.outcome
+        parts = [
+            _LLM_DIGESTER_TASK_PROMPT,
+            f"\n\nTASK ID: {digest.task_id}",
+            f"\nTASK OUTCOME (harness ground truth, do not re-derive): FAILED (n_pass={n_pass} of n_att={n_att})",
+            f"\n\nTASK QUESTION:\n{question}" if question else "",
+            "\n\n--- CAUSAL CONE (unfolded graph U: the invocations that could have "
+            "contributed to how this run ended) ---\n" + cone_text,
+        ]
+        if retry_error:
+            parts.append(
+                "\n\nYour previous response was rejected: "
+                f"{retry_error}. Return ONLY a single valid JSON object with the "
+                "four required keys and nothing else."
+            )
+        return "".join(parts)
 
     async def _round_actionability(
         self,
@@ -5149,6 +5418,9 @@ class VariantPoolRecipe:
             self._active_digester_execution = None
             self._active_planner_execution = None
             self._active_critic_execution = None
+            # v6 M6b: per-task record of which input path (graph cone / text window)
+            # the Digester used this round. None until the paper pipeline captures it.
+            self._active_digester_input_provenance = None
             self._paper_target_variant = None
             self._active_round_pass = {}
             self._active_round_records = {}
@@ -5439,6 +5711,7 @@ class VariantPoolRecipe:
             tasks_by_id=self.tasks_by_id,
             run_dir=self.run_dir,
             fallback=deterministic,
+            graph_input=_digest_graph_input_enabled(),
         )
 
     @property
@@ -5640,6 +5913,8 @@ class VariantPoolRecipe:
         self._active_digester_execution = getattr(digester, "execution", None)
         self._active_planner_execution = getattr(planner, "execution", None)
         self._active_critic_execution = getattr(critic, "execution", None)
+        # v6 M6b: capture the Digester's per-task input-path provenance for the audit.
+        self._active_digester_input_provenance = getattr(digester, "input_provenance", None)
         pipeline = CandidatePipeline(
             digester=digester,
             planner=planner,
@@ -6120,6 +6395,37 @@ class VariantPoolRecipe:
             }
         return block
 
+    def _digester_graph_input_block(self) -> list[dict[str, Any]]:
+        """Per-task Digester input-path provenance for the audit (v6 M6b).
+
+        Empty (``[]``) whenever the graph path is off — nothing was recorded — so
+        ``_persist_pipeline_audit`` omits the key and the payload stays byte-identical
+        to before. When on, one entry per failed task states ``graph`` (with anchor +
+        cone shape + truncation) or ``text`` with the reason the graph path was
+        unavailable, so a fall-back can never masquerade as a graph-derived digest.
+        """
+        provenance = getattr(self, "_active_digester_input_provenance", None)
+        if not provenance:
+            return []
+        block: list[dict[str, Any]] = []
+        for record in provenance:
+            entry: dict[str, Any] = {"task_id": record.task_id, "source": record.source}
+            if record.reason:
+                entry["reason"] = record.reason
+            if record.source == "graph":
+                entry.update(
+                    {
+                        "anchor": record.anchor,
+                        "nodes": record.nodes,
+                        "control_edges": record.control_edges,
+                        "data_edges": record.data_edges,
+                        "chars": record.chars,
+                        "truncated": record.truncated,
+                    }
+                )
+            block.append(entry)
+        return block
+
     def _persist_pipeline_audit(
         self,
         target_variant: str,
@@ -6183,6 +6489,12 @@ class VariantPoolRecipe:
         fallbacks = self._adapter_fallbacks_block()
         if fallbacks:
             payload["fallbacks"] = fallbacks
+        # v6 M6b: which input path the Digester used per failed task (graph cone vs
+        # text window, with the reason on fall-back). Omitted when the graph path is
+        # off (nothing recorded), keeping this payload byte-identical to before.
+        digester_input = self._digester_graph_input_block()
+        if digester_input:
+            payload["digester_input"] = digester_input
         audit_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False),
             encoding="utf-8",
