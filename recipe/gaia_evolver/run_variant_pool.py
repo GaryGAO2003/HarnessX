@@ -76,7 +76,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -3153,6 +3153,37 @@ def _split_trajectory_frontmatter(text: str) -> tuple[str, str]:
 
 
 @dataclass
+class _AdapterExecution:
+    """Per-round tally of what an LLM AEGIS role ACTUALLY did (truthful audit).
+
+    The pipeline audit must state what EXECUTED, not what was CONFIGURED: every LLM
+    adapter silently reverts to its deterministic fallback on any error, so a
+    configured-``llm`` role can still run wholly deterministic. Each LLM adapter owns
+    one recorder (a fresh adapter is built per round, so the counts are per-round) and
+    logs, per invocation, an LLM-path completion, a fallback (reusing the same
+    human-readable ``reason`` already passed to ``_wholesale_fallback``), or — Digester
+    only — the ``deterministic_no_target`` branch (target gone from the pool): that is
+    byte-identical to the deterministic result yet is neither a fallback nor an LLM
+    completion, so it is tallied on its own.
+    """
+
+    llm: int = 0
+    fallback: int = 0
+    no_target: int = 0
+    reasons: list[str] = field(default_factory=list)
+
+    def record_llm(self) -> None:
+        self.llm += 1
+
+    def record_fallback(self, reason: str) -> None:
+        self.fallback += 1
+        self.reasons.append(reason)
+
+    def record_no_target(self) -> None:
+        self.no_target += 1
+
+
+@dataclass
 class _LLMDigester:
     """Model-backed Digester (paper §4.3), first of the three LLM-AEGIS roles.
 
@@ -3192,21 +3223,25 @@ class _LLMDigester:
     tasks_by_id: Mapping[str, Any]
     run_dir: Path
     fallback: _EvidenceDigester
+    execution: _AdapterExecution = field(default_factory=_AdapterExecution)
 
     async def digest(self, *, context: PipelineContext) -> DigesterRoundArtifact:
         base = _latest_settled_digests(self.evidence, self.pool, context)
         if base is None:
             # Target gone from the pool: identical to the deterministic result,
-            # not a fallback — return it unprefixed.
+            # not a fallback — return it unprefixed. Recorded as its own state so
+            # the audit never conflates it with an error fallback or an LLM call.
+            self.execution.record_no_target()
             return await self.fallback.digest(context=context)
         try:
             return await self._digest_llm(context, base)
         except _DigesterWholesaleFallback as exc:
+            self.execution.record_fallback(str(exc))
             return await self._wholesale_fallback(context, str(exc))
         except Exception as exc:  # noqa: BLE001 - provider/other error must not kill the round
-            return await self._wholesale_fallback(
-                context, f"{type(exc).__name__}: {exc}"
-            )
+            reason = f"{type(exc).__name__}: {exc}"
+            self.execution.record_fallback(reason)
+            return await self._wholesale_fallback(context, reason)
 
     async def _digest_llm(
         self,
@@ -3224,8 +3259,10 @@ class _LLMDigester:
             out_digests.append(new_digest)
             if note is None:
                 interpreted += 1
+                self.execution.record_llm()
             else:
                 fallback_notes.append(note)
+                self.execution.record_fallback(note)
 
         if not failed:
             actionability = 0.0
@@ -3707,6 +3744,7 @@ class _LLMPlanner:
     #: empty mutation landscape (briefs=0). ``0`` (default) keeps the single-call
     #: path byte-identical, including the empty-landscape result and its notes.
     planner_retry: int = 0
+    execution: _AdapterExecution = field(default_factory=_AdapterExecution)
 
     async def plan(
         self,
@@ -3728,12 +3766,14 @@ class _LLMPlanner:
             try:
                 artifact = await self._plan_llm(context, digests)
             except _PlannerWholesaleFallback as exc:
+                self.execution.record_fallback(str(exc))
                 return await self._wholesale_fallback(context, digests, str(exc))
             except Exception as exc:  # noqa: BLE001 - provider/other error must not kill the round
-                return await self._wholesale_fallback(
-                    context, digests, f"{type(exc).__name__}: {exc}"
-                )
+                reason = f"{type(exc).__name__}: {exc}"
+                self.execution.record_fallback(reason)
+                return await self._wholesale_fallback(context, digests, reason)
             if not artifact.empty_landscape:
+                self.execution.record_llm()
                 return artifact
             if attempt < attempts - 1:
                 logger.warning(
@@ -3741,6 +3781,9 @@ class _LLMPlanner:
                     attempt + 1,
                     self.planner_retry,
                 )
+        # Retries exhausted with an explicitly empty landscape: a valid LLM
+        # response (paper §4.3), NOT a fallback, so it counts as an LLM completion.
+        self.execution.record_llm()
         return artifact
 
     async def _plan_llm(
@@ -4165,6 +4208,7 @@ class _LLMCritic:
     #: constant (byte-identical construction); the recipe passes
     #: ``_PAPER_CRITIC_PROMPT`` in ``paper`` mode.
     prompt: str = _LLM_CRITIC_PROMPT
+    execution: _AdapterExecution = field(default_factory=_AdapterExecution)
 
     async def review(
         self,
@@ -4174,13 +4218,16 @@ class _LLMCritic:
     ) -> CriticReview:
         candidates = tuple(candidates)
         try:
-            return await self._review_llm(context, candidates)
+            review = await self._review_llm(context, candidates)
         except _CriticWholesaleFallback as exc:
+            self.execution.record_fallback(str(exc))
             return await self._wholesale_fallback(context, candidates, str(exc))
         except Exception as exc:  # noqa: BLE001 - provider/other error must not kill the round
-            return await self._wholesale_fallback(
-                context, candidates, f"{type(exc).__name__}: {exc}"
-            )
+            reason = f"{type(exc).__name__}: {exc}"
+            self.execution.record_fallback(reason)
+            return await self._wholesale_fallback(context, candidates, reason)
+        self.execution.record_llm()
+        return review
 
     async def _review_llm(
         self,
@@ -5095,6 +5142,13 @@ class VariantPoolRecipe:
             self._round_revision_requests = {}
             self._pipeline_results = {}
             self._pipeline_audit_paths = {}
+            # Truthful pipeline audit: per-round recorders of what each LLM AEGIS
+            # role ACTUALLY executed (None until the paper pipeline captures them,
+            # and for deterministic roles which own no recorder). Reset here so the
+            # adapter-name properties never leak the prior round's execution.
+            self._active_digester_execution = None
+            self._active_planner_execution = None
+            self._active_critic_execution = None
             self._paper_target_variant = None
             self._active_round_pass = {}
             self._active_round_records = {}
@@ -5389,12 +5443,20 @@ class VariantPoolRecipe:
 
     @property
     def _digester_adapter_name(self) -> str:
-        """Truthful pipeline-audit name for the active Digester role."""
-        return (
-            "MetaModel_llm_digester"
-            if self.aegis_digester == "llm"
-            else "deterministic_evidence_store_fallback"
-        )
+        """Truthful pipeline-audit name for what the Digester EXECUTED this round.
+
+        Deterministic config is byte-identical to before. When configured ``llm``,
+        ANY fallback recorded this round (a per-task revert OR a wholesale revert)
+        forfeits the pure-LLM name — the split is carried in the audit ``fallbacks``
+        block. A ``deterministic_no_target`` round (target gone from the pool) is NOT
+        a fallback, so it keeps the LLM name.
+        """
+        if self.aegis_digester != "llm":
+            return "deterministic_evidence_store_fallback"
+        execution = self._active_digester_execution
+        if execution is not None and execution.fallback > 0:
+            return "deterministic_evidence_store_fallback"
+        return "MetaModel_llm_digester"
 
     def _make_planner(self) -> PlannerStage:
         """The active Planner adapter (--aegis-planner).
@@ -5425,12 +5487,18 @@ class VariantPoolRecipe:
 
     @property
     def _planner_adapter_name(self) -> str:
-        """Truthful pipeline-audit name for the active Planner role."""
-        return (
-            "MetaModel_llm_planner"
-            if self.aegis_planner == "llm"
-            else "deterministic_failure_cluster_fallback"
-        )
+        """Truthful pipeline-audit name for what the Planner EXECUTED this round.
+
+        Deterministic config is byte-identical to before. When configured ``llm``, a
+        wholesale revert this round forfeits the pure-LLM name; an explicitly empty
+        mutation landscape is a valid LLM response, not a fallback, and keeps it.
+        """
+        if self.aegis_planner != "llm":
+            return "deterministic_failure_cluster_fallback"
+        execution = self._active_planner_execution
+        if execution is not None and execution.fallback > 0:
+            return "deterministic_failure_cluster_fallback"
+        return "MetaModel_llm_planner"
 
     def _make_critic(self) -> CriticStage:
         """The active Critic adapter (--aegis-critic).
@@ -5461,22 +5529,51 @@ class VariantPoolRecipe:
 
     @property
     def _critic_adapter_name(self) -> str:
-        """Truthful pipeline-audit name for the active Critic role."""
-        return (
-            "MetaModel_llm_critic"
-            if self.aegis_critic == "llm"
-            else "deterministic_portfolio_fallback"
-        )
+        """Truthful pipeline-audit name for what the Critic EXECUTED this round.
+
+        Deterministic config is byte-identical to before. When configured ``llm``, a
+        wholesale revert this round forfeits the pure-LLM name.
+        """
+        if self.aegis_critic != "llm":
+            return "deterministic_portfolio_fallback"
+        execution = self._active_critic_execution
+        if execution is not None and execution.fallback > 0:
+            return "deterministic_portfolio_fallback"
+        return "MetaModel_llm_critic"
 
     @property
     def _llm_aegis_reproduction(self) -> bool:
-        """True ONLY when Digester, Planner AND Critic are all LLM (A1+A2+A3).
+        """True ONLY when all three roles are configured ``llm`` AND none fell back.
 
-        This is the moment the pipeline-audit flag was reserved for: the full
-        AEGIS three-role dialogue is model-backed. Prompt provenance is a
-        SEPARATE axis carried by ``aegis_prompts``: "paper" (the default, see
-        DEFAULT_AEGIS_PROMPTS) uses the prompts as published; "legacy" uses OUR
-        reconstructions. Any deterministic role keeps this False.
+        Execution truth, not config intent: this is the moment the pipeline-audit
+        flag was reserved for — the full AEGIS three-role dialogue actually ran
+        model-backed. A single fallback in ANY role this round (Digester, Planner or
+        Critic) makes it False, because that role ran at least partly deterministic;
+        a ``deterministic_no_target`` Digester round is not a fallback and does not
+        flip it. Prompt provenance is a SEPARATE axis carried by ``aegis_prompts``:
+        "paper" (the default, see DEFAULT_AEGIS_PROMPTS) uses the prompts as
+        published; "legacy" uses OUR reconstructions. The run-level ``run_config``
+        manifest records CONFIG intent via ``_llm_aegis_reproduction_configured``.
+        """
+        if not self._llm_aegis_reproduction_configured:
+            return False
+        for execution in (
+            self._active_digester_execution,
+            self._active_planner_execution,
+            self._active_critic_execution,
+        ):
+            if execution is not None and execution.fallback > 0:
+                return False
+        return True
+
+    @property
+    def _llm_aegis_reproduction_configured(self) -> bool:
+        """CONFIG intent: all three roles selected ``llm`` (ignores execution).
+
+        Used by the run-level ``run_config`` manifest, which records how the run was
+        CONFIGURED (alongside ``aegis_prompts``, ``seed`` …), not what any single
+        round happened to execute — a per-round degradation must not rewrite the run's
+        recorded configuration.
         """
         return (
             self.aegis_digester == "llm"
@@ -5535,6 +5632,14 @@ class VariantPoolRecipe:
             )
 
         critic = self._make_critic()
+        # Capture each role's per-round execution recorder (None for a deterministic
+        # role, which owns no recorder — a fresh LLM adapter is built each round, so
+        # this both wires and resets the counts). The adapter-name properties and the
+        # audit ``fallbacks`` block read these to report what EXECUTED, not what was
+        # configured.
+        self._active_digester_execution = getattr(digester, "execution", None)
+        self._active_planner_execution = getattr(planner, "execution", None)
+        self._active_critic_execution = getattr(critic, "execution", None)
         pipeline = CandidatePipeline(
             digester=digester,
             planner=planner,
@@ -5981,6 +6086,40 @@ class VariantPoolRecipe:
             )
         )
 
+    def _adapter_fallbacks_block(self) -> dict[str, dict[str, Any]]:
+        """Per-role execution tally for the audit, legibly split (llm/fallback/…).
+
+        Only LLM-configured roles (those that own a recorder this round) appear, so a
+        partial degradation reads as counts rather than one collapsed boolean. An
+        all-deterministic round yields an empty dict, and ``_persist_pipeline_audit``
+        omits the ``fallbacks`` key entirely, keeping that payload byte-identical to
+        before.
+        """
+        block: dict[str, dict[str, Any]] = {}
+        digester = self._active_digester_execution
+        if digester is not None:
+            block["digester"] = {
+                "llm": digester.llm,
+                "fallback": digester.fallback,
+                "no_target": digester.no_target,
+                "reasons": list(digester.reasons),
+            }
+        planner = self._active_planner_execution
+        if planner is not None:
+            block["planner"] = {
+                "llm": planner.llm,
+                "fallback": planner.fallback,
+                "reasons": list(planner.reasons),
+            }
+        critic = self._active_critic_execution
+        if critic is not None:
+            block["critic"] = {
+                "llm": critic.llm,
+                "fallback": critic.fallback,
+                "reasons": list(critic.reasons),
+            }
+        return block
+
     def _persist_pipeline_audit(
         self,
         target_variant: str,
@@ -6004,8 +6143,12 @@ class VariantPoolRecipe:
                 "planner": self._planner_adapter_name,
                 "evolver": "MetaAgent_isolated_slots",
                 "critic": self._critic_adapter_name,
-                # True ONLY when Digester, Planner AND Critic are all LLM (A1+A2+A3
-                # complete); any deterministic role keeps it False.
+                # EXECUTION truth, not config intent: True only when Digester,
+                # Planner AND Critic are all configured llm (A1+A2+A3 complete)
+                # AND none of them fell back this round. Any deterministic role,
+                # or any recorded fallback, keeps it False; see the sibling
+                # ``fallbacks`` block for the per-role split. The run-level
+                # run_config manifest records config intent separately.
                 "llm_aegis_reproduction": self._llm_aegis_reproduction,
             },
             "digests": [digest.to_dict() for digest in pipeline_result.digests],
@@ -6034,6 +6177,12 @@ class VariantPoolRecipe:
             "short_circuit": pipeline_result.short_circuit,
             "audit": [asdict(record) for record in pipeline_result.audit],
         }
+        # Alongside ``adapter``: what each LLM role EXECUTED this round (counts +
+        # reasons), so a partial degradation is legible rather than collapsed into
+        # the adapter name. Omitted when no role is LLM (payload byte-identical).
+        fallbacks = self._adapter_fallbacks_block()
+        if fallbacks:
+            payload["fallbacks"] = fallbacks
         audit_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -7179,7 +7328,11 @@ class VariantPoolRecipe:
                     if self.candidate_mode == "paper"
                     else None
                 ),
-                "llm_aegis_reproduction": self._llm_aegis_reproduction,
+                # run_config records CONFIG intent (how the run was set up), not any
+                # single round's execution: use the config-only property so a per-round
+                # provider hiccup never rewrites the run's recorded configuration. The
+                # per-round pipeline_audit.json carries the execution-truthful flag.
+                "llm_aegis_reproduction": self._llm_aegis_reproduction_configured,
                 "actionability_threshold": (
                     float(self.actionability_threshold)
                     if self.candidate_mode == "paper"
