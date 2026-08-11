@@ -259,3 +259,48 @@ tests/unit/test_plugin_capabilities.py::TestShellHookProcessor::test_stop_hook_r
 `tests/unit` **946 passed / 2 failed(Windows-only 既有) / 10 skipped**，新测试 6 个全过。`ruff check` 两个文件全过。
 
 ---
+
+## M2a — 节点 id 单一权威 · 完成
+
+**commit**：`17d2f94`
+
+### 重构挖出一个潜伏 bug
+
+我原以为那两处 `proc:` 走法是「靠注释维系一致」。**它们本来就不一致**：
+
+- `to_graph` 数**每一个** `_target_` 非空的 dict
+- `_add_executes_before_edges` 在**递增计数器之前**先跳过了 `bucket == ""`
+
+所以：一个配置里若有显式空桶（`_hook_=""`）的持久化处理器，后面又跟着同一 target 的另一个实例，两条路算出的 `proc:` id **不同**，EXECUTES_BEFORE 边会指向错节点。
+
+当前没有配置长成这样，所以它一直潜伏。抽单一权威把它顺带修了。
+
+### 「没动任何已存储身份」是实测的
+
+这是行为变更，而 EXECUTES_BEFORE 边进 genotype，所以不能靠 diff 说话。写了个探针，对 `examples/` 下全部 5 个配置采集：genotype 哈希、deployment 哈希、全部 PROCESSOR 节点 id、全部 EXECUTES_BEFORE 边（持久层 + 运行层）。
+
+然后 `git stash` 掉图改动，用**同一个探针**跑改动前的代码，比对：
+
+```
+IDENTICAL - no stored identity moved across all 5 example configs
+```
+
+（探针第一版有两个坑：`HarnessConfig` 没有 `slots` 参数；哈希字段是缓存、`to_graph` 不填，得显式调 `identity.py` 的函数。第三版才对。）
+
+### 绑定为什么不能走 `_route_processors`
+
+id 序号按 **per-target 的 config 顺序**分配，而 hook 内执行序是 **per-hook 的拓扑排序**。`_route_processors` 返回的是拓扑排序后的列表，**association 已经丢了**。绑定必须跟随前者。
+
+测试里构造了一个刻意分歧的配置：同一个类在 `task_start` 上注册两次，`_order_` 分别是 10 和 1。执行序是 `[第二个, 第一个]`，节点 id 序是 `[proc:__alpha_proc=第一个, proc:__alpha_proc__2=第二个]`。绑定跟随后者——这条测试钉住了这个区别。
+
+### lint 核实
+
+`snapshot.py` 的 F821 `ComponentDecl` 和 format 问题都是**既有的**（`git show HEAD:` 的版本同样有）。format hunk 数从 HEAD 的 **21** 降到 **20**——反而干净了一点。符合「碰过的文件不许更脏」。
+
+### 验证
+
+`tests/graph` + `tests/core` + `tests/integration` **804 passed**。
+
+顺带修掉第 5 个同族编码 bug（`test_full_flow.py:651`，commit `f220add`）。
+
+---
