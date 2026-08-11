@@ -24,7 +24,7 @@ def test_no_imports_of_signals_remain():
     for py in (REPO / "recipe" / "gaia_evolver").rglob("*.py"):
         if py.name == "signals.py":
             continue
-        for i, line in enumerate(py.read_text().splitlines(), start=1):
+        for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), start=1):
             if pattern.search(line):
                 hits.append(f"{py}:{i}: {line.strip()}")
     assert not hits, "stale signals imports:\n" + "\n".join(hits)

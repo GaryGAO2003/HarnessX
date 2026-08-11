@@ -126,7 +126,7 @@ def test_record_key_uses_total_tokens_not_tokens():
     import pathlib
 
     run_py = pathlib.Path(__file__).parent.parent.parent / "recipe" / "gaia_evolver" / "run.py"
-    source = run_py.read_text()
+    source = run_py.read_text(encoding="utf-8")
     # Match dict-literal assignment ``"tokens": <value>`` that is NOT inside
     # a totals-aggregation dict (i.e., not the local `totals` dict builder).
     # The simplest guard: assert the old per-task record key assignment is gone.

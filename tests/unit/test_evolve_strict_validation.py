@@ -140,7 +140,7 @@ def test_task_specific_literals_warn_under_threshold(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     asyncio.run(run_literals_check(out_dir, scratch, strict=True))
-    findings = (scratch / "TASK_SPECIFIC_LITERALS.md").read_text()
+    findings = (scratch / "TASK_SPECIFIC_LITERALS.md").read_text(encoding="utf-8")
     assert "12345678-abcd-ef12-3456-7890abcdef12" in findings
 
 

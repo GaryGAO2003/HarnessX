@@ -48,7 +48,7 @@ _EXAMPLES = pathlib.Path(__file__).parent.parent.parent / "examples"
 
 
 def _load_example(name: str):
-    raw = _yaml.safe_load((_EXAMPLES / name / "harness_config.yaml").read_text()) or {}
+    raw = _yaml.safe_load((_EXAMPLES / name / "harness_config.yaml").read_text(encoding="utf-8")) or {}
     return HarnessConfig(
         processors=raw.get("processors") or [],
         plugins=raw.get("plugins") or [],
