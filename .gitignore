@@ -48,6 +48,15 @@ traces/
 .harnessx/
 oh_runs/
 recipe/gaia_evolver/skills/
+state/
+
+# Local-only experimental modules (not part of committed package)
+harnessx/hes/
+tests/hes/
+recipe/gaia_evolver_hes/
+
+# Local datasets (downloaded / hand-curated, not committed)
+recipe/gaia_evolver/data/
 
 # Playwright screenshots (browser_tool writes to tmpdir, but guard local paths)
 screenshots/
@@ -127,3 +136,5 @@ graphify-out/
 
 # Read-only variant-pool analysis outputs (experiments/analysis/*.py)
 experiments/analysis/out/
+recipe/tau2_evolver/runs*
+meta_rounds/

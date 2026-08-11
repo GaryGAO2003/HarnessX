@@ -243,7 +243,12 @@ def _make_provider(
             thinking_budget_tokens=thinking_budget_tokens,
             max_tokens=max_tokens,
         )
-    return LiteLLMProvider(model, extra_headers={"X-Model-Provider-Id": "YOUR_PROVIDER_ID"})
+    prov_kwargs: dict = {}
+    if api_base:
+        prov_kwargs["api_base"] = api_base
+    if "qwen" in model.lower():
+        prov_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+    return LiteLLMProvider(model, timeout=120.0, **prov_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -310,8 +315,7 @@ def _run_tau2_round(
         _nl_eval.DEFAULT_LLM_NL_ASSERTIONS = judge_model
         _nl_eval.DEFAULT_LLM_NL_ASSERTIONS_ARGS = {
             "temperature": 0.0,
-            "api_base": judge_api_base or agent_api_base,
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+            "api_base": judge_api_base or user_api_base or agent_api_base,
         }
 
     agent_llm_args: dict = {
@@ -321,13 +325,17 @@ def _run_tau2_round(
         "harness_config": str(round_config_path),
         "logs_dir": str(sessions_dir),
         "extended_thinking": agent_extended_thinking,
+        **(
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+            if "qwen" in agent_model.lower()
+            else {}
+        ),
         "thinking_budget_tokens": agent_thinking_budget,
         "request_timeout": 120.0,
     }
-    user_llm_args: dict = {
-        "api_base": user_api_base,
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-    }
+    user_llm_args: dict = {"api_base": user_api_base}
+    if user_api_base and "preset" in (user_api_base or ""):
+        user_llm_args["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
     if user_temperature is not None:
         user_llm_args["temperature"] = user_temperature
     if agent_temperature is not None:
