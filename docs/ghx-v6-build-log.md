@@ -209,4 +209,53 @@ ruff format --check → 208 files would be reformatted
 
 只修挡路的这 4 个。全仓还有约 60 处裸 `read_text()`（`benchmarks/`、`recipe/`、`extensions/`、`gateway/`），是真问题但改动面大得多，且当前不挡路——记在这里，不动。
 
+### 四 · 本地 `tests/unit` 基线含 2 个 Windows-only 失败
+
+```
+tests/unit/test_sandbox.py::TestSandbox::test_local_sandbox_exec_timeout
+    → 'sleep' is not recognized as an internal or external command
+tests/unit/test_plugin_capabilities.py::TestShellHookProcessor::test_stop_hook_runs_on_task_end
+    → 'touch' is not recognized as an internal or external command
+```
+
+测试里硬编码了 POSIX 命令。CI 跑 ubuntu 所以是绿的，这台机器上恒红。
+
+**本地基线锁定为 946 passed / 2 failed / 10 skipped**。这两个不修——不像 gbk 那个会中断收集，它们不挡路。
+
+（又一次 coder 报告与实测不符：D1 的 coder 说「948 passed」，实测 946+2。946+2=948，它把失败的也数进通过里了。**这是今晚第二次**，见过程账一。）
+
+---
+
+## D1 — 三笔欠账 · 完成
+
+**commit**：`4e0810f`（第一笔），`a0336f5`（第二、三笔）
+
+### 核心：审计从「配置推导」改成「执行推导」
+
+三个 LLM 适配器都会在 provider 报错或 JSON 连续两次解析失败时**静默降级**到确定性实现。而每轮审计记录的角色名来自 `self.aegis_* == "llm"`，即**配置**。结果是：一轮里两个角色悄悄降级，账上仍写 `MetaModel_llm_critic` 和 `llm_aegis_reproduction: true`。
+
+真三角色轮和降级轮**分不出来**——这就是它挡 6×3 的原因，账不可信。
+
+改法：每个 LLM 适配器带一个每轮执行计数器，记 LLM 完成数、回退数（复用已有的原因字符串）、以及 Digester 独有的 **no-target 第三态**（目标从池里消失，既不是 LLM 完成也不是错误回退）。
+
+**每轮新实例这件事我自己核过**：`_make_digester()` / `_make_planner()` / `_make_critic()` 在 `:5598/:5599/:5634` 现建，都在每轮调用的 `_run_paper_candidate_pipeline` 内，捕获点紧随其后（`:5640-5642`）。计数不会跨轮泄漏。轮循环顶部（`:5149-5151`）另有一次指针重置。
+
+**Digester 要计数不要旗标**：它是逐任务调用的。6 题里 5 题走 LLM、1 题回退，新的 `fallbacks` 块里看得见这个分裂，而不是被压成一个布尔。任一回退即丧失纯 LLM 名。
+
+### 一处有理有据的偏离
+
+`llm_aegis_reproduction` 有**第二个消费者**：run 级的 `run_config` manifest，和 `aegis_prompts`、`seed` 并列，记的是「这次运行怎么配置的」。
+
+如果把它改成纯执行推导，**最后一轮的一次 provider 抖动就会改写整个 run 的配置记录**。
+
+裁决：执行真相留给每轮审计，`run_config` 改读一个新的纯配置属性。第 6 个测试（`:312-325`）钉住这个分裂——同一时刻 `_configured is True` 而 `_llm_aegis_reproduction is False`。
+
+### 我自己补的一处
+
+审计载荷里那条注释（`:6146`）还写着旧语义「any deterministic role keeps it False」，没提回退条件。**过期注释正是造成这个 bug 的原因**，顺手改掉。
+
+### 验证
+
+`tests/unit` **946 passed / 2 failed(Windows-only 既有) / 10 skipped**，新测试 6 个全过。`ruff check` 两个文件全过。
+
 ---
