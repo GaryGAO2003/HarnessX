@@ -66,6 +66,7 @@ what it returned" shape :mod:`harnessx.ghx.graph_gate` uses on ``run_stage_4``.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 from pathlib import Path
 
@@ -189,6 +190,30 @@ def _append_pointer_to_config(cfg, pointer_md: str) -> None:
     _LOG.warning("brief_pointers: no SystemPromptProcessor entry found on config; pointer dropped")
 
 
+# ── injection manifest (the production artifact the Digester cannot leave) ────────
+
+
+def _record_injection(run_dir, round_n: int, role: str, task_id, paths: "list[str]") -> None:
+    """Append one injection record to ``R{round_n}/graph_evidence/injections.json``.
+
+    Why this exists: the official orchestrator persists Planner/Evolver/Critic
+    sessions but NEVER the Digester's — its injected system prompt lives only in
+    memory, so without this file a production run leaves no artifact proving the
+    Digester pointer fired (L2 smoke finding, 2026-08-11). Recording ONLY actual
+    injections (a record exists iff a pointer section was appended) turns the
+    per-role, per-task injection accounting into an on-disk fact. Read-modify-write
+    is safe under asyncio's single thread — these builders are sync calls with no
+    await between read and write.
+    """
+    manifest = _evidence_dir(run_dir, round_n) / "injections.json"
+    try:
+        records = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else []
+    except (OSError, ValueError):
+        records = []
+    records.append({"role": role, "task_id": task_id, "round": round_n, "paths": paths})
+    manifest.write_text(json.dumps(records, indent=2), encoding="utf-8")
+
+
 # ── the rebind ───────────────────────────────────────────────────────────────────
 
 
@@ -228,6 +253,7 @@ def install_brief_pointers(run_dir, round_n: int, failed_task_ids):
                 paths = digester_evidence_paths(run_dir, round_n, task_id)
                 if paths:
                     _append_pointer_to_config(cfg, _render_pointer_section(paths))
+                    _record_injection(run_dir, round_n, "digester", str(task_id), paths)
         except Exception as exc:  # noqa: BLE001 — pointer injection must never sink a round
             _LOG.warning("brief_pointers: digester pointer injection failed (non-fatal): %s", exc)
         return cfg
@@ -238,6 +264,7 @@ def install_brief_pointers(run_dir, round_n: int, failed_task_ids):
             paths = planner_evidence_paths(run_dir, round_n)
             if paths:
                 _append_pointer_to_config(cfg, _render_pointer_section(paths))
+                _record_injection(run_dir, round_n, "planner", None, paths)
         except Exception as exc:  # noqa: BLE001 — pointer injection must never sink a round
             _LOG.warning("brief_pointers: planner pointer injection failed (non-fatal): %s", exc)
         return cfg

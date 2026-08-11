@@ -1,11 +1,21 @@
 # Copyright 2026 Darwin-Agent
 # SPDX-License-Identifier: MIT
-"""G1 test 5 — the vendored AEGIS package is byte-for-byte unmodified.
+"""G1 test 5 — the vendored AEGIS package is content-unmodified.
 
 'The official package is unmodified' is made an executable property, not a claim:
 sha256 every file under harnessx/aegis/ and compare against a checked-in manifest.
 A legitimate future re-vendor regenerates the manifest deliberately (see
 ``_regenerate`` below); an accidental edit to a vendored file fails this test.
+
+Hashing is EOL-normalized (CRLF→LF before sha256), NOT raw-byte. Raw bytes were
+tried first and produced a false alarm on 2026-08-11: the official pilot's own
+snapshot/restore machinery rewrites some of its files in text mode at phase
+boundaries (observed at L0 round-end, L1 startup, L2 critic phase — six files,
+disk−blob size delta exactly equal to the line count, git content identical), so
+on Windows every pilot run flips LF→CRLF and a raw-byte pin fails on every run
+while the CONTENT is untouched. EOL churn is content-neutral for Python/Markdown;
+any real edit still changes the normalized hash. The trade: an attack that ONLY
+changes line endings is no longer caught — accepted, it is semantically inert.
 """
 
 from __future__ import annotations
@@ -29,7 +39,7 @@ def _hash_tree() -> dict[str, str]:
         if "__pycache__" in parts or p.suffix == ".pyc":
             continue
         rel = p.relative_to(_AEGIS_ROOT).as_posix()
-        manifest[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        manifest[rel] = hashlib.sha256(p.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     return manifest
 
 

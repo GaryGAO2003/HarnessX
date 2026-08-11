@@ -406,6 +406,9 @@ async def test_wiring_reentry_reaches_original_exactly_once(tmp_path, monkeypatc
 
 
 def _hash_aegis_tree() -> dict[str, str]:
+    # EOL-normalized, matching tests/ghx/test_vendored_integrity.py: the pilot's own
+    # snapshot/restore rewrites files in text mode on Windows (LF→CRLF), so raw-byte
+    # hashing false-alarms after every real run.
     root = Path(_aegis_pkg.__file__).parent
     out: dict[str, str] = {}
     for p in sorted(root.rglob("*")):
@@ -414,7 +417,7 @@ def _hash_aegis_tree() -> dict[str, str]:
         parts = p.relative_to(root).parts
         if "__pycache__" in parts or p.suffix == ".pyc":
             continue
-        out[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+        out[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     return out
 
 

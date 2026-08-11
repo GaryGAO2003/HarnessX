@@ -173,6 +173,15 @@ async def test_wired_round_pointer_only_for_failed_tasks_with_evidence(tmp_path)
     # Planner: pointer section lists facts.md + alpha's cone (only alpha — beta has none).
     assert planner_prompt.endswith(_expected_section([str(facts), str(cone_alpha)]))
 
+    # The injection manifest is the on-disk artifact the Digester's unpersisted
+    # session cannot leave: exactly one digester record (alpha, never beta) and one
+    # planner record, each naming the exact injected paths.
+    manifest = json.loads((run_dir / "R1" / "graph_evidence" / "injections.json").read_text(encoding="utf-8"))
+    assert {(r["role"], r["task_id"]) for r in manifest} == {("digester", "alpha"), ("planner", None)}
+    by_role = {r["role"]: r for r in manifest}
+    assert by_role["digester"]["paths"] == [str(cone_alpha), str(facts)]
+    assert by_role["planner"]["paths"] == [str(facts), str(cone_alpha)]
+
 
 # ── test 2: flag off → prompt bytes identical to the unpatched builder ─────────────
 
@@ -269,6 +278,8 @@ async def test_no_evidence_dir_at_all_leaves_prompt_untouched(tmp_path):
 
     assert _EXPECTED_HEADER not in wrapped_text
     assert wrapped_text == _prompt_text(_orig_digester_builder(inputs))
+    # No injection happened → no manifest record was written anywhere.
+    assert not (run_dir / "R1" / "graph_evidence" / "injections.json").exists()
 
 
 # ── test 4: rebind installs and restores, including across an exception ────────────
@@ -312,6 +323,9 @@ def test_rebind_restores_on_exception_inside_round(tmp_path):
 
 
 def _hash_aegis_tree() -> "dict[str, str]":
+    # EOL-normalized, matching tests/ghx/test_vendored_integrity.py: the pilot's own
+    # snapshot/restore rewrites files in text mode on Windows (LF→CRLF), so raw-byte
+    # hashing false-alarms after every real run.
     root = Path(_aegis_pkg.__file__).parent
     out: dict[str, str] = {}
     for p in sorted(root.rglob("*")):
@@ -320,7 +334,7 @@ def _hash_aegis_tree() -> "dict[str, str]":
         parts = p.relative_to(root).parts
         if "__pycache__" in parts or p.suffix == ".pyc":
             continue
-        out[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+        out[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     return out
 
 
