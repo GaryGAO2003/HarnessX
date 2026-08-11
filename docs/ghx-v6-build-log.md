@@ -799,3 +799,10 @@ Z 相应改成：
 - **连锁污染**：72e110e7 假 pass 已被 ship_outcomes 记为 C-R1-01 命中——评测噪声向上污染因果账的现场标本（CH5）。
 - 发车插曲：worktree 干净检出缺任务数据 → FileNotFoundError；`.gitignore` 写明 GAIA 系 gated 数据禁止再分发（连私仓都不行）——baseline 分支"完整"止于代码，数据+.env 按规矩侧载。
 - 悬决升级：判分层加固（强 judge / k 票 / GT-不在场即复核）是否做、做在哪条分支——不加固则 6 题床单个假阳性=16.7pp 噪声，基线分数不可信。
+
+## baseline 线修复合流（00c1c9a 推送 origin）
+
+- 用户令"这些修复也 apply 到我们这边"。核实：regressions off-by-one（df17af9）、Windows 缝合（5a2eaa4，事变三三文件的正规重做 + read_scope_gate 盘符匹配）、critic.md 锚点（3bf8b38）**早已随主线在 HEAD**；判分器两笔（quote-required 判分 f0f09c2、判窗 5→20 轮/1500→4000 字 5d43a2b）经 merge + 对面会话同时 cherry-pick 双路到达，内容收敛一致。工作树 grep 实证 quote-required 在场，evaluator 导入通过，70 套件绿。
+- **钉的语义更新（诚实记账）**：完整性 manifest 自 G1c 重建起锚定的是"HEAD 的已审计修补态"（含上述 vendored 修复），不再是 pristine 上游——钉的职能从"证明未改"变为"证明无未审计之改"。
+- 并行协同注记：两会话同分支竞写（对面 cherry-pick 与我的 merge 同刻发生），git 自然收敛，无冲突；已推送，origin 为会合点。
+- **对阶梯的意义**：此后一切正式跑用加固判分器打分——判分假阳性（5/36 假 PASS、符号翻转）在源头被杀，名义分≈审计分。
