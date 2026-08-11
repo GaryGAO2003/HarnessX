@@ -726,3 +726,8 @@ Z 相应改成：
 - 接线零启动器改动：`run_round_with_graph_evidence` 内包住 `run_round` 调用，L2+ 自动生效（launcher 21 测试原样过）。
 - **变异探针 ×2（独立）**：agent 拆 `.exists()` 守卫（3 测试倒，无中生有指针被抓）；我拆失败任务域（精确杀 wired-round 对照测试——通过任务的 Digester 被塞失败证据）。均回滚复绿。tests/ghx+recipe **70 过**，lint 净。
 - 至此问题清单第 ① 条关闭：L2/L3 的信息流最后一跳闭合，证据从"可读"变为"必见"。
+
+## 点火日志（凭证到位后）
+
+- 通道验证：LiteLLM proxy 2.1s 往返；**DeepSeek-V4-Flash 默认不推理**（无参对照 `completion_tokens=2`、`reasoning:null`）→ provider 零改造。SERPER 实查通过。`.env` 写入前确认 `.gitignore:24` 覆盖。
+- **首航失败 #1（小问题，记录）**：vendored 默认 `--tasks` 指向 `webthinker_gaia_dev_classified.json`，本地不存在 → FileNotFoundError。runbook §4 曾照默认路径抄成"本地齐全"，未验存在性，已更正：`--tasks` 必须显式给。重点火用 `holdout6.json`（list 根格式，loader 兼容，无 category 全归 unknown 域）。

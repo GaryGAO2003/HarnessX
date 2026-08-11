@@ -57,7 +57,8 @@ recipe/gaia_evolver/
 
 ## 4 · 任务数据（本地齐全，无需下载）
 
-`recipe/gaia_evolver/data/`：`holdout6.json`、`calib6.json`、`hard3.json`、`pilot12/20/30.json`、`frozen_plans.json`、`webthinker_gaia_dev_classified.json`（runner 默认）。
+`recipe/gaia_evolver/data/`：`holdout6.json`、`calib6.json`、`hard3.json`、`pilot12/20/30.json`、`smoke10.json`、`pool_bed50.json`、`webthinker_gaia_dev.json`（完整 dev 集）等。
+⚠ vendored runner 的默认 `--tasks` 指向 `webthinker_gaia_dev_classified.json`——**本地不存在**（首航实测 FileNotFoundError），所以 `--tasks` 必须显式给。本地文件是 list 根格式，loader 兼容（无 `category` 字段则全部归 "unknown" 域）。
 
 **床位建议**：103×3 实测同配置噪声包络 ±5 题（≈±5%）。pilot6/12 上级间差会被噪声淹没——阶梯对照要么上大床（DS 价位可负担），要么小床多种子重复。点火前先定。
 
