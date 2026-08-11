@@ -178,6 +178,15 @@ class ShipOutcome:
     #: W19 — did the declared ``attribution_signature`` actually appear in the
     #: next round's traces? ``None`` = not checked yet.
     attribution_satisfied: bool | None = None
+    #: v6 — the graph node ids this shipped candidate actually edited, taken from
+    #: the candidate's ``graph_edits`` (``GraphEdit.affected_node_ids``). ``None``
+    #: (the default) is RECORDED-AS-UNKNOWN: graph-edit information was not
+    #: captured for this ship, so its touch history is unknown — never inferred to
+    #: be "touched nothing". An empty list is the opposite fact: recording ran and
+    #: the ship touched no graph node (e.g. a prompt-text-only edit). The Planner
+    #: uses the distinction to tell an implicated node a prior ship never edited
+    #: from one whose edit history is simply unrecorded.
+    graph_nodes_touched: list[str] | None = None
 
     @property
     def hits(self) -> list[str]:
@@ -196,7 +205,7 @@ class ShipOutcome:
         return len(self.hits) / len(self.predicted_flips)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "candidate_id": self.candidate_id,
             "round_idx": self.round_idx,
             "variant_id": self.variant_id,
@@ -208,6 +217,12 @@ class ShipOutcome:
             "attribution_satisfied": self.attribution_satisfied,
             "hit_rate": self.hit_rate,
         }
+        # Emitted ONLY when recording ran, so a ship with no graph-edit info
+        # serializes byte-identically to pre-v6 ``ship_outcomes.json`` (the key
+        # is simply absent, which reads back as ``None`` = unknown).
+        if self.graph_nodes_touched is not None:
+            payload["graph_nodes_touched"] = list(self.graph_nodes_touched)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ShipOutcome:
@@ -221,6 +236,9 @@ class ShipOutcome:
             realized_flips=list(data.get("realized_flips", [])),
             realized_regressions=list(data.get("realized_regressions", [])),
             attribution_satisfied=data.get("attribution_satisfied"),
+            graph_nodes_touched=(
+                list(data["graph_nodes_touched"]) if data.get("graph_nodes_touched") is not None else None
+            ),
         )
 
 
@@ -314,12 +332,27 @@ class EvidenceStore:
         (or by a fork) needs. Each entry is ``{round_idx, variant_id, outcome,
         solved, failure_category, ships}``, where ``ships`` are the candidate
         ids shipped in that round whose manifest named this task.
+
+        v6: when a ship in that round recorded ``graph_nodes_touched`` (not
+        ``None``), the entry also carries ``ship_nodes`` — the sorted union of
+        the graph node ids those ships edited. The key is present ONLY when
+        recording ran (an empty list then means "recorded, touched no node"); its
+        absence is the "unknown" fact, so an entry with no graph-recording ship
+        stays byte-identical to before. This lets the Planner tell an implicated
+        node never edited from one whose edit history is simply unrecorded.
         """
         by_round: dict[int, list[str]] = {}
+        nodes_by_round: dict[int, set[str]] = {}
+        recorded_rounds: set[int] = set()
         for ship in self.ship_outcomes():
             named = set(ship.get("predicted_flips", [])) | set(ship.get("predicted_at_risk", []))
             if task_id in named:
-                by_round.setdefault(int(ship["round_idx"]), []).append(str(ship["candidate_id"]))
+                round_of_ship = int(ship["round_idx"])
+                by_round.setdefault(round_of_ship, []).append(str(ship["candidate_id"]))
+                touched = ship.get("graph_nodes_touched")
+                if touched is not None:
+                    recorded_rounds.add(round_of_ship)
+                    nodes_by_round.setdefault(round_of_ship, set()).update(str(node) for node in touched)
 
         history: list[dict[str, Any]] = []
         for digest in self.iter_digests():
@@ -327,16 +360,17 @@ class EvidenceStore:
                 continue
             if variant_id is not None and digest.variant_id != variant_id:
                 continue
-            history.append(
-                {
-                    "round_idx": digest.round_idx,
-                    "variant_id": digest.variant_id,
-                    "outcome": list(digest.outcome),
-                    "solved": digest.solved,
-                    "failure_category": digest.failure_category,
-                    "ships": sorted(by_round.get(digest.round_idx, [])),
-                }
-            )
+            entry: dict[str, Any] = {
+                "round_idx": digest.round_idx,
+                "variant_id": digest.variant_id,
+                "outcome": list(digest.outcome),
+                "solved": digest.solved,
+                "failure_category": digest.failure_category,
+                "ships": sorted(by_round.get(digest.round_idx, [])),
+            }
+            if digest.round_idx in recorded_rounds:
+                entry["ship_nodes"] = sorted(nodes_by_round.get(digest.round_idx, set()))
+            history.append(entry)
         history.sort(key=lambda entry: (entry["round_idx"], entry["variant_id"]))
         return history
 
@@ -501,6 +535,7 @@ def ship_outcome_from_manifest(
     realized_flips: Iterable[str] = (),
     realized_regressions: Iterable[str] = (),
     attribution_satisfied: bool | None = None,
+    graph_nodes_touched: Iterable[str] | None = None,
 ) -> ShipOutcome:
     """Score a shipped :class:`.manifest.ChangeManifest` against what happened.
 
@@ -508,6 +543,11 @@ def ship_outcome_from_manifest(
     :mod:`.evidence` and :mod:`.manifest` stay independent: the manifest is the
     prediction, the store is the record, and this is the one place they meet.
     ``manifest`` is duck-typed for that reason.
+
+    ``graph_nodes_touched`` is threaded through untouched: ``None`` (the default)
+    keeps the ship recorded-as-unknown for graph touches, a supplied iterable
+    (the shipped candidate's ``graph_edits`` node ids) records exactly what was
+    edited. It is never derived here — the caller holds the candidate.
     """
     return ShipOutcome(
         candidate_id=manifest.candidate_id,
@@ -519,4 +559,5 @@ def ship_outcome_from_manifest(
         realized_flips=list(realized_flips),
         realized_regressions=list(realized_regressions),
         attribution_satisfied=attribution_satisfied,
+        graph_nodes_touched=(None if graph_nodes_touched is None else list(graph_nodes_touched)),
     )

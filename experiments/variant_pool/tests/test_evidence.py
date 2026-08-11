@@ -362,3 +362,43 @@ def test_ship_outcome_dict_round_trip(store: EvidenceStore) -> None:
     ship.realized_regressions = ["c"]
     store.append_ship(ship)
     assert list(store.iter_ships()) == [ship]
+
+
+# ---------------------------------------------------------------------------
+# v6 — recorded ship-node touches reach the Planner via cross_round_history
+# ---------------------------------------------------------------------------
+
+
+def test_cross_round_history_surfaces_recorded_ship_nodes(store: EvidenceStore) -> None:
+    store.append_digest(_digest("t", 0))
+    store.append_digest(_digest("t", 1))
+    ship = _ship("C-R0-01", 0, levers=["config"], predicted=["t"], realized=[])
+    ship.graph_nodes_touched = ["proc:cost_guard_processor"]
+    store.append_ship(ship)
+
+    entry = store.cross_round_history("t", "V0")[0]
+    assert entry["round_idx"] == 0
+    assert entry["ship_nodes"] == ["proc:cost_guard_processor"]
+
+
+def test_cross_round_history_omits_ship_nodes_when_unrecorded(store: EvidenceStore) -> None:
+    store.append_digest(_digest("t", 0))
+    # graph_nodes_touched left None (recording did not run): the key is ABSENT,
+    # which the Planner reads as "unknown", never as "touched nothing".
+    ship = _ship("C-R0-01", 0, levers=["config"], predicted=["t"], realized=[])
+    store.append_ship(ship)
+
+    entry = store.cross_round_history("t", "V0")[0]
+    assert "ship_nodes" not in entry
+
+
+def test_recorded_but_empty_ship_nodes_is_a_fact_not_unknown(store: EvidenceStore) -> None:
+    store.append_digest(_digest("t", 0))
+    # a prompt-text-only ship: recording ran, touched no graph node -> key present
+    # with an empty list, which is "recorded, never edited" not "unknown".
+    ship = _ship("C-R0-01", 0, levers=["prompt"], predicted=["t"], realized=[])
+    ship.graph_nodes_touched = []
+    store.append_ship(ship)
+
+    entry = store.cross_round_history("t", "V0")[0]
+    assert entry["ship_nodes"] == []

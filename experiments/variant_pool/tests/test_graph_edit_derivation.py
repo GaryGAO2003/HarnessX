@@ -273,3 +273,142 @@ def test_planner_named_node_survives_into_the_evolver_brief() -> None:
 def test_empty_implicated_node_is_stripped_for_a_byte_identical_contract() -> None:
     brief = CandidateBrief(brief_id="P-R1-01", buckets=("config",), task_ids=("t1",), rationale="x")
     assert "implicated_node" not in rvp._planner_brief_for_contract(brief)
+
+
+# ---------------------------------------------------------------------------
+# (7) two graph facts a bucket list cannot carry: cross-task shared nodes and
+#     per-node edit history (v6 step 1/2). All at the _compose_input surface.
+# ---------------------------------------------------------------------------
+
+
+def _planner() -> rvp._LLMPlanner:
+    return rvp._LLMPlanner(provider=object(), k_t=2, fallback=rvp._DeterministicPlanner(k_t=2))
+
+
+def _failed_named(task_id: str, nodes, *, prior=(), anchors=()) -> TaskDigest:
+    return TaskDigest(
+        task_id=task_id,
+        round_idx=1,
+        variant_id="V0",
+        outcome=(0, 2),
+        implicated_nodes=list(nodes),
+        prior_history=list(prior),
+        evidence_anchors=list(anchors),
+    )
+
+
+def test_three_failing_tasks_sharing_a_node_name_it_and_the_tasks(tmp_path: Path) -> None:
+    shared = "proc:cost_guard_processor"
+    digests = tuple(_failed_named(t, [shared, f"proc:only_{t}"]) for t in ("t1", "t2", "t3"))
+    body = _planner()._compose_input(_ctx(tmp_path), digests, max_anchors=None)
+
+    assert "CROSS-TASK SHARED NODES (implicated in >1 failing task this round):" in body
+    shared_line = next(ln for ln in body.splitlines() if ln.startswith(f"- {shared}:"))
+    assert all(t in shared_line for t in ("t1", "t2", "t3"))
+    # a node implicated in a SINGLE failing task is not a shared fact
+    assert "- proc:only_t1:" not in body
+
+
+def test_disjoint_cones_make_no_shared_node_section(tmp_path: Path) -> None:
+    digests = tuple(_failed_named(t, [f"proc:only_{t}"]) for t in ("t1", "t2", "t3"))
+    body = _planner()._compose_input(_ctx(tmp_path), digests, max_anchors=None)
+    # absent, not an empty header
+    assert "CROSS-TASK SHARED NODES" not in body
+
+
+def test_node_edit_history_reports_touched_never_and_unknown(tmp_path: Path) -> None:
+    touched = "proc:cost_guard_processor"
+    untouched = "proc:loop_detection_processor"
+    # history PRESENT: a prior ship recorded editing `touched` (ship_nodes key)
+    prior = [
+        {
+            "round_idx": 0,
+            "variant_id": "V0",
+            "outcome": [0, 2],
+            "solved": False,
+            "failure_category": "blocked_source",
+            "ships": ["C-R0-01"],
+            "ship_nodes": [touched],
+        }
+    ]
+    digests = (
+        _failed_named("t1", [touched], prior=prior),
+        _failed_named("t2", [untouched], prior=prior),
+    )
+    body = _planner()._compose_input(_ctx(tmp_path), digests, max_anchors=None)
+    assert f"- {touched}: touched by a prior ship" in body
+    assert f"- {untouched}: never edited" in body
+
+    # history ABSENT (no ship_nodes key anywhere): unknown, and NOT "never edited"
+    unknown = _planner()._compose_input(_ctx(tmp_path), (_failed_named("t1", [touched]),), max_anchors=None)
+    assert "NODE EDIT HISTORY" in unknown
+    assert "unknown" in unknown
+    assert "never edited" not in unknown
+
+
+def test_no_implicated_nodes_keeps_compose_input_byte_identical(tmp_path: Path) -> None:
+    # A rich round WITH prior_history but no implicated_nodes on any digest: both
+    # graph-fact blocks are skipped, so the serialized input is byte-for-byte the
+    # pre-v6 output. Asserted on exact bytes, not a substring.
+    prior = [
+        {
+            "round_idx": 0,
+            "variant_id": "V0",
+            "outcome": [0, 2],
+            "solved": False,
+            "failure_category": "x",
+            "ships": ["C-R0-01"],
+        }
+    ]
+    digests = (
+        TaskDigest(
+            task_id="t1",
+            round_idx=1,
+            variant_id="V0",
+            outcome=(0, 2),
+            failure_category="blocked_source",
+            implicated_components=["tools/WebFetch"],
+            evidence_anchors=["traj#0"],
+            prior_history=prior,
+        ),
+        TaskDigest(task_id="t2", round_idx=1, variant_id="V0", outcome=(2, 2)),
+    )
+    planner = _planner()
+    body = planner._compose_input(_ctx(tmp_path), digests, max_anchors=None)
+
+    expected = "\n".join(
+        [
+            "TARGET VARIANT: V0",
+            "ROUND: 1",
+            "K_t (max briefs to emit this round): 2",
+            "ACTIVE REGRESSIONS (previously solved, now failing): none",
+            "SETTLED FAILURE CATEGORIES: none",
+            "",
+            "PER-TASK SUMMARIES THIS ROUND:",
+            "- t1: FAILED (0/2); category=blocked_source; components=[tools/WebFetch]; evidence=[traj#0]",
+            "    prior_history: R0:failed/x ships=[C-R0-01]",
+            "- t2: SOLVED (2/2); category=unknown; components=[none]; evidence=[none]",
+        ]
+    )
+    assert body == expected
+    # and the tail helper contributes nothing when no node is implicated
+    assert planner._graph_fact_lines(digests) == []
+
+
+def test_graph_facts_are_bounded_and_summaries_survive_the_cap(tmp_path: Path) -> None:
+    big_anchor = "z" * 4000
+    n_nodes = rvp._LLM_PLANNER_GRAPH_FACT_MAX_NODES + 10
+    shared_nodes = [f"proc:node_{i:02d}" for i in range(n_nodes)]
+    # every one of the many nodes is implicated by BOTH failing tasks -> all shared
+    digests = tuple(_failed_named(f"t{t}", shared_nodes, anchors=[big_anchor] * 5) for t in range(6))
+    body, truncation = _planner()._build_input(_ctx(tmp_path), digests)
+
+    assert len(body) <= rvp._LLM_PLANNER_INPUT_CAP
+    assert truncation  # evidence_anchors were trimmed, not the graph facts
+    # the shared-node section is bounded: at most MAX_NODES bullets, then (+K more)
+    shared_bullets = [ln for ln in body.splitlines() if ln.startswith("- proc:node_")]
+    assert len(shared_bullets) <= rvp._LLM_PLANNER_GRAPH_FACT_MAX_NODES
+    assert "more shared node(s))" in body
+    # the per-task summaries survive: every task id is still present
+    for t in range(6):
+        assert f"t{t}" in body

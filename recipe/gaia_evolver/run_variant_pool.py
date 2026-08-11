@@ -2098,6 +2098,63 @@ def _digest_prior_ship_history(digest: TaskDigest) -> str:
     return "; ".join(entries)
 
 
+def _planner_shared_implicated_nodes(
+    digests: Sequence[TaskDigest],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Graph nodes implicated in MORE THAN ONE failing task this round.
+
+    The set intersection over the failing tasks' causal cones — the one thing the
+    graph can state that a bucket list cannot: three tasks failing through one
+    shared node is a different landscape from three unrelated failures, and in a
+    bucket list those two look identical. Only FAILED digests count (a solved
+    task's cone is not a failure to explain), a node is counted once per DISTINCT
+    task, and only nodes reaching >1 distinct task are returned — a node in a
+    single task is not shared. Ordered by descending task count then node id, so
+    the Planner's input is deterministic. Empty when nothing is shared, which the
+    caller renders as NO section (not an empty header).
+    """
+    tasks_by_node: dict[str, set[str]] = {}
+    for digest in digests:
+        if digest.solved:
+            continue
+        for node in digest.implicated_nodes:
+            if node:
+                tasks_by_node.setdefault(node, set()).add(digest.task_id)
+    shared = [(node, tuple(sorted(tasks))) for node, tasks in tasks_by_node.items() if len(tasks) > 1]
+    shared.sort(key=lambda item: (-len(item[1]), item[0]))
+    return shared
+
+
+def _planner_node_edit_history(
+    digests: Sequence[TaskDigest],
+) -> tuple[bool, frozenset[str], tuple[str, ...]]:
+    """``(history_recorded, touched_nodes, implicated_nodes)`` for the edit report.
+
+    ``implicated_nodes`` is every node named by a FAILED task this round (sorted,
+    de-duplicated). ``touched_nodes`` is the union of the ``ship_nodes`` the
+    EvidenceStore recorded on the digests' ``prior_history`` — the nodes prior
+    shipped candidates actually edited. ``history_recorded`` is whether ANY
+    prior_history round entry carried the ``ship_nodes`` key at all: absent
+    everywhere means the edit history is UNKNOWN (round 1, or ship-node recording
+    off), which the caller MUST report as "unknown" — never as "never edited".
+    Recorded-but-empty (``ship_nodes == []``) still counts as recorded, so a run
+    that shipped only prompt-text edits reports its implicated nodes as never
+    edited rather than unknown. Record, never infer.
+    """
+    implicated: set[str] = set()
+    touched: set[str] = set()
+    recorded = False
+    for digest in digests:
+        if not digest.solved:
+            implicated.update(node for node in digest.implicated_nodes if node)
+        for entry in digest.prior_history:
+            if not isinstance(entry, dict) or "ship_nodes" not in entry:
+                continue
+            recorded = True
+            touched.update(str(node) for node in (entry.get("ship_nodes") or []))
+    return recorded, frozenset(touched), tuple(sorted(implicated))
+
+
 def _repo_journal_file_changes(
     current_config_path: Path,
     new_config_path: Path,
@@ -4103,6 +4160,17 @@ _PAPER_EDIT_CLASSES = ("prompt", "tools", "config", "processor")
 #: context.
 _LLM_PLANNER_INPUT_CAP = 30_000
 
+#: v6 — budget for the two graph-fact sections the Planner is shown (cross-task
+#: shared nodes; per-node edit history). Each section names at most this many
+#: nodes, in a deterministic order, then a ``(+K more)`` tail; a shared node
+#: lists at most :data:`_LLM_PLANNER_GRAPH_FACT_MAX_TASKS` task ids. Combined with
+#: appending the block at the very TAIL of the input, the count bound keeps the
+#: sections small and never lets them displace the per-task summaries: the
+#: anchor-trim loop trims evidence_anchors (not these) and any hard truncation
+#: cuts the tail (these) before the summaries at the front.
+_LLM_PLANNER_GRAPH_FACT_MAX_NODES = 24
+_LLM_PLANNER_GRAPH_FACT_MAX_TASKS = 8
+
 #: [OURS] Planner prompt. Frozen/audited later, so it is a module constant
 #: carrying the instruction + inline JSON schema; the round's evidence is
 #: appended at call time. The Planner does NOT re-derive task outcomes — it reads
@@ -4358,7 +4426,60 @@ class _LLMPlanner:
             lines.append("PRIOR ABSTAINS (last round):")
             for candidate_id, reason in context.prior_abstains:
                 lines.append(f"- {candidate_id}: {reason}")
+        # v6 step 1/2: two graph facts a bucket list cannot carry, both derived
+        # from the digests already in hand — (1) nodes shared by more than one
+        # failing task's cone, (2) which implicated nodes prior ships edited.
+        # Appended at the very TAIL and bounded by _LLM_PLANNER_GRAPH_FACT_MAX_*,
+        # so with no implicated_nodes anywhere both blocks are skipped and this
+        # serialized input is byte-identical to before.
+        lines.extend(self._graph_fact_lines(digests))
         return "\n".join(lines)
+
+    @staticmethod
+    def _graph_fact_lines(digests: tuple[TaskDigest, ...]) -> list[str]:
+        """The cross-task-shared-nodes and node-edit-history sections (v6).
+
+        Returns the lines to append; an empty list when no failing task implicates
+        a node, which keeps :meth:`_compose_input` byte-identical to pre-v6. Each
+        section is bounded to :data:`_LLM_PLANNER_GRAPH_FACT_MAX_NODES` nodes (with
+        a ``(+K more)`` tail), so neither can crowd out the per-task summaries.
+        """
+        lines: list[str] = []
+        shared = _planner_shared_implicated_nodes(digests)
+        if shared:
+            lines.append("")
+            lines.append("CROSS-TASK SHARED NODES (implicated in >1 failing task this round):")
+            for node, task_ids in shared[:_LLM_PLANNER_GRAPH_FACT_MAX_NODES]:
+                shown = task_ids[:_LLM_PLANNER_GRAPH_FACT_MAX_TASKS]
+                extra_tasks = len(task_ids) - len(shown)
+                task_str = ", ".join(shown)
+                if extra_tasks:
+                    task_str += f" (+{extra_tasks} more)"
+                lines.append(f"- {node}: {task_str}")
+            extra_nodes = len(shared) - min(len(shared), _LLM_PLANNER_GRAPH_FACT_MAX_NODES)
+            if extra_nodes:
+                lines.append(f"- (+{extra_nodes} more shared node(s))")
+
+        recorded, touched, implicated = _planner_node_edit_history(digests)
+        if implicated:
+            lines.append("")
+            if not recorded:
+                # No prior ship recorded which nodes it edited: unknown, NOT
+                # "never edited". An empty list implying "never" is the false
+                # fact this branch exists to refuse.
+                lines.append(
+                    "NODE EDIT HISTORY (implicated nodes vs prior ships): "
+                    "unknown -- no prior ship recorded which graph nodes it edited"
+                )
+            else:
+                lines.append("NODE EDIT HISTORY (implicated nodes vs prior ships):")
+                for node in implicated[:_LLM_PLANNER_GRAPH_FACT_MAX_NODES]:
+                    status = "touched by a prior ship" if node in touched else "never edited"
+                    lines.append(f"- {node}: {status}")
+                extra_impl = len(implicated) - min(len(implicated), _LLM_PLANNER_GRAPH_FACT_MAX_NODES)
+                if extra_impl:
+                    lines.append(f"- (+{extra_impl} more implicated node(s))")
+        return lines
 
     @staticmethod
     def _prior_ship_history(digest: TaskDigest) -> str:
