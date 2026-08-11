@@ -527,3 +527,70 @@ spy 只数处理器调用，U 现在多了工具节点，不拆开没法比。�
 842 / 114（双旗标）/ 961+2。
 
 ---
+
+## M6a — 因果查询层 · 完成
+
+**commit**：`294dae1`
+
+### 尺寸数字就是这一层存在的理由
+
+真实 12 步运行实测（我自己跑出来复核过）：
+
+```
+whole U     228 nodes    70,090 chars   ← 超过 30k 上限，会被截断
+full cone    41 nodes    16,879 chars   ← 0.241
+data cone    14 nodes     5,875 chars   ← 0.084
+```
+
+**这个运行是真的会被截断的。** 锥装得下且有余量，数据锥（到达定义的槽位流，丢掉仅仅相邻的控制链）大约是全图的十二分之一——那一片就是归因锥。
+
+### 三个裁决
+
+**锚点是机制不是策略。** 失败不是 U 里的节点，所以由调用方指定锚点。U 记的是「工具跑过」，**不记它成没成功**——所以这一层拒绝发明一套它无法从轨迹背书的错误策略。调用方从自己的 journal 认出失败工具，再按节点 id 锚定。
+
+**`ancestors` 不静默跨 `INVOKES`。** 那条边是**向前**的（父→子），而且没有任何数据边把子层结果带回后续的父层节点（工具结果进 `raw_messages` 不进槽位——`tool_relations` 已记录的同一条限制）。所以把子 run 称作后续父层失败的**祖先**是**过度声称**。
+
+代之以：边界**可观测**——`invokes_frontier` 总是报告离开锥的 `INVOKES` 边，调用方永远能知道锥碰到了子代理边界；下潜是**可选**的，走 resolver 回调，让这一层不碰文件 IO。
+
+**边类型过滤每个查询都有**，因为控制锥和数据锥回答的是不同的问题。
+
+### 终止性
+
+访问集 BFS，任何输入都终止。U 构造上是 DAG，但有一个测试**故意喂一个带环的图**，确认它返回有限可达集而不是死循环。
+
+### 变异验证
+
+把遍历方向翻转（`ancestors` 返回 descendants），**4 个测试失败**，其中一个是专门为抓这个混淆写的——因为错的答案**看起来完全合理**。还原后 16 全过。我独立复验过。
+
+### 验证
+
+859 / 115（双旗标）/ 961+2。
+
+---
+
+## ⚠ Z 被凭证阻塞 —— 6 题三轮跑不了
+
+开工前查了一遍，这台机器上：
+
+```
+根目录 .env                        MISSING
+~/.harnessx/model_config.yaml      MISSING
+ANTHROPIC_API_KEY                  not set
+OPENAI_API_KEY                     not set
+LITELLM_API_KEY                    not set
+GEMINI_API_KEY / GOOGLE_API_KEY    not set
+SERPER_API_KEY                     not set
+OPENROUTER_API_KEY                 not set
+```
+
+只有 `recipe/tb2_evolver/.env.example` 和 `tests/e2e/.env.example` 两个模板。
+
+`recipe/gaia_evolver/run.py:22` 从 `<PROJECT_ROOT>/.env` 读配置，那个文件不存在。
+
+**6 题三轮的 AEGIS 全环需要真 provider（还需要 SERPER 做检索），跑不起来。**
+
+Z 相应改成：
+- **做**：离线全链路 smoke（MockProvider、两个旗标同开、须含子代理调用），验证接线是通的
+- **留**：6×3 等用户提供凭证后执行
+
+---
