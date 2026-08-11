@@ -739,3 +739,11 @@ Z 相应改成：
 - **成本读数是名义值**：$0.59/$0.77 来自定价表（自建 vLLM proxy 实际成本≈GPU 时间），预算决策看 token 不看美元。观测 ~20 万 tok/任务·轮 → 103 床 ×3 轮 ≈ 62M tok/级。
 - **SERPER 未被官方任务 harness 使用**：`build_gaia_tools_full` 注册内置抓取链（Wikipedia→Bing→DDG），smoke 行为吻合（Wikipedia 403、Bing 失败、DDG 兜底）。不动——L0 定义=官方原样，且各级必须共享工具基线。key 留给 contrib/serper_search.py 备用，.env 注释已更正。
 - 首航失败 #1（默认任务文件缺失）此前已记录并修正 runbook。
+
+## L1 smoke 收官 + 首个真实覆盖缺口（M4c 立项）
+
+- **L1 全绿**：R0 1/1（97,596 tok）→ 进化 **真上船**（R1 状态 ok——L0 的 YAML 失败是抽签不是 DS 硬伤，目前 1/2）→ R1 1/1（43,546 tok）。通过率与 L0 同为 100%，记录无扰动（smoke 级别判据）。
+- **全栈 U 覆盖实证**：任务 rollout、Planner、Critic 各 1 U + 身份三哈希；任务 U 781 行、30 个 tool 节点、节点形态正确（`tool:WebSearch@t40`）。**连官方压缩的总结代理都领到了自己的 U**——零适配记录的主张成立到了没预料到的深度。
+- **真实缺口（M4c，任务 #33）**：官方压缩把 Evolver 的 479 万 token 逻辑运行切成 4 个 run_id 段（segment_boundary），UnfoldRecorder 跨段累积、22:31:57 一次落盘 9,862 行（5,289 节点/4,572 边/invokes 0）**挂在首段 run_id（4364…）下**——零数据丢失，但 run_id 检索对段 2-4 失明，U 的 run_id 字段误述其实际跨度。压缩代理 harness 直接构造（非 spawn），无 INVOKES 父链——需要 invoked_by 类元数据补链。**不伤 L1 任务级主张，不阻塞 L2/L4 smoke**（均消费单段任务 U）；伤的是 CH5 元环分析的检索面。
+- 侦查小账：state.json 显示 Evolver 段 1 就烧 $14.96 名义/479 万 input token——meta 预算在 DS 名义价下也不宽裕，正式跑要看 evolve 实耗曲线。
+- **L2 smoke 已点**（hard3 单题 ×2 轮）：要失败任务证据管线才有活干；验证点 = R1 出现 graph_evidence/ 锥+facts，且 Digester/Planner session 的 system prompt 里真出现"Graph evidence (GHX)"指针段（G1b 的生产首验）。
