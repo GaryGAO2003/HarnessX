@@ -51,6 +51,7 @@ class EdgeType(str, enum.Enum):
     SPECIALIZES = "specializes"  # S6: skill refinement / inheritance
     LOOP_BACK = "loop_back"  # task_end → step_start (the only cycle)
     EXECUTES_BEFORE = "executes_before"  # derived execution order within a bucket (L4.6/L5.6)
+    INVOKES = "invokes"  # parent-layer node → nested child harness (inter-layer; spawn_subagent, a later module)
 
     # observed / runtime (S4)
     OBSERVED_CONTROL = "observed_control"  # processor A triggered → processor B triggered
@@ -94,6 +95,7 @@ EDGE_FAMILY: "dict[EdgeType, EdgeFamily]" = {
     EdgeType.ATTACHED_TO: EdgeFamily.CONTROL_FLOW,
     EdgeType.LOOP_BACK: EdgeFamily.CONTROL_FLOW,
     EdgeType.EXECUTES_BEFORE: EdgeFamily.CONTROL_FLOW,
+    EdgeType.INVOKES: EdgeFamily.CONTROL_FLOW,
     EdgeType.AFTER: EdgeFamily.CONTROL_DEP,
     EdgeType.CONFLICTS_WITH: EdgeFamily.CONTROL_DEP,
     EdgeType.OBSERVED_CONTROL: EdgeFamily.CONTROL_DEP,
@@ -201,3 +203,36 @@ SKELETON_HOOK_NAMES: tuple[str, ...] = (
     "step_end",
     "task_end",
 )
+
+
+# ── unfolded-node ids (per-round runtime materialisation) ────────────────────
+#
+# The runtime materialises a static node once per round, so a materialised id
+# carries a round tag: ``{node_id}@t{round}``.  Node ids themselves contain
+# ``:`` (``hook:before_tool``, ``proc:sample``, ``rt:slot:memory``) and may even
+# contain a literal ``@t`` substring, so parsing splits on the LAST ``@t`` and
+# only when the tail is all digits.  An id without such a tag is not an unfolded
+# id and is rejected (ValueError) rather than silently mis-parsed.
+
+_UNFOLD_TAG = "@t"
+
+
+def unfolded_id(node_id: str, round_index: int) -> str:
+    """Build a per-round unfolded node id: ``{node_id}@t{round}`` (round ≥ 0)."""
+    if round_index < 0:
+        raise ValueError(f"round_index must be non-negative, got {round_index}")
+    return f"{node_id}{_UNFOLD_TAG}{round_index}"
+
+
+def parse_unfolded_id(unfolded: str) -> tuple[str, int]:
+    """Parse ``{node_id}@t{round}`` back into ``(node_id, round)``.
+
+    Splits on the LAST ``@t`` and accepts it only when the tail is all ASCII
+    digits, so node ids that themselves contain ``:`` (or a literal ``@t``)
+    round-trip unambiguously.  Raises ``ValueError`` when ``unfolded`` carries
+    no valid round tag.
+    """
+    head, tag, tail = unfolded.rpartition(_UNFOLD_TAG)
+    if not tag or not (tail.isascii() and tail.isdigit()):
+        raise ValueError(f"not an unfolded id (no @t<round> tag): {unfolded!r}")
+    return head, int(tail)

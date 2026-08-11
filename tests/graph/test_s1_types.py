@@ -9,6 +9,8 @@ from harnessx.graph.types import (
     GraphSnapshot,
     Node,
     NodeType,
+    parse_unfolded_id,
+    unfolded_id,
 )
 
 
@@ -35,6 +37,7 @@ class TestEdgeType:
         assert EdgeType.CONFLICTS_WITH == "conflicts_with"
         assert EdgeType.SPECIALIZES == "specializes"
         assert EdgeType.LOOP_BACK == "loop_back"
+        assert EdgeType.INVOKES == "invokes"
 
     def test_observed_edge_types_exist(self):
         assert EdgeType.OBSERVED_CONTROL == "observed_control"
@@ -128,3 +131,49 @@ class TestSkeletonHooks:
         assert "before_model" in SKELETON_HOOK_NAMES
         assert "after_tool" in SKELETON_HOOK_NAMES
         assert "step_end" in SKELETON_HOOK_NAMES
+
+
+class TestUnfoldedId:
+    # Every node-id shape snapshot.py actually constructs: hook:, proc:,
+    # proc:…__2, slot:, dotted slot key, rt:, rt:…__rt1, rt:slot:. All contain
+    # ':' and one contains a literal '@t' — the parse must survive each.
+    _ID_SHAPES = [
+        "hook:before_tool",
+        "proc:sample",
+        "proc:sample__2",
+        "slot:memory",
+        "slot:model.route",
+        "rt:cost_guard",
+        "rt:cost_guard__rt1",
+        "rt:slot:memory",
+        "weird@tname",  # a static id that itself contains '@t'
+    ]
+
+    def test_round_trip_all_id_shapes(self):
+        for node_id in self._ID_SHAPES:
+            for round_index in (0, 1, 7, 42):
+                uid = unfolded_id(node_id, round_index)
+                assert parse_unfolded_id(uid) == (node_id, round_index)
+
+    def test_unfolded_id_format(self):
+        assert unfolded_id("hook:before_tool", 3) == "hook:before_tool@t3"
+
+    def test_negative_round_rejected(self):
+        with pytest.raises(ValueError):
+            unfolded_id("proc:sample", -1)
+
+    def test_parse_rejects_ids_without_round_tag(self):
+        for bad in [
+            "hook:before_tool",
+            "proc:sample@t",
+            "proc:sample@tbar",
+            "proc:sample@t-1",
+            "proc:sample@t1x",
+            "",
+        ]:
+            with pytest.raises(ValueError):
+                parse_unfolded_id(bad)
+
+    def test_parse_splits_on_last_tag(self):
+        # A static id containing '@t' must still round-trip: split on the LAST.
+        assert parse_unfolded_id("weird@tname@t5") == ("weird@tname", 5)
