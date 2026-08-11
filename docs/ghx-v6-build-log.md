@@ -731,3 +731,11 @@ Z 相应改成：
 
 - 通道验证：LiteLLM proxy 2.1s 往返；**DeepSeek-V4-Flash 默认不推理**（无参对照 `completion_tokens=2`、`reasoning:null`）→ provider 零改造。SERPER 实查通过。`.env` 写入前确认 `.gitignore:24` 覆盖。
 - **首航失败 #1（小问题，记录）**：vendored 默认 `--tasks` 指向 `webthinker_gaia_dev_classified.json`，本地不存在 → FileNotFoundError。runbook §4 曾照默认路径抄成"本地齐全"，未验存在性，已更正：`--tasks` 必须显式给。重点火用 `holdout6.json`（list 根格式，loader 兼容，无 category 全归 unknown 域）。
+
+## L0 smoke 首航成功（run: L0_smoke_ignition，exit 0，~15 分钟）
+
+- **端到端全绿**：R0 基线 1/1（184,596 tok）→ meta 进化（四角色全真跑，Evolver 还开了 subharness——K1 修的 spawn 首次生产使用）→ R1 复跑 1/1（240,266 tok）。落盘形态齐全：journal/audit/INDEX/curves/digests/landscape/decision/candidates/verdicts；runs/ 已被 gitignore。
+- **首个候选死于 YAML**（论文级发现）：C-R1-01（prompt 桶）在 propose 阶段 frontmatter 解析失败（plain scalar 内嵌冒号+引号，line 9 col 563），从未进提案池 → Stage 4 正确 no_op。Critic 拒绝书质量高：确认实质合理、保留推理待未来轮、`hit_rate: null`（unknown≠zero）。**→ L5/E3 的直接弹药：手写 YAML 候选序列化在 DS 模型上首发即碎，图原生候选表面消灭这道解析门。**
+- **成本读数是名义值**：$0.59/$0.77 来自定价表（自建 vLLM proxy 实际成本≈GPU 时间），预算决策看 token 不看美元。观测 ~20 万 tok/任务·轮 → 103 床 ×3 轮 ≈ 62M tok/级。
+- **SERPER 未被官方任务 harness 使用**：`build_gaia_tools_full` 注册内置抓取链（Wikipedia→Bing→DDG），smoke 行为吻合（Wikipedia 403、Bing 失败、DDG 兜底）。不动——L0 定义=官方原样，且各级必须共享工具基线。key 留给 contrib/serper_search.py 备用，.env 注释已更正。
+- 首航失败 #1（默认任务文件缺失）此前已记录并修正 runbook。
