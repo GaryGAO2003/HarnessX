@@ -145,6 +145,26 @@ def current_invocation():
     return _current_invocation.get()
 
 
+def enter_tool_invocation(tool_name: str, step: int, prev_in_firing):
+    """Record a tool-execution invocation and mark it current; returns ``(id, token)``.
+
+    The runloop's tool site is not a processor dispatch, so a tool has no actor to
+    resolve — the recorder mints the node from ``tool_name`` instead.  Symmetric
+    with :func:`enter_invocation`: ``prev_in_firing`` is the last ``before_tool``
+    invocation's id (``None`` when none ran), the returned token goes to
+    :func:`exit_invocation` in a ``finally``, and ``(None, None)`` comes back when
+    no recorder is active (U off — the runloop pays nothing).  Marking the tool
+    current lets slot accesses it performs, and any ``spawn_subagent`` it drives,
+    attribute to this exact invocation.
+    """
+    recorder = _unfold_recorder.get()
+    if recorder is None:
+        return None, None
+    inv_id = recorder.record_tool_invocation(tool_name, step, prev_in_firing)
+    token = _current_invocation.set(inv_id)
+    return inv_id, token
+
+
 def note_slot_access(slot_key: str, kind: str, step: int) -> None:
     """Report a slot access (from ``State``) to the active recorder, if any."""
     recorder = _unfold_recorder.get()

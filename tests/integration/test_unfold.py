@@ -289,15 +289,21 @@ async def test_node_count_matches_invocations(tmp_path, monkeypatch):
         tools=[add_tool],
     )
     assert counter[0] > 0
+    # v6 M5: U now also carries a node per TOOL execution (hook == "tool"); the spy
+    # counts only PROCESSOR invocations, so split the two before comparing.
+    proc_nodes = [n for n in graph.nodes if n.hook != "tool"]
+    tool_nodes = [n for n in graph.nodes if n.hook == "tool"]
     # Two independent facts, both keyed to the same spy-measured invocation count:
-    #  - node RECORDS == invocations  → no invocation was dropped;
-    #  - distinct node IDS == invocations → no two invocations collapsed onto one
-    #    id (hard requirement 1).  The second is what fails under a naive
-    #    ``ordinal = int(step)`` identity; the first alone would survive it,
-    #    because ``_nodes`` is appended unconditionally.
-    assert len(graph.nodes) == counter[0], f"U has {len(graph.nodes)} node records but {counter[0]} invocations"
-    assert len(graph.node_ids()) == counter[0], (
-        f"U has {len(graph.node_ids())} distinct ids for {counter[0]} invocations — invocations collapsed"
+    #  - processor node RECORDS == invocations  → no invocation was dropped;
+    #  - distinct node IDS == records (over ALL nodes, tools included) → no two
+    #    invocations collapsed onto one id (hard requirement 1).  The second is what
+    #    fails under a naive ``ordinal = int(step)`` identity; the first alone would
+    #    survive it, because ``_nodes`` is appended unconditionally.
+    assert len(proc_nodes) == counter[0], f"U has {len(proc_nodes)} processor node records but {counter[0]} invocations"
+    # _TWO_TOOLS_THEN_DONE is one step with two add calls → two tool nodes.
+    assert len(tool_nodes) == 2, f"expected 2 tool nodes, got {len(tool_nodes)}"
+    assert len(graph.node_ids()) == len(graph.nodes), (
+        f"U has {len(graph.node_ids())} distinct ids for {len(graph.nodes)} records — invocations collapsed"
     )
 
 

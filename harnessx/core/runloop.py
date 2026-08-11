@@ -31,6 +31,7 @@ from .events import (
     make_run_id,
     rough_token_count,
 )
+from .attribution import current_unfold_recorder, enter_tool_invocation, exit_invocation
 from .processor import ContractViolationError, Processor, pipe_all
 
 _contract_logger = logging.getLogger("harnessx.contract")
@@ -528,6 +529,12 @@ async def run_loop(
                     tool_call_id=tc.id,
                     approved=True,
                 )
+                # v6 M5: record this tool call on U (no-op — one context-var read —
+                # when U is off).  Snapshot the node count now, so the tool's control
+                # predecessor is the LAST before_tool invocation, never a node from an
+                # earlier firing.
+                _unfold_rec = current_unfold_recorder()
+                _bt_node_start = _unfold_rec.node_count() if _unfold_rec is not None else 0
                 _bt_events = await pipe_all(
                     tc_event,
                     get_procs("before_tool"),
@@ -563,6 +570,18 @@ async def run_loop(
                 try:
                     if tc_event.approved:
                         t0 = time.monotonic()
+                        # v6 M5: the tool executes here — one U node, minted between
+                        # the before_tool and after_tool firings.  Its control
+                        # predecessor is the last before_tool invocation (or None,
+                        # when no before_tool processor ran — then no incoming edge is
+                        # invented).  Marking it current also lets spawn_subagent name
+                        # it as the source of the inter-layer INVOKES edge.
+                        _bt_prev = (
+                            _unfold_rec.node_id_at(_unfold_rec.node_count() - 1)
+                            if _unfold_rec is not None and _unfold_rec.node_count() > _bt_node_start
+                            else None
+                        )
+                        _tool_inv_id, _tool_inv_token = enter_tool_invocation(tc_event.tool_name, step_id, _bt_prev)
                         try:
                             result = await tool_registry.execute(tc_event.tool_name, tc_event.tool_input)
                             tr_event = ToolResultEvent(
@@ -585,12 +604,25 @@ async def run_loop(
                                 error=str(e),
                                 duration_ms=(time.monotonic() - t0) * 1000,
                             )
+                        finally:
+                            # The tool's own invocation ends here; the after_tool
+                            # processors below are their own invocations.
+                            exit_invocation(_tool_inv_token)
+                        # tool → first after_tool: snapshot the boundary before the
+                        # firing, then link only if after_tool recorded an invocation.
+                        _at_node_start = _unfold_rec.node_count() if _unfold_rec is not None else 0
                         _at_events = await pipe_all(
                             tr_event,
                             get_procs("after_tool"),
                             tracer=tracer,
                             hook="after_tool",
                         )
+                        if (
+                            _unfold_rec is not None
+                            and _tool_inv_id is not None
+                            and _unfold_rec.node_count() > _at_node_start
+                        ):
+                            _unfold_rec.link_control(_tool_inv_id, _unfold_rec.node_id_at(_at_node_start), "after_tool")
                         tr_event = next(
                             (e for e in reversed(_at_events) if isinstance(e, ToolResultEvent)),
                             tr_event,

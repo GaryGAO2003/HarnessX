@@ -156,6 +156,26 @@ async def spawn_subagent(
 
     effective_label = label or child_run_id[:8]
 
+    # v6 M5: connect this layer to the child on the unfolded graph U.  The parent's
+    # spawn_subagent tool node (the invocation currently executing) INVOKES the
+    # child run.  Capture the parent recorder + invocation NOW, before the child
+    # rebinds these context vars to its own U; the edge is recorded once the child's
+    # ACTUAL run id is known — ``child_run_id`` above only names the workspace /
+    # event, while the child mints its own run id inside ``run()``.  All no-ops
+    # (recorder is None) when U is off.
+    from ..core.attribution import current_invocation, current_unfold_recorder
+
+    _parent_unfold_rec = current_unfold_recorder()
+    _parent_tool_inv = current_invocation()
+
+    def _record_invokes(child_actual_run_id: str) -> None:
+        if _parent_unfold_rec is None or _parent_tool_inv is None:
+            return
+        try:
+            _parent_unfold_rec.record_invokes(_parent_tool_inv, child_actual_run_id, {"label": effective_label})
+        except Exception:
+            pass
+
     child_harness = child_model_config.agentic(child_harness_config)
 
     # Notify tracer so the frontend knows a child agent is starting.
@@ -176,6 +196,7 @@ async def spawn_subagent(
 
     if wait:
         result = await child_harness.run(subtask, parent_run_id=parent_run_id)
+        _record_invokes(result.run_id)
         logger.debug(
             "Subagent {} (label={}) completed sync, run_id={}",
             effective_label,
@@ -199,6 +220,7 @@ async def spawn_subagent(
     async def _run_child() -> None:
         try:
             result = await child_harness.run(subtask, parent_run_id=parent_run_id)
+            _record_invokes(result.run_id)
             logger.debug(
                 "Async subagent {} completed, run_id={}",
                 effective_label,

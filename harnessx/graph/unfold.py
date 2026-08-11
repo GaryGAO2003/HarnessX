@@ -38,6 +38,15 @@ Edges.  U carries only observed edges:
     backwards.  ``LOOP_BACK`` never appears in U; :func:`UnfoldRecorder.finalize`
     asserts it.
 
+v6 M5.  Tools join U too.  Each ``tool_registry.execute`` at the runloop's tool
+site mints one node (``tool:<name>``, hook ``"tool"``) from the SAME global
+ordinal, so it interleaves with the processors around it; the ``before_tool`` →
+``tool`` and ``tool`` → ``after_tool`` control edges are the observed execution
+order of one tool call, and — like every U edge — point from lower ordinal to
+higher.  ``spawn_subagent`` additionally carries an inter-layer ``INVOKES`` edge
+from its tool node to the child run id (:class:`UnfoldedInvokes`), kept in a
+separate collection because its target is a child run, not a node in this U.
+
 Recording is free when nothing consumes it: the recorder is installed per run
 only when :func:`unfold_enabled` is true (env ``HARNESSX_GHX_UNFOLD``).  With it
 absent, ``ProcessorChain.process`` does a single context-var read and moves on.
@@ -61,6 +70,11 @@ _UNGRAPHED_BASE = "UNGRAPHED"
 
 _OBSERVED_CONTROL = EdgeType.OBSERVED_CONTROL.value
 _OBSERVED_DATA = EdgeType.OBSERVED_DATA.value
+# v6 M5: the inter-layer edge from a parent tool node to a nested child run.  It
+# is NOT a U observed edge — its target is a child run id, not a node in this U —
+# so it lives in its own collection, apart from the OBSERVED_* edges that the
+# DAG/finalize invariant governs.
+_INVOKES = EdgeType.INVOKES.value
 
 SCHEMA = "ghx-unfolded-v1"
 
@@ -111,6 +125,23 @@ class UnfoldedEdge:
 
 
 @dataclass
+class UnfoldedInvokes:
+    """One inter-layer ``INVOKES`` edge: a parent tool node → a nested child run.
+
+    ``source`` is the parent's ``spawn_subagent`` tool invocation id (an
+    :func:`unfolded_id` in THIS U); ``child_run_id`` is the child run's id — the
+    only handle stable across layers, because each layer's U owns its own ordinal
+    counter (both start at 0), so an ordinal cannot name a child.  The target is
+    therefore a run id, not a node in this U, which is exactly why this edge is
+    kept out of :attr:`UnfoldedGraph.edges` (the DAG/observed-edge set).
+    """
+
+    source: str
+    child_run_id: str
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
 class UnfoldedGraph:
     """A loaded / finalized U: self-describing, streamable as JSONL."""
 
@@ -118,6 +149,7 @@ class UnfoldedGraph:
     session_id: str
     nodes: list = field(default_factory=list)  # list[UnfoldedNode]
     edges: list = field(default_factory=list)  # list[UnfoldedEdge]
+    invokes: list = field(default_factory=list)  # list[UnfoldedInvokes] (inter-layer)
 
     def node_ids(self) -> set:
         return {n.id for n in self.nodes}
@@ -159,6 +191,9 @@ class UnfoldRecorder:
         self._ordinal = 0
         self._nodes: list = []
         self._control_edges: list = []
+        # inter-layer INVOKES edges (parent tool node → child run id), kept apart
+        # from the observed control/data edges above.
+        self._invokes: list = []
         # access log entries: {"ordinal", "kind", "slot_key", "step", "inv_id"},
         # appended in execution order (== ordinal order across invocations).
         self._accesses: list = []
@@ -200,6 +235,99 @@ class UnfoldRecorder:
             )
         return uid
 
+    def record_tool_invocation(self, tool_name: str, step: int, prev_in_firing) -> str:
+        """Record one tool-execution node in U; link ``prev_in_firing`` with OBSERVED_CONTROL.
+
+        A tool is not a processor: it runs at the runloop's tool site, between the
+        ``before_tool`` and ``after_tool`` firings of one tool call.  It carries the
+        canonical ``tool:<name>`` node id (the same id :mod:`~harnessx.graph.footprint`
+        and :mod:`~harnessx.graph.observer` use for tools), and it draws the SAME
+        global ordinal as processor invocations, so it interleaves with them and —
+        because the ordinal only grows — every edge to or from it points forward and
+        U stays a DAG.  ``prev_in_firing`` is the last ``before_tool`` invocation's
+        id (``None`` when no ``before_tool`` processor ran, in which case no incoming
+        control edge is invented); the ``tool → first after_tool`` edge is added
+        afterwards by :meth:`link_control`.
+        """
+        base = f"tool:{tool_name}"
+        ordinal = self._ordinal
+        self._ordinal += 1
+        uid = unfolded_id(base, ordinal)
+        # graphed=True: a tool carries a structured ``tool:`` node id, NOT the
+        # UNGRAPHED sentinel — even though tools are not (yet) emitted as static
+        # nodes in G.  The flag distinguishes named nodes from the dispatched-but-
+        # unnamed catch-all; a tool is named.
+        self._nodes.append(
+            UnfoldedNode(
+                id=uid,
+                static_node_id=base,
+                graphed=True,
+                hook="tool",
+                step=int(step),
+                ordinal=ordinal,
+                label=tool_name,
+            )
+        )
+        self._base_by_ordinal[ordinal] = base
+        if prev_in_firing is not None:
+            self._control_edges.append(
+                UnfoldedEdge(
+                    source=prev_in_firing,
+                    target=uid,
+                    edge_type=_OBSERVED_CONTROL,
+                    metadata={"hook": "before_tool"},
+                )
+            )
+        return uid
+
+    def link_control(self, source_id, target_id, hook: str) -> None:
+        """Add an OBSERVED_CONTROL edge ``source_id → target_id`` between two nodes.
+
+        Used only for the ``tool → first after_tool`` bridge; both endpoints are
+        already recorded nodes, and the tool's ordinal is below the after_tool
+        node's, so the edge points forward.  Self-links / missing endpoints are
+        dropped rather than emitted.
+        """
+        if source_id is None or target_id is None or source_id == target_id:
+            return
+        self._control_edges.append(
+            UnfoldedEdge(
+                source=source_id,
+                target=target_id,
+                edge_type=_OBSERVED_CONTROL,
+                metadata={"hook": hook},
+            )
+        )
+
+    def node_count(self) -> int:
+        """Number of invocation nodes recorded so far (a boundary marker for the runloop)."""
+        return len(self._nodes)
+
+    def node_id_at(self, index: int):
+        """Id of the node recorded at ``index`` in append order, or ``None`` if out of range."""
+        if 0 <= index < len(self._nodes):
+            return self._nodes[index].id
+        return None
+
+    def record_invokes(self, source_id: str, child_run_id: str, metadata=None) -> None:
+        """Record an inter-layer INVOKES edge: parent tool node → child run id.
+
+        ``source_id`` is the parent ``spawn_subagent`` tool invocation's id in this
+        U; ``child_run_id`` is the child run's actual id (its own U file's key).
+        This edge is held apart from the observed control/data edges: its target is
+        not a node in this U, so it never enters the DAG check nor :meth:`finalize`'s
+        observed-edge assertion.
+        """
+        if source_id is None or not child_run_id:
+            return
+        self._invokes.append(
+            UnfoldedInvokes(
+                source=source_id,
+                child_run_id=child_run_id,
+                metadata=dict(metadata) if metadata else {},
+            )
+        )
+
     def log_slot_access(self, slot_key: str, kind: str, invocation_id: str, step: int) -> None:
         """Log a slot access performed by the currently-executing invocation."""
         _, ordinal = parse_unfolded_id(invocation_id)
@@ -234,6 +362,7 @@ class UnfoldRecorder:
             session_id=self.session_id,
             nodes=list(self._nodes),
             edges=edges,
+            invokes=list(self._invokes),
         )
 
     def _build_data_edges(self, state) -> list:
@@ -334,8 +463,18 @@ def _edge_record(e: UnfoldedEdge) -> dict:
     }
 
 
+def _invokes_record(iv: UnfoldedInvokes) -> dict:
+    return {
+        "kind": "invokes",
+        "edge_type": _INVOKES,
+        "source": iv.source,
+        "child_run_id": iv.child_run_id,
+        "metadata": iv.metadata,
+    }
+
+
 def unfolded_records(graph: UnfoldedGraph):
-    """Yield the JSONL records for ``graph`` (meta, then nodes, then edges)."""
+    """Yield the JSONL records for ``graph`` (meta, then nodes, edges, invokes)."""
     yield {
         "kind": "meta",
         "schema": SCHEMA,
@@ -344,11 +483,14 @@ def unfolded_records(graph: UnfoldedGraph):
         "created": _iso_now(),
         "node_count": len(graph.nodes),
         "edge_count": len(graph.edges),
+        "invokes_count": len(graph.invokes),
     }
     for n in graph.nodes:
         yield _node_record(n)
     for e in graph.edges:
         yield _edge_record(e)
+    for iv in graph.invokes:
+        yield _invokes_record(iv)
 
 
 def unfolded_path(base_dir: str, session_id: str, run_id: str) -> Path:
@@ -372,6 +514,7 @@ def load_unfolded(path) -> UnfoldedGraph:
     session_id = ""
     nodes: list = []
     edges: list = []
+    invokes: list = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -382,6 +525,14 @@ def load_unfolded(path) -> UnfoldedGraph:
             if kind == "meta":
                 run_id = rec.get("run_id", "")
                 session_id = rec.get("session_id", "")
+            elif kind == "invokes":
+                invokes.append(
+                    UnfoldedInvokes(
+                        source=rec["source"],
+                        child_run_id=rec["child_run_id"],
+                        metadata=rec.get("metadata", {}),
+                    )
+                )
             elif kind == "node":
                 nodes.append(
                     UnfoldedNode(
@@ -403,4 +554,4 @@ def load_unfolded(path) -> UnfoldedGraph:
                         metadata=rec.get("metadata", {}),
                     )
                 )
-    return UnfoldedGraph(run_id=run_id, session_id=session_id, nodes=nodes, edges=edges)
+    return UnfoldedGraph(run_id=run_id, session_id=session_id, nodes=nodes, edges=edges, invokes=invokes)
