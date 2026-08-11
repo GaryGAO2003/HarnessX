@@ -167,8 +167,8 @@ class {class_name}Processor(MultiHookProcessor):
     async def on_task_start(self, event: "TaskStartEvent") -> AsyncIterator:
         state = event.state
 
-        if state.slots.get("{slot_key}") is not None:
-            del state.slots["{slot_key}"]
+        if state.get_slot("{slot_key}") is not None:
+            state.delete_slot("{slot_key}")
 
             # TODO: implement your command logic here
             # Example:

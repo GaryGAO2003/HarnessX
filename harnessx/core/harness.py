@@ -21,6 +21,7 @@ from .config_schema import (
     WorkspaceConfig,
     SandboxConfig,
 )
+from .attribution import install_actor_resolver, reset_actor_resolver
 from .events import make_run_id
 from .file_uri import normalize_file_uri
 from .processor import Processor
@@ -1497,23 +1498,31 @@ class Harness:
                         continue
                 return self.model_config.main
 
-            end_event, trajectory, interrupted_at = await run_loop(
-                task=task,
-                state=state,
-                model_provider=self.model_config.main,
-                model_selector=_select_model_provider,
-                tool_registry=self._rt.tool_registry,
-                tracer=_active_tracer,
-                processors=self._rt.processors,
-                workspace=self._rt.workspace,
-                parent_run_id=parent_run_id,
-                step_snapshots=self.config.step_snapshots,
-                stream_callback=stream_callback,
-                model_config=self.model_config,
-                harness_config=self.config,
-                child_harness_config=self.child_harness_config,
-                graph_binding=self._rt.proc_node_binding,
-            )
+            # Install the id(proc)->node-id resolver for this run so that slot
+            # writes/reads performed inside processors are attributed to the
+            # right graph node.  Same binding the graph executor consumes; NOT
+            # flag-gated (recording is free when unused).  reset() in finally.
+            _resolver_token = install_actor_resolver(self._rt.proc_node_binding)
+            try:
+                end_event, trajectory, interrupted_at = await run_loop(
+                    task=task,
+                    state=state,
+                    model_provider=self.model_config.main,
+                    model_selector=_select_model_provider,
+                    tool_registry=self._rt.tool_registry,
+                    tracer=_active_tracer,
+                    processors=self._rt.processors,
+                    workspace=self._rt.workspace,
+                    parent_run_id=parent_run_id,
+                    step_snapshots=self.config.step_snapshots,
+                    stream_callback=stream_callback,
+                    model_config=self.model_config,
+                    harness_config=self.config,
+                    child_harness_config=self.child_harness_config,
+                    graph_binding=self._rt.proc_node_binding,
+                )
+            finally:
+                reset_actor_resolver(_resolver_token)
 
             # Auto-backfill terminal reward into all trajectory steps.
             # EvaluationProcessor writes eval_result onto task_end; backfill_rewards

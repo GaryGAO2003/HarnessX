@@ -58,8 +58,9 @@ class HarnessPlugin:
                          mutation across instances.
         tools:           List of ``Tool`` instances to register in the tool registry.
         slash_commands:  Mapping ``"/command"`` → slot key (``str``) or ``None``.
-                         Slot-based: registry sets ``state.slots[slot_key]`` and
-                         a processor handles it at ``on_task_start``.
+                         Slot-based: registry sets the slot via
+                         ``state.set_slot(slot_key, ...)`` and a processor
+                         handles it at ``on_task_start``.
                          Direct: registry calls ``_handle_<cmd>()`` immediately.
         commands:        Claude Code-compatible prompt-injection commands.
                          ``[{"name": "cmd", "description": "...", "prompt": "..."}]``

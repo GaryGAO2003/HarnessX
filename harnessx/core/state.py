@@ -6,6 +6,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
+from .attribution import current_actor
 from .events import Message, ToolResultEvent, dict_to_message, message_to_dict
 
 
@@ -116,6 +117,39 @@ class StateSlot:
     metadata: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class SlotAccess:
+    """One slot access: the acting ``actor`` and the ``step`` it happened in.
+
+    ``actor`` is a graph node id, the ``UNGRAPHED`` marker, or ``None`` when the
+    access happened outside any processor.  ``step`` is ``State.step`` at access
+    time — the round a later module tags observed data edges with
+    (``{node_id}@t{round}``).  Frozen so historical accesses cannot be mutated
+    and so membership de-dup can compare whole records.
+    """
+
+    actor: Any
+    step: int
+
+
+@dataclass
+class SlotProvenance:
+    """Attribution for a single slot key: who wrote, read, and deleted it.
+
+    Additional record-keeping kept ALONGSIDE :attr:`State.slots`; it never alters
+    the slot store's observable shape.  Each entry is a :class:`SlotAccess`
+    (actor + step).  ``writers`` and ``deleters`` keep every access in order (so
+    multiple writers within one step stay distinct); ``readers`` is de-duplicated
+    on the whole ``(actor, step)`` record — the same reader in two different steps
+    is two data-dependency facts (one per round), so only a repeat within the
+    same step is dropped, keeping the log bounded without discarding round info.
+    """
+
+    writers: list = field(default_factory=list)
+    readers: list = field(default_factory=list)
+    deleters: list = field(default_factory=list)
+
+
 @dataclass
 class State:
     """Current run state snapshot.
@@ -137,6 +171,11 @@ class State:
     cumulative_cost_usd: float = 0.0
     tool_results: list[ToolResultEvent] = field(default_factory=list)
     slots: dict[str, StateSlot] = field(default_factory=dict)
+    slot_provenance: dict[str, SlotProvenance] = field(default_factory=dict)
+    """Per-slot-key attribution (writers / readers / deleters).  In-memory only —
+    deliberately NOT part of ``snapshot()``/``wake()``; provenance is runtime
+    attribution, not persisted state, and keeping it out preserves the snapshot
+    shape existing readers depend on."""
 
     # Budget limits (set from Task). None = no limit.
     max_steps: int = 50
@@ -195,12 +234,29 @@ class State:
 
     def set_slot(self, key: str, slot_type: str, content: Any, metadata: dict | None = None) -> None:
         self.slots[key] = StateSlot(slot_type=slot_type, content=content, metadata=metadata or {})
+        self._record_slot_access(key, "write")
 
     def get_slot(self, key: str) -> StateSlot | None:
+        self._record_slot_access(key, "read")
         return self.slots.get(key)
 
     def delete_slot(self, key: str) -> None:
         self.slots.pop(key, None)
+        self._record_slot_access(key, "delete")
+
+    def _record_slot_access(self, key: str, kind: str) -> None:
+        access = SlotAccess(actor=current_actor(), step=self.step)
+        prov = self.slot_provenance.get(key)
+        if prov is None:
+            prov = SlotProvenance()
+            self.slot_provenance[key] = prov
+        if kind == "read":
+            if access not in prov.readers:
+                prov.readers.append(access)
+        elif kind == "delete":
+            prov.deleters.append(access)
+        else:
+            prov.writers.append(access)
 
     def snapshot(self) -> dict:
         """Return a serializable snapshot of state for checkpointing and wake() recovery.

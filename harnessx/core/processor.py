@@ -7,6 +7,7 @@ import logging
 import os
 from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 
+from .attribution import enter_actor, exit_actor
 from .events import (
     BeforeModelEvent,
     Event,
@@ -452,9 +453,17 @@ class ProcessorChain:
             prev_msgs = _get_event_messages(prev_primary) if _do_validate else None
 
             next_events: list[Event] = []
-            for ev in events:
-                async for out in processor.process(ev):
-                    next_events.append(out)
+            # Establish the current-actor context around this processor's
+            # invocation so slot writes/reads it performs are attributable to it.
+            # reset() in finally covers the exception path — a failing processor
+            # must not leak its identity onto the next one.
+            _actor_token = enter_actor(processor)
+            try:
+                for ev in events:
+                    async for out in processor.process(ev):
+                        next_events.append(out)
+            finally:
+                exit_actor(_actor_token)
             events = next_events
             if not events:
                 return
