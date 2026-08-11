@@ -417,3 +417,59 @@ HARNESSX_GHX_RUNTIME=1 pytest tests/integration
 822 / 94（旗标开）/ 961+2（946 基线 + 15 新），无第三个失败。
 
 ---
+
+## M4 — 展开图 U · 完成
+
+**commit**：`98dff28`
+
+### 轮标签是**调用序号**，不是步号
+
+G 只有一个环：`task_end → step_start` 的 `LOOP_BACK`。U 是 G 的实际运行materialization，轮标签把这个环拆开，所以 U 是 DAG——这正是 M6 的祖先查询有定义的前提。
+
+但如果轮标签取**步号**，同一处理器一步内的多次调用会**塌成同一个节点**：`"*"` 注册的处理器一步内在多个 hook 上触发；`after_tool` 有两个分发点；一步内多个工具调用会让工具侧 hook 反复触发。
+
+改用**全局单调递增的调用序号**。因为每条边都从小序号指向大序号，**无环性是构造性的，不是碰巧的**。步号作为节点 metadata 保留，`unfolded_id`/`parse_unfolded_id` 仍是唯一 id 方案。
+
+### 数据边用到达定义语义
+
+每次读链到**最近一次前置写**，`delete` 杀死当前定义。每条发出的边都拿 `State.slot_provenance` 交叉核对，不被支持的丢弃——**不发明边**。
+
+边不可能倒指：访问按执行序记录，而执行序对序号单调。
+
+U 在**访问发生时**捕获，不是事后从 provenance 重建——因为 provenance 记的是 `(actor, step)`，对一步内多次触发的节点**解析不出确切序号**。
+
+### 这一模块的真正教训：门要见过它失败
+
+第一版的 DAG 测试和计数测试**在故意打坏的 `ordinal = int(step)` 下双双通过**。我做变异测试才发现的：
+
+```
+FAILED test_data_edges_match_provenance
+1 failed, 9 passed          ← DAG 测试和计数测试都没咬住
+```
+
+**为什么塌陷不产生环**：两次塌掉的调用属于**不同的 hook firing**，而控制边刻意不跨 firing 边界，所以它们之间根本没有边。计数测试没咬住是因为 `_nodes` 是 list、无条件 append——两个共享 id 的节点仍算两个。
+
+**所以朴素身份产生的是歧义，不是环。** 两次调用共用一个 id，M6 的 `ancestors(U, v)` 会返回两者祖先的并集——**错的数据，形状完全正确**。这比出环更坏，环至少会自己喊。
+
+我规格里的硬要求第一条「不同调用永不是同一节点」才是吃劲的那条，**而它恰恰没测试**。
+
+补完之后再变异，捕手从 1 个变 3 个（我独立复验过）：
+
+```
+FAILED test_invocation_ids_are_unique
+FAILED test_node_count_matches_invocations
+FAILED test_data_edges_match_provenance
+3 failed, 8 passed
+```
+
+唯一性测试自己先断言「陷阱确实被触发」（`Counter((static_node_id, step))` 有值 > 1），所以它不能空过。计数测试现在同时钉「没丢」和「没塌」。DAG 测试保留但**诚实标注**它守的是边构造不是身份——**没有为了让它显得锋利而伪造一个环**。
+
+### 从此立规矩
+
+> **没见过它失败的门，还不算门。** 后续模块的规格里都要求 coder 自己做变异验证，交两次输出。
+
+### 验证
+
+833 / 105（GHX_RUNTIME）/ 105（两个旗标同开，这一组是我加的）/ 961+2。
+
+---
