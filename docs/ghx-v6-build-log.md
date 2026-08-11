@@ -767,3 +767,11 @@ Z 相应改成：
 - **钉的第一次假阳性（事变四，良性）**：pin 红了但 `git status` 干净——六个 vendored 文件被官方 pilot 的快照/恢复机制在阶段边界以文本模式回写（mtime 铁证：L0 收尾 22:06:57 / L1 启动 22:12:33 / L2 critic 22:48:30；disk−blob 差恰=行数，每行 +\r）。**内容零篡改，纯 EOL 翻写，Windows 上每跑一次 pilot 必现**。裸字节钉在 Windows 不可用 → 三处哈希器统一改 CRLF→LF 规范化后再 sha256，manifest 从 git-clean 树重建。接受的交换：仅翻换行的攻击不再被抓（Python/MD 语义惰性）。改后变异探针：critic.md 追加 1 字节 → 钉红；还原 → 绿。
 - 侦查排除项：L1 Evolver 的 trace 无任何 aegis 路径引用（Bash 190/Write 42 都没碰）——改写者不是进化环，是官方自家机制。
 - 套件 70 过，lint 净。L2 smoke 全程未受影响（另进程）。
+
+## L2 smoke 收官（exit 0）——证据管线全链首验 + 两个论文级标本
+
+- 数字：R0 0/1（硬题如设计失败，249k tok）→ 进化零候选 no_op → R1 1/1（59.9k tok）。**Δ=+100pp 的 noop 轮**：配置分毫未动，硬题纯随机翻盘——若这轮恰好上过船，官方归因即记功。成功幻觉的 1 题微缩活标本，K=8 现象的最小复现。
+- **证据链全通**：失败锥+facts 物化 ✓ → Planner journal 里指针段在场 ✓ → **landscape.md 引用图证据 3 处**：(a) 读锥判死因（"uniform task_end chain through every processor at step 20 — died at processor teardown"）；(b) 第 111 行：一个失败模式"the Digester did not itself flag, and it is the only one evidenced *solely* by the graph"——官方 Planner 亲笔承认图证据给出了文本管线没有的信息。中心假设的首个定性信号。
+- **Evolver 空转**（三炉产出率 1/3）：200 步顶格/724 万 token/零候选；Critic 的 strategy_concern 精确到 trace 指针，还引用了 Evolver 自己没做完的 Pending-Actions（"Write candidates/manifest for C-R1-03"——三个候选全胎死）。正式跑前旋钮：meta 换 reasoner / 提预算 / 接受空轮率——随床位决定一起拍。
+- 噪声在册：digest 锚点缩写警告（官方校验器抓住）、ResourceWarning 惯犯。injections.json 缺席符合预期（本炉跑的是 G1c 前的代码）。
+- **L4 smoke 已点**（hard3 ×2 轮，gate + 全栈旗标 + G1c 清单首次生产）。
