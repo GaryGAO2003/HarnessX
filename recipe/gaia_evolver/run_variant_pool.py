@@ -1936,6 +1936,21 @@ def _build_candidate_contract(
     }
 
 
+def _planner_brief_for_contract(brief: CandidateBrief) -> dict[str, Any]:
+    """``asdict(brief)`` for the Evolver's contract, dropping an empty ``implicated_node``.
+
+    v6 step 2. The optional ``implicated_node`` handle is a first-class brief
+    field, but a brief that names no node (every brief today) must render into
+    the meta contract byte-identically to before — so the empty default is
+    stripped here, and only a Planner-named node survives into the contract the
+    Evolver receives.
+    """
+    data = asdict(brief)
+    if not data.get("implicated_node"):
+        data.pop("implicated_node", None)
+    return data
+
+
 def _planner_brief_with_regressions(
     brief: Mapping[str, Any],
     regressions: Sequence[str],
@@ -3054,6 +3069,44 @@ def _digest_graph_input_enabled() -> bool:
     return os.environ.get("HARNESSX_GHX_DIGEST_GRAPH", "").strip().lower() in _GRAPH_INPUT_ENABLE_VALUES
 
 
+def _evolver_graph_edits_enabled() -> bool:
+    """True when the Evolver should derive graph edits from the parent->child config diff (v6 M8).
+
+    Off by default, read at call time (never cached), mirroring
+    :func:`_digest_graph_input_enabled`. With it off, a candidate carries no
+    ``graph_edits`` and the Critic's mutation surface stays the file-change path
+    strings — byte-identical to today. Turning it on genuinely changes AEGIS
+    behaviour (overlap verdicts sharpen; W19 can refuse an edit whose node never
+    ran), so it stays a deliberate opt-in.
+    """
+    return os.environ.get("HARNESSX_GHX_EVOLVER_GRAPH_EDITS", "").strip().lower() in _GRAPH_INPUT_ENABLE_VALUES
+
+
+def _evolver_graph_edits(parent_config_path, child_config_path):
+    """v6 M8: ``(graph_edits, provenance)`` for a candidate's parent->child config.
+
+    Gate-and-derive in one place so the flag decision is testable and a mutation
+    that populates the OFF path is caught. With the flag OFF (the default) this
+    returns ``(None, {})`` — no derivation, no audit keys — so the candidate is
+    byte-identical to today. With it ON, the edits come from
+    :func:`experiments.variant_pool.graph_manifest.derive_graph_edits` (the exact
+    ``diff_graphs`` delta) and the returned provenance records WHICH path ran and
+    WHY, per candidate, so a degraded derivation cannot masquerade as a
+    graph-derived one (the 4e0810f discipline).
+    """
+    if not _evolver_graph_edits_enabled():
+        return None, {}
+    from experiments.variant_pool.graph_manifest import derive_graph_edits
+
+    derivation = derive_graph_edits(parent_config_path, child_config_path)
+    provenance = {
+        "graph_edits_source": derivation.source,
+        "graph_edits_reason": derivation.reason,
+        "graph_edits_count": len(derivation.edits) if derivation.edits is not None else 0,
+    }
+    return derivation.edits, provenance
+
+
 #: [OURS] v6 M6b — backstop cap on the serialized causal cone. Sized to the
 #: head+tail trajectory-window budget so a graph-derived input is never larger
 #: than the text window it replaces; a cone is much smaller in practice but is not
@@ -3414,8 +3467,13 @@ class _LLMDigester:
         """
         question = self._question_for(digest.task_id)
         prompt_for = None
+        # v6 step 1: the causal cone's static node ids, so the graph-fed digest
+        # can NAME the on-graph attribution (implicated_nodes) rather than only
+        # carry the model's off-graph prose. Empty on the text path, so a
+        # non-graph digest is unchanged.
+        cone_node_ids: tuple[str, ...] = ()
         if self.graph_input:
-            prompt_for = self._graph_prompt_builder(context, digest, question)
+            prompt_for, cone_node_ids = self._graph_prompt_builder(context, digest, question)
         if prompt_for is None:
             window = self._trajectory_window(digest)
             if window is None:
@@ -3438,7 +3496,7 @@ class _LLMDigester:
             text = await self._complete(prompt)
             parsed, error = self._parse_task_json(text)
             if parsed is not None:
-                return self._map_task_digest(digest, parsed), None
+                return self._map_task_digest(digest, parsed, implicated_nodes=cone_node_ids), None
         return digest, (
             f"{digest.task_id}: LLM interpretation failed twice ({error}); kept "
             "deterministic digest"
@@ -3452,7 +3510,7 @@ class _LLMDigester:
         digest: TaskDigest,
         question: str,
     ):
-        """A ``prompt_for(retry_error)`` bound to the causal cone, or ``None``.
+        """``(prompt_for, cone_node_ids)`` bound to the causal cone, or ``(None, ())``.
 
         Resolves the unfolded graph U for this task's run, anchors on its terminal
         invocation (the one that produced the final state — the honest anchor, since
@@ -3462,13 +3520,16 @@ class _LLMDigester:
         cone alone would drop exactly the ``tool_output_dropped`` class of failures
         — a dropped tool result is the ABSENCE of a data edge (tool results land in
         raw_messages, not slots), so component attribution needs the control chain
-        the full cone keeps. Records the chosen path either way; returns ``None`` (so
-        the caller uses the text window) when no usable U is available.
+        the full cone keeps. Records the chosen path either way; returns
+        ``(None, ())`` (so the caller uses the text window) when no usable U is
+        available. ``cone_node_ids`` are the distinct static node ids the cone
+        spans — the on-graph attribution the graph-fed digest carries in
+        ``implicated_nodes`` (v6 step 1).
         """
         graph, reason = self._resolve_unfolded(context, digest)
         if graph is None:
             self.input_provenance.append(_DigesterInputProvenance(task_id=digest.task_id, source="text", reason=reason))
-            return None
+            return None, ()
         anchor = terminal_node(graph)
         if anchor is None:
             self.input_provenance.append(
@@ -3478,9 +3539,18 @@ class _LLMDigester:
                     reason="unfolded graph U has no invocations (empty run); nothing to anchor on",
                 )
             )
-            return None
+            return None, ()
         cone_ids = causal_cone(graph, [anchor], edge_types=None, include_anchors=True)
         cone = induced_subgraph(graph, cone_ids)
+        cone_node_ids = tuple(
+            sorted(
+                {
+                    node.static_node_id
+                    for node in cone.nodes
+                    if getattr(node, "static_node_id", "") and node.static_node_id != "UNGRAPHED"
+                }
+            )
+        )
         cone_text, truncated = self._render_cone(cone, anchor, self._graph_body(digest))
         self.input_provenance.append(
             _DigesterInputProvenance(
@@ -3503,7 +3573,7 @@ class _LLMDigester:
                 retry_error=retry_error,
             )
 
-        return prompt_for
+        return prompt_for, cone_node_ids
 
     def _resolve_unfolded(self, context: PipelineContext, digest: TaskDigest):
         """``(UnfoldedGraph, None)`` for this task's run, or ``(None, reason)``.
@@ -3827,7 +3897,13 @@ class _LLMDigester:
             return None, "rationale must be a non-empty string"
         return (value, rationale.strip()), None
 
-    def _map_task_digest(self, digest: TaskDigest, obj: Mapping[str, Any]) -> TaskDigest:
+    def _map_task_digest(
+        self,
+        digest: TaskDigest,
+        obj: Mapping[str, Any],
+        *,
+        implicated_nodes: "tuple[str, ...]" = (),
+    ) -> TaskDigest:
         category = str(obj.get("failure_category") or "").strip() or (
             digest.failure_category or "uncategorized_failure"
         )
@@ -3861,6 +3937,7 @@ class _LLMDigester:
             implicated_components=components,
             evidence_anchors=anchors,
             prior_history=list(digest.prior_history),
+            implicated_nodes=list(implicated_nodes),
         )
 
     # -- trajectory windowing -------------------------------------------------
@@ -4257,11 +4334,18 @@ class _LLMPlanner:
             if max_anchors is not None:
                 anchors = anchors[:max_anchors]
             anchor_str = " | ".join(anchors) if anchors else "none"
-            lines.append(
+            summary = (
                 f"- {digest.task_id}: {status} ({n_pass}/{n_att}); "
                 f"category={digest.failure_category or 'unknown'}; "
                 f"components=[{components}]; evidence=[{anchor_str}]"
             )
+            # v6 step 1: surface the graph-fed Digester's on-graph attribution so
+            # the Planner can name a node in its brief. Appended ONLY when the
+            # digest carries node ids (the graph path), so a text-path digest
+            # keeps this serialized input byte-identical to before.
+            if digest.implicated_nodes:
+                summary += f"; nodes=[{', '.join(digest.implicated_nodes)}]"
+            lines.append(summary)
             prior = self._prior_ship_history(digest)
             if prior:
                 lines.append(f"    prior_history: {prior}")
@@ -6237,7 +6321,7 @@ class VariantPoolRecipe:
         bounce_audit: dict[str, Any] = {}
         # Captured once so a P3 repair reuses the SAME planner brief + guidance.
         candidate_planner_brief = _planner_brief_with_revision(
-            _planner_brief_with_regressions(asdict(brief), context.regressions),
+            _planner_brief_with_regressions(_planner_brief_for_contract(brief), context.regressions),
             revision,
         )
         paper_guidance = (
@@ -6381,10 +6465,19 @@ class VariantPoolRecipe:
         meta["provenance"] = manifest.provenance
         meta["paper_only_gaps"] = list(manifest.paper_only_gaps())
 
+        # v6 M8: derive the exact parent->child graph edits when the flag is on,
+        # so the Critic's overlap surface becomes an intersection of touched
+        # nodes rather than file-path collision. Flag OFF (default) => (None, {}):
+        # graph_edits stays None and no audit key is added, byte-identical to
+        # today. The provenance says which path ran, per candidate.
+        graph_edits, graph_edits_provenance = _evolver_graph_edits(context.current_config_path, config_path)
+        meta.update(graph_edits_provenance)
+
         artifact = CandidateArtifact(
             config_path=config_path,
             manifest=manifest,
             target_variant=context.target_variant,
+            graph_edits=graph_edits,
         )
         # Re-key the metadata under the manifest's own candidate_id (the slot id
         # and manifest id normally agree, but the manifest is authoritative).

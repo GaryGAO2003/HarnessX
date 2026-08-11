@@ -164,6 +164,38 @@ async def test_graph_input_used_and_recorded_when_u_exists(tmp_path) -> None:
     assert "TRAJECTORY HEAD" not in prompt
 
 
+# ─── 1b. The graph-fed digest NAMES the cone's static node ids (v6 step 1) ─────
+
+
+async def test_graph_digest_carries_cone_static_node_ids(tmp_path) -> None:
+    vround = _layout(tmp_path)
+    session = f"R1-V0-active-{'t1'}"
+    graph = _control_u(session, 6)
+    _write_u(vround, graph)
+
+    provider = _CapturingProvider()
+    digester = _digester(vround, graph_input=True, provider=provider)
+    new_digest, note = await digester._interpret_failed_task(_ctx(vround), _digest())
+
+    assert note is None
+    # The cone spans the whole linear chain 0..5; its distinct static node ids
+    # reach the digest as the on-graph attribution the Planner can name.
+    assert set(new_digest.implicated_nodes) == {f"tool:T{i}" for i in range(6)}
+
+
+async def test_text_path_digest_names_no_nodes(tmp_path) -> None:
+    # graph_input OFF -> text window path -> implicated_nodes stays empty, so a
+    # non-graph digest is byte-identical to before.
+    vround = _layout(tmp_path)
+    provider = _CapturingProvider()
+    digester = _digester(vround, graph_input=False, provider=provider)
+
+    new_digest, note = await digester._interpret_failed_task(_ctx(vround), _digest())
+
+    assert note is None
+    assert new_digest.implicated_nodes == []
+
+
 # ─── 2. No U (enabled) -> text path, recorded unavailable WITH the reason ──────
 
 

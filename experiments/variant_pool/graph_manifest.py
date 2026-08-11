@@ -9,6 +9,7 @@ footprint intersections without re-parsing the manifest text.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from harnessx.graph.edit import GraphEdit, GraphEditType
 
@@ -96,3 +97,57 @@ class GraphEditManifest:
             "target_variant": self.target_variant,
             "bucket": self.bucket,
         }
+
+
+@dataclass(frozen=True)
+class GraphEditDerivation:
+    """The result of deriving graph edits from a parent->child config change.
+
+    ``source`` records WHICH path produced ``edits`` — never inferred from
+    configuration (the 4e0810f discipline): ``"graph"`` means both configs
+    loaded and the edits are the exact ``diff_graphs`` delta (possibly empty
+    when the change implies no graph delta, e.g. a prompt-text-only edit);
+    ``"unavailable"`` means the derivation could not run and ``edits`` is
+    ``None`` so the caller degrades to today's path-string surface. ``reason``
+    always explains what happened.
+    """
+
+    edits: tuple[GraphEdit, ...] | None
+    source: str
+    reason: str
+
+
+def derive_graph_edits(parent_config_path, child_config_path) -> GraphEditDerivation:
+    """Derive the exact :class:`GraphEdit`s implied by a config change.
+
+    A config diff genuinely IMPLIES a graph delta, so the edits are computed —
+    not inferred from prose — by loading both configs, exporting each with
+    :func:`harnessx.graph.snapshot.to_graph`, and taking
+    :func:`harnessx.graph.edit.diff_graphs` of the two snapshots. Every node id
+    on the returned edits therefore comes from ``to_graph``'s sole authority,
+    :func:`harnessx.graph.snapshot.assign_processor_node_ids`; none is minted
+    here and no second differ is written.
+
+    Never raises: any load/parse failure degrades to
+    ``GraphEditDerivation(None, "unavailable", <reason>)`` so a candidate keeps
+    the path-string Critic surface rather than losing the round.
+    """
+    try:
+        from harnessx.core.harness import HarnessConfig
+        from harnessx.graph.edit import diff_graphs
+        from harnessx.graph.snapshot import to_graph
+
+        before = HarnessConfig.from_yaml_file(Path(parent_config_path)).canonicalize()
+        after = HarnessConfig.from_yaml_file(Path(child_config_path)).canonicalize()
+        edits = tuple(diff_graphs(to_graph(before), to_graph(after)))
+    except Exception as exc:  # noqa: BLE001 - degrade to the path-string surface
+        return GraphEditDerivation(
+            None,
+            "unavailable",
+            f"graph-edit derivation unavailable: {type(exc).__name__}: {exc}",
+        )
+    return GraphEditDerivation(
+        edits,
+        "graph",
+        f"graph-derived from parent->child config diff: {len(edits)} edit(s)",
+    )

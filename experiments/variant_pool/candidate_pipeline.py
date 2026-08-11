@@ -84,6 +84,13 @@ class CandidateBrief:
     buckets: tuple[str, ...]
     task_ids: tuple[str, ...]
     rationale: str = ""
+    #: v6 step 2 — optional graph handle: a single processor node id
+    #: (``proc:<slug>``) the Planner points the Evolver at, rather than only a
+    #: coarse ``bucket``. Optional and defaulted, so every existing brief
+    #: construction is unchanged; empty means "no node named" and the brief is
+    #: rendered into the Evolver's contract exactly as before (see
+    #: ``run_variant_pool._planner_brief_for_contract``).
+    implicated_node: str = ""
 
 
 @dataclass(frozen=True)

@@ -97,6 +97,15 @@ class TaskDigest:
     #: Cross-round continuity, filled by
     #: :meth:`EvidenceStore.attach_prior_history`.
     prior_history: list[dict[str, Any]] = field(default_factory=list)
+    #: v6 step 1 — ON-GRAPH attribution: processor/tool node ids
+    #: (``proc:<slug>`` / ``tool:<name>``) taken from the graph-fed Digester's
+    #: causal cone. Kept PARALLEL to :attr:`implicated_components` (rather than
+    #: mixed into it) so the graph ids never dilute that field's controlled
+    #: off-graph prose vocabulary (``tools/<name>``, ``processor/<name>``,
+    #: ``prompt/<section>``, ``environment``, ``model_capability``) that the LLM
+    #: Digester sanitizes and downstream readers join verbatim. Empty by default,
+    #: so a text-path (no-cone) digest is byte-identical to today.
+    implicated_nodes: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         n_pass, n_att = self.outcome
@@ -111,7 +120,7 @@ class TaskDigest:
         return self.outcome[0] >= 1
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "task_id": self.task_id,
             "round_idx": self.round_idx,
             "variant_id": self.variant_id,
@@ -121,6 +130,11 @@ class TaskDigest:
             "evidence_anchors": list(self.evidence_anchors),
             "prior_history": list(self.prior_history),
         }
+        # Emitted ONLY when populated, so a text-path digest serializes
+        # byte-identically to pre-v6 JSONL (the key is simply absent).
+        if self.implicated_nodes:
+            payload["implicated_nodes"] = list(self.implicated_nodes)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TaskDigest:
@@ -133,6 +147,7 @@ class TaskDigest:
             implicated_components=list(data.get("implicated_components", [])),
             evidence_anchors=list(data.get("evidence_anchors", [])),
             prior_history=list(data.get("prior_history", [])),
+            implicated_nodes=list(data.get("implicated_nodes", [])),
         )
 
 
