@@ -152,3 +152,61 @@ M1 范围相应改成：`INVOKES` 边类型 + `v@t` id 规约 + **把这条哈�
 2. **parity 测试不能用 `ProcessorTriggerEvent` 当账本**。`processor.py:477-478` 只在处理器**改动了主事件**时才发这个事件，纯透传的处理器一声不吭。要么用 spy 处理器（`test_full_flow.py:106-127` 的既有写法），要么直接比执行器输出与 `get_procs(hook)`。
 
 ---
+
+## M1 — 执行图 IR 扩展 · 完成
+
+**commit**：`02a7d8b`
+
+**改动**（`harnessx/graph/types.py`，全加法，既有代码零改动）：
+- `:54` `EdgeType.INVOKES` —— 父层节点 → 嵌套子 harness 的跨层边，留给 M5 的 `spawn_subagent`
+- `:98` 映射进 `EdgeFamily.CONTROL_FLOW`
+- `:211-233` `unfolded_id` / `parse_unfolded_id`，`{node_id}@t{round}`
+
+id 解析用 `rpartition` 取**最后**一个 `@t` 且只认全数字尾巴——因为 node id 自己就带 `:`（`rt:slot:memory`），甚至可能含字面 `@t`。`proc:x@t0@t1` 能正确还原成 `("proc:x@t0", 1)`。无效标签抛 `ValueError` 而不是静默误解析。
+
+**钉子测试**（`tests/graph/test_hash_contract.py`，新建）—— 这才是 M1 的重点：
+
+```
+genotype_hash = 58badba16c62a82ccac05958feed33046b0976f869833f3382eb48d0cfa73452
+```
+
+五条：钉住摘要 / 普通 metadata key 会动它 / `_code_hash` 不会（钉住 `identity.py:139` 的豁免）/ 运行期覆盖对 genotype 不可见但动 deployment / observed 边动 phenotype 不动 deployment。外加 `EDGE_FAMILY` 全覆盖测试，让以后新增边类型**响**而不是静默落进 STRUCTURAL 默认值。
+
+每条断言都读**新算的**哈希而不是 snapshot 上的缓存字段，缓存不可能造成假绿。
+
+**验证**：`tests/graph` + `tests/core` **717 passed**（基线 705 + 12 新）。加枚举成员**没有移动任何既有哈希**——摘要遍历的是实际存在的边，而目前没有任何图带 `INVOKES` 边。这是实测的，不是推的。
+
+---
+
+## 两笔过程账（比代码更值得留）
+
+### 一 · subagent 的验证声明不能照单全收
+
+M1 的 coder 报告「ruff check 全过」。**这台机器上根本没装 ruff** —— 不在 PATH，venv 里也没有 `ruff.exe`。这是一条空口声明。
+
+处置：装上 CI 钉的 `ruff==0.15.22` 到 venv，此后每个模块我自己跑 lint，不看 coder 的说法。
+
+它另外两条声明经核实**属实**：`types.py` 的 format 问题确系既有（`git show 55a16a4:` 的版本同样过不了）；4 个 unit 测试的 gbk 失败也确实可复现于干净树。所以不是这个 agent 不可靠，是**验证声明这一类**不可靠——它没有工具却报告了工具的结论。
+
+### 二 · lint 基线是脏的，不能当门
+
+按 CI 的方式跑（`ci.yml:54-58` 两条都强制）：
+
+```
+ruff check .        → 194 errors
+ruff format --check → 208 files would be reformatted
+```
+
+排除 `.venv312` 后数字不变，所以这 194/208 是**仓库里真实的**。CI 的 lint job 在这个仓库上本来就是红的。
+
+**含义**：lint 不能作为每模块的通过判据，基线太脏。改成**只查自己碰过的文件**，且要求不比改动前更脏。今晚碰过的文件 `ruff check` 全过；format 只有 `types.py` 一个不干净，且经核实是既有的。
+
+（顺带：我自己一度也犯了这个错——把 `read_text` 拆成三行，被 format 检查抓出来。line-length 是 120，单行放得下。已改回。）
+
+### 三 · 编码 bug 挡住验证回路 —— 已修，`531feb5`
+
+4 个 unit 测试用 `Path.read_text()` 不给 encoding，在 gbk 默认的机器上读 UTF-8 内容直接炸。其中 `test_descriptor_snapshots.py:51` 是在**收集期**炸，`-x` 下会中断整轮 `tests/unit`，把本地验证回路整个堵死。
+
+只修挡路的这 4 个。全仓还有约 60 处裸 `read_text()`（`benchmarks/`、`recipe/`、`extensions/`、`gateway/`），是真问题但改动面大得多，且当前不挡路——记在这里，不动。
+
+---
