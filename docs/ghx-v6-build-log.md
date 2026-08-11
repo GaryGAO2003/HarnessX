@@ -782,3 +782,11 @@ Z 相应改成：
 - **Evolver 正常交货**：exit=done 42 步、322 万 tok、2 候选（Flash 产率 2/4 轮）。五官方门全过 → **第六道门对两个候选各落一份诚实放行记录**（"PASSED THROUGH (unverifiable — not checked)"，ok:True/checked:False，原因=replay U 不可得），**decision: ship 真上船**，R1 1/1。
 - **候选图表面生产首跑**：`graph_evidence/candidates/C-R1-0{1,2}.md`，prompt 桶如实报 0 图编辑（不动处理器拓扑）——不是 bug 是正确语义。
 - 至此四级各自的全部验证点均已生产实证。剩余：meta=V4-Pro 验证炉（已点，`.env` GAIA_META_MODEL=deepseek-v4-pro，用户令"换v4pro"）；床位/环境两个决定。
+
+## MetaPro 验证炉（用户令"换v4pro"的验收）
+
+- 面板实证 meta=deepseek-v4-pro（解析链：显式 > GAIA_META_MODEL > 跟随主模型；.env 生效）。任务侧维持 Flash。
+- **Evolver 首炉交货**：exit=done 50 步、346 万 tok、1 候选 → 五门全过 → ship。全程 11.5 分钟（对照 L2 Flash 空转炉 ~33 分钟）。
+- Planner 效率显著：11 步/9.1 万 tok（L2 Flash 同角色 15 步/35.1 万 tok）。Critic 28 步/196 万 tok。
+- 诚实注记：样本各 1，"Pro 治好空转"是方向性信号不是结论；产率对照 Flash 2/4 vs Pro 1/1，正式跑的多轮数据才算数。
+- 至此用户三决定已落一（meta=V4-Pro），余二：床位、运行环境。工程侧无未结阻塞项。
