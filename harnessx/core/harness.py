@@ -355,6 +355,10 @@ class _HarnessRuntime:
     workspace: Any  # Workspace | None
     sandbox_provider: Any  # SandboxProvider
     plugins: list  # list[HarnessPlugin]
+    # (node_id, bucket, proc) recorded as instances are built (v6 M2b) — the
+    # SAME instances routed into ``processors``, keyed by the single node-id
+    # authority so the graph executor never re-instantiates.
+    proc_node_binding: list = field(default_factory=list)
 
 
 def _instantiate_proc(d: dict) -> "Any | None":
@@ -664,6 +668,20 @@ def _instantiate_runtime(config: "HarnessConfig") -> _HarnessRuntime:
     # ── Processors: consume the canonical sequence exactly once (L2.3c) ─────
     from .runtime import RoutingEnvelope, coerce_runtime_reg
 
+    # v6 M2b: record the node-id→instance binding AS instances are built, using
+    # the single node-id authority.  This is the seam the graph executor
+    # consumes — it never re-instantiates (which would mint a divergent set of
+    # stateful instances, the hazard build_node_binding carries).  proc: ids key
+    # on the SerializedReg dict (config.processors shares those dict objects);
+    # rt: ids key on the live proc identity.
+    from ..graph.snapshot import assign_processor_node_ids
+    from ..graph.executor import UNGRAPHED as _UNGRAPHED
+
+    _node_ids = assign_processor_node_ids(config)
+    _persistent_by_dict = {id(d): nid for d, nid in _node_ids.persistent}
+    _runtime_by_proc = {id(p): nid for p, nid in _node_ids.runtime}
+    proc_node_binding: list = []  # (node_id, bucket, proc)
+
     flat: list = []
     for seq, reg in enumerate(config._processor_regs):
         if isinstance(reg, SerializedReg):
@@ -681,16 +699,25 @@ def _instantiate_runtime(config: "HarnessConfig") -> _HarnessRuntime:
             # overrides included — VM7 pattern; bare no-_hook instances → "*";
             # explicit `_hook_=""` → empty bucket, never executes).
             natural = coerce_runtime_reg(inst)
+            hook = reg.hook if reg.hook_present else natural.hook
             flat.append(RoutingEnvelope(RuntimeReg(
                 proc=inst,
-                hook=reg.hook if reg.hook_present else natural.hook,
+                hook=hook,
                 order=reg.order if reg.order_present else natural.order,
                 singleton_group=(reg.singleton_group if reg.sg_present
                                  else natural.singleton_group),
                 after=reg.after if reg.after_present else natural.after,
             ), seq))
+            # Invariant: everything that reaches ``flat`` is dispatched, so it
+            # MUST appear in the binding.  A missing node id means ungraphed,
+            # never omitted — an omission would silently drop the processor from
+            # the graph executor's view while the legacy path still runs it.
+            _nid = _persistent_by_dict.get(id(reg.dict_ref))
+            proc_node_binding.append((_nid if _nid is not None else _UNGRAPHED, hook, inst))
         else:
             flat.append(RoutingEnvelope(reg, seq))
+            _nid = _runtime_by_proc.get(id(reg.proc))
+            proc_node_binding.append((_nid if _nid is not None else _UNGRAPHED, reg.hook, reg.proc))
 
     # Plugin tail envelopes: seq = max+1 (safe across DROPPED seq holes);
     # id-identity dedup — a mounted plugin's processor may already be in the
@@ -707,6 +734,11 @@ def _instantiate_runtime(config: "HarnessConfig") -> _HarnessRuntime:
                 continue
             flat.append(RoutingEnvelope(reg, base_seq))
             base_seq += 1
+            # Instance-plugin procs carry an rt: id; dict-plugin procs do not
+            # (the pure-read graph cannot enumerate a dict plugin), so they are
+            # dispatched-but-ungraphed — record them as such rather than drop.
+            _nid = _runtime_by_proc.get(id(reg.proc))
+            proc_node_binding.append((_nid if _nid is not None else _UNGRAPHED, reg.hook, reg.proc))
 
     proc_dict = _route_processors(flat)
 
@@ -765,6 +797,7 @@ def _instantiate_runtime(config: "HarnessConfig") -> _HarnessRuntime:
         workspace=workspace,
         sandbox_provider=sandbox_provider,
         plugins=plugins,
+        proc_node_binding=proc_node_binding,
     )
 
 
@@ -1139,8 +1172,18 @@ class Harness:
         self._rt = _instantiate_runtime(config)
 
         if extra_processors:
+            from ..graph.executor import UNGRAPHED as _UNGRAPHED
+
             for key, procs in extra_processors.items():
                 self._rt.processors.setdefault(key, []).extend(procs)
+                # Extras are a runtime injection that never passed through the
+                # config, so they have no graph node.  Record them in the
+                # dispatch binding as dispatched-but-ungraphed (bucket = key, in
+                # registration order) so the graph executor appends them to the
+                # end of their bucket exactly as legacy get_procs does — instead
+                # of silently dropping them.
+                for proc in procs:
+                    self._rt.proc_node_binding.append((_UNGRAPHED, key, proc))
 
         from .processor import MultiHookProcessor
         from .runtime import claim_owners, release_owners
@@ -1469,6 +1512,7 @@ class Harness:
                 model_config=self.model_config,
                 harness_config=self.config,
                 child_harness_config=self.child_harness_config,
+                graph_binding=self._rt.proc_node_binding,
             )
 
             # Auto-backfill terminal reward into all trajectory steps.

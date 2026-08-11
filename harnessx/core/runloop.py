@@ -128,6 +128,7 @@ async def run_loop(
     model_config: "object | None" = None,
     harness_config: "object | None" = None,
     child_harness_config: "object | None" = None,
+    graph_binding: "list | None" = None,
 ) -> "tuple[TaskEndEvent, StatefulTrajectory, ToolCall | None]":
     """
     Core RunLoop. Pure loop — context assembly, memory, and evaluation
@@ -153,7 +154,24 @@ async def run_loop(
 
     _star_procs: list[Processor] = processors.get("*", [])
 
+    # v6 M2b: single delegation point.  With HARNESSX_GHX_RUNTIME on (and a
+    # runtime binding available) dispatch resolves through the graph executor —
+    # order read from the graph's EXECUTES_BEFORE chains, not re-sorted.  The
+    # flag is read at call time (never cached at import), default OFF; unset =
+    # byte-identical to the legacy concatenation below.  The executor is built
+    # once, lazily, on the first flagged lookup.
+    _graph_executor: list = []
+
+    def _ghx_runtime_enabled() -> bool:
+        return os.environ.get("HARNESSX_GHX_RUNTIME", "").strip().lower() in ("1", "true", "on", "yes")
+
     def get_procs(key: str) -> list[Processor]:
+        if graph_binding is not None and harness_config is not None and _ghx_runtime_enabled():
+            if not _graph_executor:
+                from ..graph.executor import build_graph_executor
+
+                _graph_executor.append(build_graph_executor(harness_config, graph_binding))
+            return _graph_executor[0].procs_for(key)
         specific = processors.get(key)
         return _star_procs + specific if specific else _star_procs
 
