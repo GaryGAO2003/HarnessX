@@ -304,3 +304,68 @@ id 序号按 **per-target 的 config 顺序**分配，而 hook 内执行序是 *
 顺带修掉第 5 个同族编码 bug（`test_full_flow.py:651`，commit `f220add`）。
 
 ---
+
+## M2b — 图执行器 + parity 门 · 完成
+
+**commit**：`e83df45`
+
+### 一个委派点
+
+runloop 只改了 `get_procs` 那个闭包，**九个分发点一行未动**。旗标 `HARNESSX_GHX_RUNTIME` 每次现读、不在导入期缓存、默认关；不设时是逐字节等同的 legacy 拼接。
+
+顺序**只读不算**：图的 EXECUTES_BEFORE 链和运行时路由本来就共用 `stable_topological_sort`，再排一次就是第二个真相源。
+
+### 双实例化陷阱堵住了
+
+`build_node_binding`（M2a 的产物）是用 `_instantiate_proc` **新建**实例的。执行器若在运行期调它，会造出第二套有状态处理器，跟真正被路由的那套发散。
+
+改成：`_instantiate_runtime` 在**构建每个实例的同时**记录 node-id 关联。执行器分发的就是本来就要分发的那些对象，自己什么也不造。
+
+### 打回一次：两条绕过图的分发路
+
+M2b 第一版把 `extra_processors` 当作「M2b 的边界」留下了。我不接受，理由两条：
+
+1. parity 是整个 v6 的硬门，「除了某情况外成立」不是门。而且它的 16 个用例**恰恰因为全部走 `config.processors`** 才全绿——测试被塑造成了避开自己该抓的 bug 的形状。
+2. 生产里这是**静默丢处理器**，不是断言失败。
+
+复现证据：
+
+```
+HARNESSX_GHX_RUNTIME=1 pytest tests/integration
+  FAILED tests/integration/test_full_flow.py::test_custom_hook_injected
+```
+
+打回后它自己找到了**第二条**：dict 形式的插件。它们被加载成活处理器并参与分发，但纯读的图枚举不到它们，所以拿不到 `rt:` id——**第一版把它们也静默丢了**。
+
+两条现在都记成显式的 `UNGRAPHED` 标记（不是伪造 node id），并按 legacy 语义排在各自桶尾。
+
+### 我自己又补了一处
+
+它的两个分支里 `_nid is None` 时**整条绑定被跳过**——实例已经进了 `flat`、会被分发，却对图执行器不存在。同一类静默丢弃。改成无条件不变量：
+
+> **凡进 `flat` 的处理器，绑定里必有一条。没有 node id 意味着「未上图」，永远不意味着「省略」。**
+
+（`inst is None` 那条 `continue` 不受影响——那些根本没进 `flat`，不分发，没有条目是对的。）
+
+### 执行器拒绝 model / tool
+
+这两个在 `SKELETON_HOOK_NAMES` 里但从不被分发。显式 `hooks=["model"]` 能绕过 `snapshot.py` 的通配符封死（见上文「小账 · 未触发」）。全仓无人这么写——**执行器不该成为让它活过来的那个东西**。
+
+### parity 门覆盖什么
+
+16 个用例，断言执行器输出与 legacy `get_procs` 在全部 8 个分发 hook 上**按实例同一性**（`is` 而非 `==`）相同。配置覆盖 `_after` 排序、`singleton_group`、`"*"` 桶拼接、多 bundle 组合、以及 `extra_processors` 挂在 `"*"` 和具体 hook 两种情形。
+
+外加端到端：同一任务在旗标开/关下跑，比对 hook 触发序列。用 **spy 处理器**观测，不用 `ProcessorTriggerEvent`——后者只在处理器改动主事件时才发，纯透传的会隐形。
+
+### 验证
+
+- `tests/graph`+`tests/core`+`tests/integration`：**820 passed**
+- `tests/integration` 旗标开：**92 passed**（含未经修改的见证测试 `test_custom_hook_injected`）
+- `tests/unit`：946/2/10，与基线一致，无第三个失败
+- `harness.py` 的 F821 与 HEAD 同源（`:945`→`:978` 纯行号偏移），format hunk 8→7
+
+### CI 补一条
+
+原先 CI 只在旗标**默认关**下跑，flag-on 那条路从没被执行过——门存在但没人开。加了一个 `HARNESSX_GHX_RUNTIME=1` 跑 `tests/integration` 的 step。
+
+---
