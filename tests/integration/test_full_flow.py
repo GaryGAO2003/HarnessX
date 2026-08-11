@@ -648,7 +648,7 @@ async def test_custom_tools_recorded_in_config(tmp_path):
     await harness.run(BaseTask(description="test"))
 
     config_path = ws_root / "harness_config.yaml"
-    content = config_path.read_text()
+    content = config_path.read_text(encoding="utf-8")
     # Tools emitted under tools.custom store their fn's module::qualname path
     # (not the Tool.name attribute) — the loader re-imports the fn from there.
     assert "_module_level_custom_tool_fn" in content, (
