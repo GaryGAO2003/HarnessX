@@ -297,8 +297,14 @@ class GAIAPipelineEvaluator:
         final_output: str,
         trajectory_messages: "Iterable[Message]",
         *,
-        max_recent_assistant: int = 5,
-        max_chars_per_msg: int = 1500,
+        # Window covers the full 20-step budget: with quote-required grading
+        # (fail-closed), a 5-turn window failed trajectories that committed
+        # the correct answer early and then spent the remaining budget
+        # re-verifying (observed: answer at step 5 of 20, judge saw only
+        # verification chatter). 4000 chars keeps commit sentences that sit
+        # late inside a long turn.
+        max_recent_assistant: int = 20,
+        max_chars_per_msg: int = 4000,
     ) -> EvalResult:
         """LLM-judge-primary evaluation over the full trajectory.
 
