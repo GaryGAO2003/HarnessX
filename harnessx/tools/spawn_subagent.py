@@ -607,10 +607,27 @@ def _patch_processors_for_child(
         try:
             cloned = copy.deepcopy(proc)
         except Exception as exc:
+            # deepcopy hit unpicklable *bound* runtime state — concretely, a
+            # journal's TextIOWrapper reached through _bind_harness_config /
+            # _bind_runtime.  Dropping the processor here (the old behaviour) ran
+            # the child on a DIFFERENT pipeline than configured, silently.  Rebuild
+            # a fresh instance from the processor's serialized form instead: that
+            # is exactly what the child would have constructed had it built its own
+            # harness from config, and it cannot carry the parent's runtime
+            # bindings.  Position is preserved — we append in canonical loop order.
+            fresh = _reinstantiate_for_child(proc)
+            if fresh is not None:
+                if isinstance(r, RuntimeReg):
+                    new_procs.append(_dc.replace(r, proc=fresh))  # keep the 4-tuple
+                else:
+                    new_procs.append(fresh)
+                continue
             _warnings.warn(
                 f"spawn: runtime processor {type(proc).__name__} could not be "
-                f"cloned for the child ({type(exc).__name__}: {exc}); the child "
-                "runs WITHOUT it",
+                f"cloned for the child ({type(exc).__name__}: {exc}) AND has no "
+                f"serializable form to re-instantiate from (a runtime-only marker "
+                f"or a locally-defined / unimportable class); the child runs "
+                f"WITHOUT it",
                 stacklevel=2,
             )
             continue
@@ -620,6 +637,40 @@ def _patch_processors_for_child(
             new_procs.append(cloned)
 
     return config.copy(processors=new_procs)
+
+
+def _reinstantiate_for_child(proc: Any) -> "Any | None":
+    """Rebuild a fresh child-side processor from *proc*'s serialized form.
+
+    Called only when ``copy.deepcopy`` fails because the parent Harness bound
+    unpicklable runtime state onto the instance.  Reuses the config layer's own
+    serialize → instantiate machinery (``_serialize_processor`` /
+    ``_instantiate_proc`` in :mod:`harnessx.core.harness`) rather than inventing a
+    parallel registry.  Returns ``None`` when no honest serialized form exists,
+    so the caller degrades loudly instead of silently.
+    """
+    try:
+        from ..core.harness import _instantiate_proc, _serialize_processor
+
+        spec = _serialize_processor(proc)
+        if spec is None:
+            # _serialize_processor refuses classes whose module could not survive a
+            # FRESH-process YAML reload (``__main__``, private ``_``-modules) and
+            # anything flagged runtime-only.  A spawn re-instantiates in the SAME
+            # process, where ``__main__`` / private modules ARE importable — so
+            # rescue those here.  Still refuse an explicit runtime-only marker and
+            # a class no target string can import (``<locals>``).
+            if getattr(proc, "__hx_runtime_only__", False) or getattr(type(proc), "__hx_runtime_only__", False):
+                return None
+            cls = type(proc)
+            module = getattr(cls, "__module__", "") or ""
+            qualname = getattr(cls, "__qualname__", "") or ""
+            if not module or "<" in qualname:
+                return None
+            spec = {"_target_": f"{module}.{qualname}"}
+        return _instantiate_proc(spec)
+    except Exception:
+        return None
 
 
 class _StaticSystemPromptBuilder:
