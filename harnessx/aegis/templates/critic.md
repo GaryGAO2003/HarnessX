@@ -146,6 +146,7 @@ candidate_id: <C-R{{ round }}-NN>
 verdict: <accept|reject|ask-more>
 evidence_anchors:
   - trajectories/<file>#step_N
+  - sessions/<file>#step_N
   - digests/<file>
 ---
 
