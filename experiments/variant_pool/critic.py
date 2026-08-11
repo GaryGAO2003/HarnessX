@@ -31,6 +31,34 @@ from .evidence import EvidenceStore, TaskDigest
 from .manifest import CandidateArtifact
 
 
+def _graph_surface(candidate: CandidateArtifact) -> frozenset[str] | None:
+    """The touched node/edge identifiers of a candidate's graph edits, or ``None``.
+
+    v6 M8. ``None`` means the candidate carries no graph-edit information, so the
+    path-string surface (file-change paths) applies unchanged — today's default.
+    Otherwise the surface is the union, over every edit, of the node ids the edit
+    touches (``edit.affected_node_ids()`` — whose ids come from the M2a node-id
+    authority; none are minted here) plus a ``src→tgt`` identifier for each
+    dependency edit. Duck-typed on the edit so this module keeps its dependency-free
+    import surface and never imports the graph package at load time.
+
+    Because the surface is exact graph elements rather than shared file paths, two
+    candidates editing *different* nodes of the *same* file no longer read as
+    overlapping, while two candidates touching the *same* node still do.
+    """
+    edits = getattr(candidate, "graph_edits", None)
+    if not edits:
+        return None
+    surface: set[str] = set()
+    for edit in edits:
+        surface |= set(edit.affected_node_ids())
+        source = getattr(edit, "edge_source_id", "")
+        target = getattr(edit, "edge_target_id", "")
+        if source and target:
+            surface.add(f"{source}→{target}")
+    return frozenset(surface)
+
+
 @dataclass(frozen=True)
 class CriticContext:
     """Inputs needed by the portfolio audit for one target variant."""
@@ -93,6 +121,14 @@ class CandidateVerdict:
     parent_overlap_assessment: str = (
         "not assessed by deterministic fallback; inject a semantic Critic for parent-intent review"
     )
+    #: v6 M8 — which surface produced ``mutation_surface`` / ``overlapping_candidates``:
+    #: ``"graph"`` (exact touched node/edge ids) or ``"path"`` (file-change paths).
+    #: Recorded, never inferred: a verdict must not claim the precise graph surface
+    #: while it actually ran the imprecise path one (the 4e0810f failure mode).
+    surface_kind: str = "path"
+    #: v6 M8 — why that surface was used, in the shape of M6b/M7's executed-path
+    #: provenance notes.
+    surface_provenance: str = "path surface: file-change paths; no graph-edit information on this candidate"
 
 
 @dataclass(frozen=True)
@@ -258,14 +294,31 @@ class DeterministicCritic:
             eligible,
             key=lambda candidate: self._ranking_key(candidate, failing_tasks, regressions),
         )
-        surfaces = {
-            candidate.candidate_id: frozenset(
-                str(change.get("path", ""))
-                for change in candidate.manifest.file_changes
-                if str(change.get("path", "")).strip()
-            )
-            for candidate in ranked
-        }
+        # M8: a candidate carrying graph edits gets an exact node/edge surface;
+        # otherwise the path-string surface runs unchanged (the default). Which
+        # one executed is recorded on the verdict, not left to be inferred.
+        surfaces: dict[str, frozenset[str]] = {}
+        surface_kinds: dict[str, str] = {}
+        surface_notes: dict[str, str] = {}
+        for candidate in ranked:
+            graph_surface = _graph_surface(candidate)
+            if graph_surface is not None:
+                surfaces[candidate.candidate_id] = graph_surface
+                surface_kinds[candidate.candidate_id] = "graph"
+                surface_notes[candidate.candidate_id] = (
+                    f"graph surface: {len(graph_surface)} touched node/edge id(s) "
+                    f"from {len(candidate.graph_edits or ())} graph edit(s)"
+                )
+            else:
+                surfaces[candidate.candidate_id] = frozenset(
+                    str(change.get("path", ""))
+                    for change in candidate.manifest.file_changes
+                    if str(change.get("path", "")).strip()
+                )
+                surface_kinds[candidate.candidate_id] = "path"
+                surface_notes[candidate.candidate_id] = (
+                    "path surface: file-change paths; no graph-edit information on this candidate"
+                )
         verdicts: list[CandidateVerdict] = []
         for rank, candidate in enumerate(ranked, start=1):
             overlaps = tuple(
@@ -281,6 +334,8 @@ class DeterministicCritic:
                     mutation_surface=tuple(sorted(surfaces[candidate.candidate_id])),
                     overlapping_candidates=overlaps,
                     reasons=(self.ranking_note,),
+                    surface_kind=surface_kinds[candidate.candidate_id],
+                    surface_provenance=surface_notes[candidate.candidate_id],
                 )
             )
 
@@ -328,5 +383,9 @@ class DeterministicCritic:
         impact = candidate.manifest.predicted_impact
         failure_coverage = len(set(impact.predicted_flips()) & failing_tasks)
         regression_coverage = len(set(impact.tasks_at_risk) & regressions)
-        surface_size = len(candidate.manifest.file_changes)
+        # M8: with a graph surface, rank by the touched-element count; otherwise the
+        # file-change count, exactly as before. Ordering semantics are unchanged —
+        # only the source of ``surface_size`` follows whichever surface applies.
+        graph_surface = _graph_surface(candidate)
+        surface_size = len(graph_surface) if graph_surface is not None else len(candidate.manifest.file_changes)
         return (-failure_coverage, -regression_coverage, surface_size, candidate.candidate_id)

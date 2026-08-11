@@ -53,10 +53,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+if TYPE_CHECKING:
+    from harnessx.graph.edit import GraphEdit
 
 #: Edit types (Table 9 p.36). The paper calls the same thing a "bucket" in the
 #: manifest and a "lever" in the effectiveness analysis (Figure 12c p.43).
@@ -581,6 +584,12 @@ class CandidateArtifact:
     manifest: ChangeManifest
     target_variant: str
     regression_explanations: tuple[tuple[str, str], ...] = ()
+    #: v6 M8 — optional graph-edit information (the ``edits`` an Evolver operator
+    #: produced for this candidate). When present, the Critic computes its
+    #: mutation surface over the touched graph nodes/edges instead of file-change
+    #: path strings; ``None`` (the default) keeps the path-string surface exactly
+    #: as before.
+    graph_edits: tuple["GraphEdit", ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "config_path", Path(self.config_path))
@@ -589,6 +598,8 @@ class CandidateArtifact:
             "regression_explanations",
             tuple(sorted((str(task_id), str(reason)) for task_id, reason in self.regression_explanations)),
         )
+        if self.graph_edits is not None:
+            object.__setattr__(self, "graph_edits", tuple(self.graph_edits))
 
     @property
     def candidate_id(self) -> str:
