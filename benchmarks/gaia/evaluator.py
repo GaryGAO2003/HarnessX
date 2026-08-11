@@ -356,6 +356,13 @@ class GAIAPipelineEvaluator:
                 reward=0.0,
             )
 
+        # Quote-required grading. The permissive "answer anywhere" prompt let
+        # weaker judge models hallucinate a pass on answerless trajectories
+        # (~40% FP measured on deepseek-chat AND deepseek-v4-pro: the ground
+        # truth sits in the prompt and the judge rewards effort). Forcing the
+        # judge to quote the committing sentence verbatim — and hard-failing
+        # when it cannot — measured 5/5 correct on both known-fake and
+        # known-real cases where the permissive prompt was 40% wrong.
         prompt = (
             "You are grading a tool-using agent's answer against a known "
             "ground-truth answer for a benchmark question.\n\n"
@@ -364,25 +371,25 @@ class GAIAPipelineEvaluator:
             "AGENT'S MOST RECENT ASSISTANT MESSAGES (most recent first, "
             "separated by ---):\n"
             f"{recent_rendered}\n\n"
-            "Did the agent correctly commit to the ground-truth answer?\n"
-            "Accept:\n"
-            "- Semantic equivalence ('$12,000' ≡ '12000', 'Quincy, MA' ≡ 'Quincy',\n"
-            "  date formats, singular/plural, trivial paraphrase).\n"
-            "- Answer anywhere in the recent messages, not only on an explicit\n"
-            "  `FINAL ANSWER:` line (the agent may have emitted it a turn or\n"
-            "  two before the trajectory ended).\n"
-            "Reject:\n"
-            "- Partial correctness (e.g. only one of two required items).\n"
-            "- A guess that happens to string-match without justification.\n"
-            "- Silence / refusal / 'unable to determine' answers.\n\n"
-            "Respond with exactly one token PASS or FAIL on the first line, "
-            "followed by one short sentence of reasoning on the second line.\n"
-            "Format:\n"
-            "PASS\n"
-            "<reason>\n"
-            "OR:\n"
-            "FAIL\n"
-            "<reason>"
+            "Grading procedure (follow exactly):\n"
+            "1. Find the sentence in the agent's messages where the agent "
+            "COMMITS to an answer. It may appear anywhere in the recent "
+            "messages, not only on an explicit `FINAL ANSWER:` line.\n"
+            "2. QUOTE that sentence verbatim on a line starting with "
+            "`QUOTE: `. If no such sentence exists, write `QUOTE: NONE`.\n"
+            "3. If QUOTE is NONE, the verdict MUST be FAIL, no exceptions — "
+            "exploring, reasoning toward, or mentioning topic keywords is "
+            "not an answer. Silence / refusal / 'unable to determine' also "
+            "FAIL.\n"
+            "4. If a quoted sentence exists, judge whether it semantically "
+            "matches the ground truth ('$12,000' ≡ '12000', 'Quincy, MA' ≡ "
+            "'Quincy', date formats, singular/plural, trivial paraphrase all "
+            "acceptable). Partial correctness (only one of two required "
+            "items) or an unjustified lucky guess FAIL.\n\n"
+            "Respond in this exact format:\n"
+            "QUOTE: <verbatim sentence or NONE>\n"
+            "VERDICT: PASS or FAIL\n"
+            "REASON: <one short sentence>"
         )
 
         try:
@@ -391,8 +398,21 @@ class GAIAPipelineEvaluator:
                 tools=[],
             )
             text = (response.content or "").strip()
-            first_tok = text.split(None, 1)[0].upper() if text else ""
-            passed = first_tok.startswith("PASS")
+            verdict_line = next(
+                (
+                    ln
+                    for ln in text.splitlines()
+                    if ln.strip().upper().startswith("VERDICT:")
+                ),
+                "",
+            )
+            if verdict_line:
+                passed = "PASS" in verdict_line.upper().split(":", 1)[1]
+            else:
+                # Legacy shape (bare PASS/FAIL first line); unparseable output
+                # fails closed.
+                first_tok = text.split(None, 1)[0].upper() if text else ""
+                passed = first_tok == "PASS"
             return EvalResult(
                 passed=passed,
                 score=1.0 if passed else 0.0,
