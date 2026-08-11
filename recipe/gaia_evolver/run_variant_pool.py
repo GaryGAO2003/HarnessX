@@ -5036,6 +5036,15 @@ class VariantPoolRecipe:
     lineage across rounds, and the on-disk artefacts.
     """
 
+    # Truthful pipeline audit: per-round recorders of what each LLM AEGIS role
+    # ACTUALLY executed.  Class-level defaults because the adapter-name
+    # properties and the audit payload are reachable on paths that never enter
+    # the round loop (which resets them per round) -- without these, reading the
+    # audit outside a round raises AttributeError.
+    _active_digester_execution = None
+    _active_planner_execution = None
+    _active_critic_execution = None
+
     def __init__(
         self,
         *,

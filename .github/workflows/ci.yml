@@ -39,6 +39,12 @@ jobs:
       - name: Run graph + core tests
         run: pytest tests/graph tests/core -x -q
 
+      # The AEGIS variant-pool suite (~1100 tests) was outside CI, which is how
+      # a regression in the pipeline-audit recorders reached several commits
+      # before anyone noticed.
+      - name: Run variant-pool tests
+        run: pytest experiments/variant_pool/tests -x -q
+
       # v6: the parity gate only means something if the flagged path is
       # actually exercised. The step above runs with the flag unset (legacy
       # dispatch); this one runs the same suite dispatching from the graph.
