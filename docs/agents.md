@@ -327,7 +327,13 @@ harness = model.agentic(make_my_bench_harness())
    (`ANTHROPIC_*`, `OPENAI_*`, `LITELLM_*`).
 
 7. **Processors are ordered** within each hook. Earlier processors run first. A processor
-   that yields nothing blocks all subsequent processors and the hook action itself.
+   that yields nothing blocks all *subsequent processors* — but **not the hook action
+   itself**. Every dispatch site in `runloop.py` falls back to the pre-hook event when the
+   chain yields nothing (`runloop.py:207/328/397/438/519/576/615/682/845`), so the action
+   still runs with the original event. To actually stop something you must yield a
+   *modified* event: `ToolCallEvent(approved=False)` to deny a tool call, or a different
+   event type to short-circuit (a `task_start` processor yielding `TaskEndEvent` ends the
+   run — see `runloop.py:211`).
 
 8. **`state.slots`** is a free-form key-value store for agent-specific runtime state.
    Use `state.set_slot(key, slot_type, content)` and `state.get_slot(key)`.
@@ -344,6 +350,9 @@ harness = model.agentic(make_my_bench_harness())
   this replaces the entire hook list. Use `{**harness_config.processors, "key": [...existing, proc]}`.
 - Do not register the same `MultiHookProcessor` instance under multiple hook keys — register it
   once under `"*"` and let it dispatch internally via `on_*` methods.
+- Do not write a veto by yielding nothing — the hook action still runs on the pre-hook event
+  (see constraint 7). Yield `ToolCallEvent(approved=False)` instead; a silently-failing veto
+  is the failure mode this trap produces.
 - Do not access `result.task_end.messages` — messages live on `result.trajectory.steps`.
 - Do not add `finish_reason == "end_turn"` checks in new code — use
   `finish_reason in ("end_turn", "stop")` to support both Anthropic and OpenAI models.

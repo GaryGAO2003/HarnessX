@@ -5473,8 +5473,10 @@ class VariantPoolRecipe:
         """True ONLY when Digester, Planner AND Critic are all LLM (A1+A2+A3).
 
         This is the moment the pipeline-audit flag was reserved for: the full
-        AEGIS three-role dialogue is model-backed (prompts are OURS
-        reconstructions). Any deterministic role keeps it False.
+        AEGIS three-role dialogue is model-backed. Prompt provenance is a
+        SEPARATE axis carried by ``aegis_prompts``: "paper" (the default, see
+        DEFAULT_AEGIS_PROMPTS) uses the prompts as published; "legacy" uses OUR
+        reconstructions. Any deterministic role keeps this False.
         """
         return (
             self.aegis_digester == "llm"
