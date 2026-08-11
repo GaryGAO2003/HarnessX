@@ -717,3 +717,12 @@ Z 相应改成：
 - 套件：tests/ghx + tests/recipe **61 过**；`--dry-run --ghx-level 2` exit 0，双面板均显示 meta 跟随主模型。
 - **残留待确认**：根目录三个一行级脚本 `_hx_run.py` / `hx_test.py` / `test_script.py`（查 x.txt / 数 words_alpha.txt / 算术），与任何派工无关，未跟踪、不入提交、未清理——待用户确认来源后处置。
 - 开口移交：L2/L3 最后一跳（brief 指针注入，evidence 可读≠被读）→ **G1b 已派工**。
+
+## G1b — brief 指针注入落地（7d1b349）
+
+- **勘察改判（诚实上报，未静默重释 spec）**：当前 vendored AEGIS **没有落盘 brief 文件**——旧 briefs 目录模型已退役（orchestrator 自注为证），角色收到的指令是 `build_digester_harness`/`build_planner_harness` 每次调用现构的**内存内 system prompt 字符串**。注入点因此改为后处理这两个 builder 的返回值（与第六道门对 `run_stage_4` 同款"调穿 vendored 再处理返回值"形态）。副作用是升级：指针必然进入角色第一条消息，不再依赖"模型想起来去翻目录"。
+- **两个缝不同名，原因在案**：orchestrator 的 digester_factory 是**函数体内 local import**（逐调用重解析→补定义模块即活）；plan.py 顶层 import 持有**自己的拷贝**（补定义模块实证打不到 Stage 1→缝在调用方模块 `stages.plan.build_planner_harness`）。
+- 不变量各配真材实料测试（真 vendored builder + 真 `DigesterInputs`/`PlannerInputs` + 真 `ReadScopeGateProcessor` 吃真 `ToolCallEvent`）：只指向此刻在盘文件；Digester 指针只给失败任务（通过任务 prompt 与未补丁 builder 逐字节相等）；旗标关零新代码执行；异常中途 restore 不漏；穿线整周期字节钉不动；指针目标读门放行且 harnessx 源码仍被挡。路径用绝对形态（角色 harness 无 workspace/sandbox，相对路径会落到进程 cwd）。
+- 接线零启动器改动：`run_round_with_graph_evidence` 内包住 `run_round` 调用，L2+ 自动生效（launcher 21 测试原样过）。
+- **变异探针 ×2（独立）**：agent 拆 `.exists()` 守卫（3 测试倒，无中生有指针被抓）；我拆失败任务域（精确杀 wired-round 对照测试——通过任务的 Digester 被塞失败证据）。均回滚复绿。tests/ghx+recipe **70 过**，lint 净。
+- 至此问题清单第 ① 条关闭：L2/L3 的信息流最后一跳闭合，证据从"可读"变为"必见"。
