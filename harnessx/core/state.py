@@ -6,7 +6,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
-from .attribution import current_actor
+from .attribution import current_actor, note_slot_access
 from .events import Message, ToolResultEvent, dict_to_message, message_to_dict
 
 
@@ -257,6 +257,11 @@ class State:
             prov.deleters.append(access)
         else:
             prov.writers.append(access)
+        # v6 M4: mirror the access to the unfolded-graph recorder (if one is
+        # installed) tagged with the current invocation, so OBSERVED_DATA edges
+        # carry an exact ordinal that (actor, step) alone cannot.  No-op when U
+        # is off.
+        note_slot_access(key, kind, self.step)
 
     def snapshot(self) -> dict:
         """Return a serializable snapshot of state for checkpointing and wake() recovery.

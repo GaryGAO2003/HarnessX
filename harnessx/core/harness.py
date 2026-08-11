@@ -21,7 +21,12 @@ from .config_schema import (
     WorkspaceConfig,
     SandboxConfig,
 )
-from .attribution import install_actor_resolver, reset_actor_resolver
+from .attribution import (
+    install_actor_resolver,
+    install_unfold_recorder,
+    reset_actor_resolver,
+    reset_unfold_recorder,
+)
 from .events import make_run_id
 from .file_uri import normalize_file_uri
 from .processor import Processor
@@ -1503,6 +1508,18 @@ class Harness:
             # right graph node.  Same binding the graph executor consumes; NOT
             # flag-gated (recording is free when unused).  reset() in finally.
             _resolver_token = install_actor_resolver(self._rt.proc_node_binding)
+            # v6 M4: unfolded graph U — the per-invocation record of what ran.
+            # Opt-in (HARNESSX_GHX_UNFOLD) and free when off; installed on the
+            # same binding/context the actor resolver uses.  reset() in finally.
+            _unfold_rec = None
+            _unfold_token = None
+            from ..graph.unfold import unfold_enabled
+
+            if unfold_enabled():
+                from ..graph.unfold import UnfoldRecorder
+
+                _unfold_rec = UnfoldRecorder(run_id=state.run_id, session_id=session_id or state.run_id)
+                _unfold_token = install_unfold_recorder(_unfold_rec)
             try:
                 end_event, trajectory, interrupted_at = await run_loop(
                     task=task,
@@ -1522,7 +1539,21 @@ class Harness:
                     graph_binding=self._rt.proc_node_binding,
                 )
             finally:
+                if _unfold_token is not None:
+                    reset_unfold_recorder(_unfold_token)
                 reset_actor_resolver(_resolver_token)
+
+            # Persist U before any post-loop slot cleanup below touches
+            # slot_provenance.  Non-fatal: a recording/write failure must not
+            # sink an otherwise-successful run.
+            if _unfold_rec is not None:
+                try:
+                    from ..graph.unfold import write_unfolded
+
+                    _u_base_dir = getattr(_journal, "base_dir", "sessions") if _journal is not None else "sessions"
+                    write_unfolded(_unfold_rec.finalize(state), base_dir=_u_base_dir)
+                except Exception:
+                    _log.warning("run_loop: failed to persist unfolded graph U", exc_info=True)
 
             # Auto-backfill terminal reward into all trajectory steps.
             # EvaluationProcessor writes eval_result onto task_end; backfill_rewards

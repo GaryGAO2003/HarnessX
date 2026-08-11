@@ -35,6 +35,16 @@ _actor_resolver: contextvars.ContextVar = contextvars.ContextVar("ghx_actor_reso
 # no processor is on the stack.  Set/reset around each ProcessorChain call.
 _current_actor: contextvars.ContextVar = contextvars.ContextVar("ghx_current_actor", default=None)
 
+# v6 M4: the unfolded-graph recorder for this run, or ``None`` when U is not being
+# recorded (the default — recording is opt-in and free when unused).  Duck-typed
+# (record_invocation / log_slot_access) so core never hard-imports the graph pkg.
+_unfold_recorder: contextvars.ContextVar = contextvars.ContextVar("ghx_unfold_recorder", default=None)
+
+# The unfolded id of the invocation currently executing, or ``None`` outside any
+# recorded invocation.  Set/reset alongside ``_current_actor`` so slot accesses a
+# processor performs are attributable to its exact invocation (not just its node).
+_current_invocation: contextvars.ContextVar = contextvars.ContextVar("ghx_current_invocation", default=None)
+
 # Cache the UNGRAPHED singleton (imported lazily to avoid a graph<->core import
 # cycle at module load).  Both the binding and this fallback reference the ONE
 # marker object, so every ungraphed actor compares ``is UNGRAPHED``.
@@ -86,3 +96,61 @@ def exit_actor(token) -> None:
 def current_actor():
     """Actor of the processor currently executing, or ``None`` outside any processor."""
     return _current_actor.get()
+
+
+# ── v6 M4: unfolded-graph recording ─────────────────────────────────────────
+#
+# ``ProcessorChain.process`` (the sole processor-invocation funnel, where the
+# actor context above is already established) drives these; ``State`` reports
+# slot accesses through :func:`note_slot_access`.  All three no-op when no
+# recorder is installed, so the legacy path pays only one context-var read.
+
+
+def install_unfold_recorder(recorder):
+    """Install the per-run unfolded-graph recorder; returns a reset token."""
+    return _unfold_recorder.set(recorder)
+
+
+def reset_unfold_recorder(token) -> None:
+    _unfold_recorder.reset(token)
+
+
+def current_unfold_recorder():
+    """The active unfolded-graph recorder, or ``None`` when U is not being recorded."""
+    return _unfold_recorder.get()
+
+
+def enter_invocation(processor, hook: str, step: int, prev_in_firing):
+    """Record ``processor``'s invocation and mark it current; returns ``(id, token)``.
+
+    ``prev_in_firing`` is the previous invocation's id within the same hook firing
+    (``None`` for the first).  Returns ``(None, None)`` when no recorder is active.
+    The caller passes the token to :func:`exit_invocation` in a ``finally``.
+    """
+    recorder = _unfold_recorder.get()
+    if recorder is None:
+        return None, None
+    inv_id = recorder.record_invocation(_current_actor.get(), processor, hook, step, prev_in_firing)
+    token = _current_invocation.set(inv_id)
+    return inv_id, token
+
+
+def exit_invocation(token) -> None:
+    if token is not None:
+        _current_invocation.reset(token)
+
+
+def current_invocation():
+    """Unfolded id of the invocation currently executing, or ``None`` outside one."""
+    return _current_invocation.get()
+
+
+def note_slot_access(slot_key: str, kind: str, step: int) -> None:
+    """Report a slot access (from ``State``) to the active recorder, if any."""
+    recorder = _unfold_recorder.get()
+    if recorder is None:
+        return
+    inv_id = _current_invocation.get()
+    if inv_id is None:
+        return  # access outside any recorded invocation — no invocation to attribute
+    recorder.log_slot_access(slot_key, kind, inv_id, step)

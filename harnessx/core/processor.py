@@ -7,7 +7,13 @@ import logging
 import os
 from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 
-from .attribution import enter_actor, exit_actor
+from .attribution import (
+    current_unfold_recorder,
+    enter_actor,
+    enter_invocation,
+    exit_actor,
+    exit_invocation,
+)
 from .events import (
     BeforeModelEvent,
     Event,
@@ -447,6 +453,15 @@ class ProcessorChain:
         event_type = type(event)
         chain_user_additions = 0  # tracks user msg insertions in before_model chain
 
+        # v6 M4: when U is being recorded, one node per processor invocation, and
+        # OBSERVED_CONTROL edges chaining consecutive invocations WITHIN this hook
+        # firing.  ``_unfold_rec`` is read once (the recorder never changes mid
+        # firing); ``_prev_inv`` carries the previous invocation's id so the chain
+        # never crosses this firing's boundary.  All no-ops when U is off.
+        _unfold_rec = current_unfold_recorder()
+        _firing_step = getattr(event, "step_id", -1)
+        _prev_inv = None
+
         for processor in self.processors:
             prev = events[:]
             prev_primary = next((e for e in reversed(prev) if isinstance(e, event_type)), None)
@@ -458,11 +473,17 @@ class ProcessorChain:
             # reset() in finally covers the exception path — a failing processor
             # must not leak its identity onto the next one.
             _actor_token = enter_actor(processor)
+            _inv_token = None
+            if _unfold_rec is not None:
+                _inv_id, _inv_token = enter_invocation(processor, hook, _firing_step, _prev_inv)
+                if _inv_id is not None:
+                    _prev_inv = _inv_id
             try:
                 for ev in events:
                     async for out in processor.process(ev):
                         next_events.append(out)
             finally:
+                exit_invocation(_inv_token)
                 exit_actor(_actor_token)
             events = next_events
             if not events:
