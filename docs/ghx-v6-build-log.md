@@ -790,3 +790,12 @@ Z 相应改成：
 - Planner 效率显著：11 步/9.1 万 tok（L2 Flash 同角色 15 步/35.1 万 tok）。Critic 28 步/196 万 tok。
 - 诚实注记：样本各 1，"Pro 治好空转"是方向性信号不是结论；产率对照 Flash 2/4 vs Pro 1/1，正式跑的多轮数据才算数。
 - 至此用户三决定已落一（meta=V4-Pro），余二：床位、运行环境。工程侧无未结阻塞项。
+
+## L0_baseline_v2（baseline 分支 vanilla 验证跑）+ 判分假阳性实锤（重大）
+
+- **v2 跑完**（baseline 分支 worktree，`1e1e0b3`，47 分钟，exit 0）：名义 R0 4/6 → R1 5/6 → R2 3/6。R1 ship C-R1-01（Windows 命令兼容处理器，本轮 Evolver 未烧穿）；R2 ship C-R2-01(prompt)+C-R2-02(tools)。**修复版回归账首次正确工作**：R2/regressions.md 比 R1 vs R0（对的轮）、合法为空。
+- **判分器假阳性实锤（两版通杀，重大发现）**：deepseek-chat 当 trace judge，对"无答案轨迹"（20 步打满仍在推理、或 1 步退化输出）有 ~40% 假阳性（同输入重放 5 次 2 次 PASS，一次幻觉"明确说了 Guatemala"（全文无此词）、一次自认无答案仍判过）。机械审计（GT 字符串 ∉ assistant responses）+ 人工核对：**36 个判分中 5 个假 PASS**——0b260a57 三次（v1R0/v2R0/v2R1，全文无 0.269 任何变体）、72e110e7 两次（v2R1 1 步零工具自言自语、v2R2 Guatemala 仅存于工具转储）。根因=GT 写在 judge prompt 里+弱 judge 把"讨论得像样"脑补成"答对了"；官方设计的 judge 是 opus-4-7（=--meta-model），弱点是我们换 DS 引入的。
+- **审计后口径改写两版结论**：v1 审计 3/6→3/6→4/6（**+16.7pp，C-R1-01 防编造 ship 的 48eb8242 解锁是真的**；名义 Δ=0 反而是 R0 被假阳性灌水）；v2 审计 3/6→3/6→2/6（R2 ship 净伤）。名义曲线与审计曲线方向相反——**6 题床上判分噪声 > 进化信号**。
+- **连锁污染**：72e110e7 假 pass 已被 ship_outcomes 记为 C-R1-01 命中——评测噪声向上污染因果账的现场标本（CH5）。
+- 发车插曲：worktree 干净检出缺任务数据 → FileNotFoundError；`.gitignore` 写明 GAIA 系 gated 数据禁止再分发（连私仓都不行）——baseline 分支"完整"止于代码，数据+.env 按规矩侧载。
+- 悬决升级：判分层加固（强 judge / k 票 / GT-不在场即复核）是否做、做在哪条分支——不加固则 6 题床单个假阳性=16.7pp 噪声，基线分数不可信。
