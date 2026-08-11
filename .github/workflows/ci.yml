@@ -45,6 +45,19 @@ jobs:
       - name: Run variant-pool tests
         run: pytest experiments/variant_pool/tests -x -q
 
+      # v6: the GHX bridge layer (graph evidence + graph gate for the official
+      # arm) and upstream's recipe tests.
+      - name: Run ghx + recipe tests
+        run: pytest tests/ghx tests/recipe -x -q
+
+      # The vendored official AEGIS suite (byte-identical to
+      # upstream/feat/aegis-experiment; tests/ghx/test_vendored_integrity.py
+      # pins it). One deselect: an upstream test/code drift that asserts an
+      # error-message substring the vendored code never emits, on any OS —
+      # pre-existing on the upstream branch, not ours to fix in vendored bytes.
+      - name: Run vendored aegis tests
+        run: pytest tests/aegis -q --deselect tests/aegis/unit/test_apply_scratch_enforcement.py::test_prompt_bucket_without_scratch_template_rejects
+
       # v6: the parity gate only means something if the flagged path is
       # actually exercised. The step above runs with the flag unset (legacy
       # dispatch); this one runs the same suite dispatching from the graph.

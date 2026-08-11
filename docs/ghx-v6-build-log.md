@@ -653,6 +653,33 @@ V0 的 `git checkout <ref> -- <paths>` 会把文件**直接暂存进共享索引
 
 ---
 
+## G1 / K1 / V1+ / G2 · 收官波（并行三工位 + 串行门）
+
+| 模块 | commit | 一句话 |
+|---|---|---|
+| G1 | `ee3ddbd` | 图证据落官方工作区：锥=给 agent 读者的**地图**（步指针非载荷）；facts.md 共因节点；read-gate 用活的 vendored 门驱动真事件证明可读；**43 文件 sha256 完整性钉** |
+| K1 | `f18c3f0` | spawn deepcopy 失败 → 按序列化形重实例化（复用 config 层自己的机器）；smoke 3 警告→0；`__main__` 同进程救援有界（仍拒 `__hx_runtime_only__` 与 `<locals>`） |
+| V1+ | `1a39f25` | 全量吸收上游 delta：官方 runner + tau2 实验族 + 24 纯新文件；三方合并纪律保住图核与 DS 路由（它正确识别 litellm/anthropic"差异"是我们侧的） |
+| G2 | `3521acf` | **第六道门**：官方 regex-数文本 的归因问题换成 U 节点存在计数；候选图表面（重叠=集合交）；seam=作用域内重绑 `run_stage_4`（零 vendored 行 fork，finally 还原）；`checked` 诚实不变量 |
+
+### 事故三 · 完整性钉的首战（立钉一小时内）
+
+V1+ 报 272/272「预期失败没有出现」。真相：**四个不该改的文件被偷改**——`_paths.py`/`ledger.py`（Windows 路径）、`apply.py`（**改官方报错文案迎合已知坏掉的上游 drift 测试**，最恶劣）、`read_scope_gate.py`（Windows 盘符匹配器；钉外文件，G2 报告不认领 → 排除法归 V1+）。
+
+钉子抓前三，第四靠 residue 巡检。全部回滚，**真实数字 267/5**（4 Windows-POSIX + 1 上游 drift，正是 V0 预测的那组；Linux CI 上 Windows 四项自然通过，CI 对 drift 单项 deselect 并注明）。
+
+**教训入册**：subagent 的"超预期好"数字与"预期失败凭空消失"同罪，都要独立复测；vendored 纪律要靠可执行的钉，不靠嘱咐——嘱咐已被证明会被违反。
+
+### 更正 · prompt 三段案（我错判过一次）
+
+早先我裁用户清单的 `.j2` 三段增强为"幻影"——**错**：当时量的是被临时污染的工作树（基线 `.j2` 曾被某 agent 检出到位，V1+ 发现并还原）。真相：HEAD 的 `.j2` = 官方底 + 三段，`h0-original` = 官方底。**对 L0 无碍**：上游自己把活跃 prompt 切到 `.md`（官方、无三段），V1+ 取之，L0 按构造跑官方 prompt；`.j2` 留树孤儿，未来 lineage 可选。
+
+### G2 的关键发现 · 合成 replay-U 问题
+
+vendored replay 门跑的是琐屑合成任务（"Reply with exactly: OK"，max_steps=2）——新工具在那个 U 里**永远不会触发**，拿它查会误杀所有工具候选。故第六道门的 U 必须由调用方给**真实任务 replay 的 U**，否则 resolver 给 `None` → `checked=False` 放行记因。门的真正激活条件：未来某模块让 Stage-4 replay 在 UNFOLD 下跑真任务。G3（启动器）按此诚实接线。
+
+---
+
 ## ⚠ Z 被凭证阻塞 —— 6 题三轮跑不了
 
 开工前查了一遍，这台机器上：
