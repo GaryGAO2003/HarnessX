@@ -3062,6 +3062,24 @@ def _digest_graph_input_enabled() -> bool:
 #: never silent.
 _LLM_DIGESTER_GRAPH_INPUT_CAP = _LLM_DIGESTER_HEAD_CHARS + _LLM_DIGESTER_TAIL_CHARS
 
+#: [OURS] v6 M7 — the causal cone SELECTS content, it does not replace it. M6b sent
+#: the cone STRUCTURE alone (ordinals/hooks/labels/data-flow), which answered "which
+#: invocation" but never "what was reasoned / searched / returned" — and left ~30k of
+#: the cap unused. The cone still frames the evidence, but the graph path now fills the
+#: remaining budget with the ACTUAL trajectory content for the cone's steps (model
+#: reasoning, tool arguments, tool results), pulled from the same ``### Step`` blocks
+#: the text path windows. Selection is causal (only cone steps) then recency-within
+#: (nearest the terminal anchor kept first when the budget binds); every drop is made
+#: VISIBLE the way the structure-truncation marker is, never silent.
+_LLM_DIGESTER_CONTENT_HEADER = (
+    "\nSELECTED CONTENT (the reasoning, tool arguments and tool results behind the "
+    "invocations above — causal: only the cone's steps, and when the budget binds the "
+    "ones nearest the terminal anchor are kept):\n"
+)
+#: Budget headroom reserved for the content-drop marker so structure + content + marker
+#: never exceeds the cap even when the drop line carries large counts.
+_LLM_DIGESTER_CONTENT_MARKER_RESERVE = 200
+
 #: [OURS] Digester per-task prompt. Frozen/audited later, so it is a module
 #: constant carrying the instruction + inline JSON schema; the per-task evidence
 #: is appended at call time. The outcome is handed in as ground truth — the model
@@ -3177,6 +3195,34 @@ def _split_trajectory_frontmatter(text: str) -> tuple[str, str]:
     frontmatter = text[: match.end()].rstrip("\n")
     body = text[match.end() :].lstrip("\n")
     return frontmatter, body
+
+
+#: A trajectory body's per-step section header. :func:`recipe.gaia_evolver.run.
+#: _build_trajectory_text` writes each execution step as ``### Step {step_id}``
+#: carrying that step's thinking, response, tool arguments and tool results.
+_TRAJ_STEP_HEADER_RE = re.compile(r"^### Step (.+?)[ \t]*$", re.MULTILINE)
+
+
+def _parse_step_blocks(body: str) -> dict:
+    """Map ``step_id -> full "### Step ..." block text`` for a trajectory body.
+
+    A block runs from its ``### Step`` header to the next header (or EOF), so each
+    carries the reasoning/args/results the graph path selects by step. Step ids are
+    unique in a real trajectory; on a collision the last block for an id wins.
+    """
+    matches = list(_TRAJ_STEP_HEADER_RE.finditer(body))
+    blocks: dict = {}
+    for i, match in enumerate(matches):
+        step_id = match.group(1).strip()
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        blocks[step_id] = body[start:end].strip("\n")
+    return blocks
+
+
+def _step_sort_key(step_id: str):
+    """Ascending presentation order for step ids: numeric by value, then lexical."""
+    return (0, int(step_id)) if step_id.lstrip("-").isdigit() else (1, step_id)
 
 
 @dataclass
@@ -3435,7 +3481,7 @@ class _LLMDigester:
             return None
         cone_ids = causal_cone(graph, [anchor], edge_types=None, include_anchors=True)
         cone = induced_subgraph(graph, cone_ids)
-        cone_text, truncated = self._render_cone(cone, anchor)
+        cone_text, truncated = self._render_cone(cone, anchor, self._graph_body(digest))
         self.input_provenance.append(
             _DigesterInputProvenance(
                 task_id=digest.task_id,
@@ -3529,14 +3575,20 @@ class _LLMDigester:
                 return f"-a{match.group(1)}"
         return ""
 
-    def _render_cone(self, cone, anchor: str) -> tuple[str, bool]:
-        """Compact, self-describing text for a causal cone; ``(text, truncated)``.
+    def _render_cone(self, cone, anchor: str, traj_body: str = "") -> tuple[str, bool]:
+        """Evidence text for a causal cone; ``(text, truncated)``.
 
-        Tighter than a raw ``induced_subgraph`` JSON dump: invocations in ordinal
-        order (the total order that makes U a DAG), then the data-flow edges keyed by
-        slot with writer/reader ordinals, then any INVOKES frontier (subagent
-        boundaries the cone reached). Truncation to :data:`_LLM_DIGESTER_GRAPH_INPUT_CAP`
-        is appended as a visible marker, never silent.
+        Two layers within one cap. First the cone STRUCTURE: invocations in ordinal
+        order (the total order that makes U a DAG), the data-flow edges keyed by slot
+        with writer/reader ordinals, and any INVOKES frontier (subagent boundaries the
+        cone reached) — this says *which* invocation and how they connect. Then, in the
+        budget the structure leaves, the SELECTED CONTENT: the actual reasoning, tool
+        arguments and tool results for the cone's steps, pulled from ``traj_body``'s
+        ``### Step`` blocks (the same body the text path windows). Selection is causal
+        (only cone steps) then recency-within (nearest the terminal anchor kept first);
+        every drop — structure or content — is a VISIBLE marker, never silent. The
+        structure-only shape is preserved when ``traj_body`` yields no cone content, so
+        a run without a trajectory body degrades to M6b's behaviour rather than failing.
         """
         ord_by_id = {node.id: node.ordinal for node in cone.nodes}
         nodes = sorted(cone.nodes, key=lambda node: node.ordinal)
@@ -3560,11 +3612,72 @@ class _LLMDigester:
             lines.append("SUBAGENTS (INVOKES frontier: child_run_id from ordinal):")
             for invokes in cone.invokes:
                 lines.append(f"  {invokes.child_run_id} from {ord_by_id.get(invokes.source, '?')}")
-        body = "\n".join(lines)
-        if len(body) <= _LLM_DIGESTER_GRAPH_INPUT_CAP:
-            return body, False
-        marker = f"\n... [graph-derived cone truncated to {_LLM_DIGESTER_GRAPH_INPUT_CAP} chars]"
-        return body[: _LLM_DIGESTER_GRAPH_INPUT_CAP - len(marker)] + marker, True
+        structure = "\n".join(lines)
+        cap = _LLM_DIGESTER_GRAPH_INPUT_CAP
+        # Structure overflow keeps M6b's exact behaviour: truncate the structure with a
+        # visible marker and carry no content (there is no budget for any).
+        if len(structure) > cap:
+            marker = f"\n... [graph-derived cone truncated to {cap} chars]"
+            return structure[: cap - len(marker)] + marker, True
+        budget = cap - len(structure) - len(_LLM_DIGESTER_CONTENT_HEADER) - _LLM_DIGESTER_CONTENT_MARKER_RESERVE
+        content, kept, dropped = self._select_cone_content(cone, traj_body, budget)
+        if not content and not dropped:
+            # No trajectory body, or no cone step has a block: structure-only, as M6b.
+            return structure, False
+        parts = [structure]
+        if content:
+            parts.append(_LLM_DIGESTER_CONTENT_HEADER)
+            parts.append(content)
+        if dropped:
+            parts.append(
+                f"\n... [content selection: dropped {dropped} earlier cone step block(s) "
+                f"to fit the {cap}-char cap; kept the {kept} nearest the anchor]"
+            )
+        return "".join(parts), dropped > 0
+
+    def _select_cone_content(self, cone, traj_body: str, budget: int) -> tuple[str, int, int]:
+        """``(content, kept, dropped)`` — the cone's step blocks that fit ``budget``.
+
+        Causal first: only steps that appear in the cone are candidates, so content
+        for anything outside the cone is never emitted. Recency within: candidates are
+        filled nearest-anchor first (by highest ordinal at that step), since the anchor
+        is the run's terminal invocation and failures manifest late, and filling stops
+        at the first block that would overrun — the remaining (earlier) blocks are the
+        ``dropped`` count the caller marks. Included blocks are presented in ascending
+        step order for readability. A single block larger than the whole budget is
+        emitted head-truncated so cone content is never wholly absent.
+        """
+        if budget <= 0 or not traj_body:
+            return "", 0, 0
+        blocks = _parse_step_blocks(traj_body)
+        if not blocks:
+            return "", 0, 0
+        recency: dict = {}
+        for node in cone.nodes:
+            step_id = str(node.step)
+            if step_id in blocks and (step_id not in recency or node.ordinal > recency[step_id]):
+                recency[step_id] = node.ordinal
+        if not recency:
+            return "", 0, 0
+        ranked = sorted(recency, key=lambda s: recency[s], reverse=True)
+        included: list = []
+        used = 0
+        for step_id in ranked:
+            cost = len(blocks[step_id]) + (2 if included else 0)  # "\n\n" join
+            if used + cost <= budget:
+                included.append(step_id)
+                used += cost
+            else:
+                break
+        if included:
+            content = "\n\n".join(blocks[s] for s in sorted(included, key=_step_sort_key))
+            return content, len(included), len(ranked) - len(included)
+        # Nearest block alone exceeds the budget: head-truncate it so content is present.
+        inline = "\n... [step block truncated to fit cap]"
+        slice_len = budget - len(inline)
+        if slice_len > 0:
+            return blocks[ranked[0]][:slice_len] + inline, 1, len(ranked) - 1
+        return "", 0, len(ranked)
 
     def _build_task_prompt_graph(
         self,
@@ -3780,6 +3893,19 @@ class _LLMDigester:
                 except OSError:
                     continue
         return None
+
+    def _graph_body(self, digest: TaskDigest) -> str:
+        """The full trajectory body (frontmatter stripped) for the graph path, or ``""``.
+
+        The graph path selects content by cone step, so it reads the WHOLE body — not
+        the head/tail window the text path uses — and lets :meth:`_render_cone` pick and
+        budget the step blocks. Missing/unreadable trajectory yields ``""`` (cone
+        structure only)."""
+        text = self._trajectory_text(digest)
+        if text is None:
+            return ""
+        _, body = _split_trajectory_frontmatter(text)
+        return body
 
     def _question_for(self, task_id: str) -> str:
         task = self.tasks_by_id.get(task_id)
