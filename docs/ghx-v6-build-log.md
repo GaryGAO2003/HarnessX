@@ -706,3 +706,14 @@ Z 相应改成：
 - **留**：6×3 等用户提供凭证后执行
 
 ---
+
+## G3 — 阶梯启动器落地（dc3ac39）
+
+- **复用形态与 spec 假设不符（记录在案）**：`run_pilot` 是单体，从不直接调 `orchestrator.run_round`——`AegisAgent.evolve` 在两层之下内部构造 orchestrator。于是缝 = 运行时补 `AegisOrchestrator.run_round`（`id(self)` 重入护栏，overlay 的内层调用命中原函数）+ 包 `_run_task` 捕获 `task→(session_id, run_id)`（pilot 自己不留这张表）。两处补丁均 `finally` 恢复；新测试模块内含"穿线整周期后完整性钉仍绿"的测试。
+- 等级表 0..4 落位；`setdefault` 即优先级契约——显式 env 永远赢，且行为级成立（每个 overlay call-time 重读自己的旗标）。`HARNESSX_GHX_RUNTIME` 故意不上梯。
+- 门 resolver 诚实恒 `None`；父轮 U、合成 U 两条捷径在 docstring 点名拒绝（均为谎）。
+- **验收时补单钥点火修复**：meta 模型解析改为 显式 `--meta-model` > `GAIA_META_MODEL` > 跟随 `--model`；vendored 的 anthropic 默认被故意排除出解析链（单 LiteLLM/DS 钥匙可跑全梯）。+3 测试。
+- **变异探针 ×2（相互独立）**：agent 打重放 U 不变量（父 U 喂门 → pass-through 测试 `[] != ['c1']`）；我打 `setdefault`→直接赋值（精确杀"显式 env 优先"测试，失败输出即它防的谎：用户显式关的旗被等级改开）。均回滚复绿。
+- 套件：tests/ghx + tests/recipe **61 过**；`--dry-run --ghx-level 2` exit 0，双面板均显示 meta 跟随主模型。
+- **残留待确认**：根目录三个一行级脚本 `_hx_run.py` / `hx_test.py` / `test_script.py`（查 x.txt / 数 words_alpha.txt / 算术），与任何派工无关，未跟踪、不入提交、未清理——待用户确认来源后处置。
+- 开口移交：L2/L3 最后一跳（brief 指针注入，evidence 可读≠被读）→ **G1b 已派工**。
