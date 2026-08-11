@@ -747,3 +747,16 @@ Z 相应改成：
 - **真实缺口（M4c，任务 #33）**：官方压缩把 Evolver 的 479 万 token 逻辑运行切成 4 个 run_id 段（segment_boundary），UnfoldRecorder 跨段累积、22:31:57 一次落盘 9,862 行（5,289 节点/4,572 边/invokes 0）**挂在首段 run_id（4364…）下**——零数据丢失，但 run_id 检索对段 2-4 失明，U 的 run_id 字段误述其实际跨度。压缩代理 harness 直接构造（非 spawn），无 INVOKES 父链——需要 invoked_by 类元数据补链。**不伤 L1 任务级主张，不阻塞 L2/L4 smoke**（均消费单段任务 U）；伤的是 CH5 元环分析的检索面。
 - 侦查小账：state.json 显示 Evolver 段 1 就烧 $14.96 名义/479 万 input token——meta 预算在 DS 名义价下也不宽裕，正式跑要看 evolve 实耗曲线。
 - **L2 smoke 已点**（hard3 单题 ×2 轮）：要失败任务证据管线才有活干；验证点 = R1 出现 graph_evidence/ 锥+facts，且 Digester/Planner session 的 system prompt 里真出现"Graph evidence (GHX)"指针段（G1b 的生产首验）。
+
+## L0 正式基线收官 + 跑后全链路审计（df17af9 / 5a2eaa4 / 3bf8b38）
+
+- **正式 L0 跑完**（holdout6 × 3 轮，deepseek-chat 双档，run: `L0_official_baseline`，~60 分钟，exit 0）：**R0 4/6 (66.7%) → R1 3/6 (50%) → R2 4/6 (66.7%)，Δ=+0.0pp——官方 AEGIS 三轮零净增益**。R1 ship 两件（C-R1-01 防编造 prompt off-ramp + C-R1-02 bash 重写处理器）；R2 因 Evolver 烧穿被迫 noop，客观上成了同配置重测：R1 vs R2 差 1 题 = 本床噪声包络。逐题：2 题三轮全过（851e570a 步数 20→11→7 递降）、48eb8242 FAIL→PASS→PASS（唯一站住的翻转，恰为 C-R1-01 的预测目标，ship_outcomes 记 hit_rate 1/1）、72e110e7 三轮全挂、d0633230 的 R1 "回归"被 R2 同配置 5 步通过证伪为方差。
+- **判分链路实证**：18/18 全走 trace judge（judge provider 无条件构造；唯一降级路径必打 `trace-judge LLM call failed` WARNING，日志零条）。**prompt 链路实证**：三轮 system prompt 均送达（R1/R2 全部 session 含 C-R1-01 改后文本）；`file:///D:` 处理器加载有运行时佐证（其模块的 DeprecationWarning）。meta 环路逐段有下游消费证据（Planner 读 digests×8、Evolver 读 landscape×37 并起 Level-2 验证子 harness、Critic 读候选×16、commit 与 decision 完全吻合）。日志普查：193 WARNING（104 wiki403 + 85 bing 空抓 + 4 IV-4）/ 0 ERROR / 1 良性收尾 traceback / 420 ResourceWarning。
+- **四病灶实锤与处置**：
+  ① **回归账 off-by-one（恒空）**：`run_meta_aegis.py:875` 传下一轮号、`orchestrator.py:235` 拿它检测 → 永远比"还没跑的轮"；task_history 数据齐全（两题 round0 true→round1 false）而三轮 regressions.md 全空，Critic 白纸黑字"no regressions, no rejection triggered"。**修**：cherry-pick 官方 `1a62993`（`df17af9`，保留原作者），真实 L0 数据重放捞出 2 回归 + C-R1 嫌疑 ship + 强制处理条款；tests/aegis 274 绿。
+  ② **IV-4 verdict 校验 4/4 全灭（软失败）**：Critic 引"被审候选文件本身"，白名单无此类。机理：规则只在正则里不在 prompt 里、示例欠定、职责缺类、开环无反馈；且双向漂移（sessions 合法却没展示）。**wontfix**（CH5 活证据，L4 图证据面替换之）；仅批准一条主动偏离：critic.md 示例补 `sessions/<file>#step_N` 行（`3bf8b38`，1 行，critic.md 自此与官方差一行，进偏离台账）。
+  ③ **Evolver R2 预算死亡**：$27.2 / 8.8M tok / 200 步，死于候选注册前，草稿搁浅 applied/。不动——基线数据。
+  ④ **rollback 不可达**：`Δcount ≤ -3` 在 6 题床 = 塌方 50pp；R1 掉 1 题不触发，事后被 R2 证明**不触发是对的**。不动；证据驱动回滚留给图层。
+- **缝合恢复**：Windows 缝合 4 文件被并行 re-vendor 抹掉（期间套件红 5 无人察觉），从会话 transcript 逐字恢复重提交（`5a2eaa4`）。tests/unit 2 失败为预先存在（stop_hook / sandbox timeout，无缝合也复现），未动。
+- **流程复盘 → 四条 SOP**：脏树不发车、发车落 commit hash；风险清单不清零不发车（off-by-one 是清单上预警过的未验证项）；验证即 commit、审批管 push（缝合差点丢就是攥在工作树等拍板）；单分支单会话、commit 前 tests/aegis 必绿。
+- **悬决**：现版 L0 数据产生于 off-by-one 未修态（与官方自己跑实验的状态一致，作"官方原样"成立）；若要阶梯站在修复版底座，需重跑 L0（~1h，DS 实付个位数美元），否则 L0/L1 间混入回归账修复这一非旗标差异，归因需注记。
