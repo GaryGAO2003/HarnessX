@@ -112,3 +112,43 @@ M1 范围相应改成：`INVOKES` 边类型 + `v@t` id 规约 + **把这条哈�
 留给 M2：执行器要么显式拒绝这类边，要么在校验层拦掉。记在这里以免又被重新发现。
 
 ---
+
+## M2 拆分 —— 二轮勘察改了工作量判断
+
+### 顺序不是缺的东西，绑定才是
+
+`to_graph()` 是纯 config→snapshot 变换，**运行期不调用**：跑一个任务走 `_instantiate_runtime`→`run_loop`（`harness.py:605`/`:1457`），全程不碰 `to_graph`。图是围绕运行**建的**，不是运行**用的**。
+
+但执行序已经在图上了。`_add_executes_before_edges`（`snapshot.py:758`，从 `to_graph:626` 调）把两层都算了：L4.6 持久层写进 `snapshot.edges`（genotype），L5.6 混合有效序写进 `runtime_edges`（deployment）。`snapshot.py:767-768` 直接断言「graph chain ≡ runtime execution order (I7)」。
+
+而且**排序函数只有一份**：`harnessx/core/runtime.py:213` 的 `stable_topological_sort`，被实例化路由（`harness.py:400,421-427`）、图 EXECUTES_BEFORE 构建（`snapshot.py:770,775-781`）、builder、`validate.py` 共用。它自己的 docstring（`runtime.py:222-224`）就写明这两处共享。**没有 parity 隐患**——M2 不是去重新发明顺序，是去读图里已有的。
+
+### 真正的缺口：实例 → node_id 没有映射
+
+今天**没有**任何函数能把 `_route_processors` 吐出的活处理器映射回图节点 id。
+
+- 持久化路径：`node_id = f"proc:{_compute_slug(target)}"`，重名加 `__{index}`（`snapshot.py:517-522`）。index 来自 per-target 计数器，**没有 `id(proc)` 反向引用**。
+- 运行期覆盖路径：`node_id = f"rt:{...}"`，碰撞加 `__rt{suffix}`（`snapshot.py:325-331`）。**两套不同的 id 规则。**
+- 唯一的实例键映射 `proc_id_to_node = {id(proc): node_id}`（`snapshot.py:295,341,377`）**只覆盖运行期覆盖的处理器**，且只是 `_add_executes_before_edges` 的内部参数，没暴露。
+
+### 一个已被承认的重复实现
+
+`snapshot.py:791-793` 的注释自陈：这段走法「复刻主循环的 per-target index，从而得到 proc: 节点 id」。**同一套 id 规则写了两遍**，靠注释维系一致性。
+
+还有个序列陷阱：node_id 的序号按 **per-target 的 config 顺序**分配，而 hook 内执行顺序是 **per-hook 的拓扑排序**。两个序列不是一回事，绑定层必须显式处理这个差异而不是假设它们对齐。
+
+### 据此拆成 M2a / M2b
+
+| | 内容 | 风险 |
+|---|---|---|
+| **M2a** | 抽出单一共享的 id 分配函数，`to_graph` 与新 `build_node_binding(config)` 共用；消掉上面那处重复 | 低，不动 runloop |
+| **M2b** | 执行器从图读有序处理器；runloop 委派；parity 测试 | 高，动 runloop |
+
+拆开的理由是**回滚粒度**：夜里无人值守，M2b 出问题时我要能只退 M2b 而保住 M2a。
+
+### 两条施工约束（勘察带出来的）
+
+1. **旗标名改 `HARNESSX_GHX_RUNTIME`**。仓里既有约定是统一 `HARNESSX_` 前缀、`os.environ.get(NAME, default)` **每次调用现读、不在导入期缓存**（`runloop.py:55`、`processor.py:87-92`、`home.py:24` 等）。我原先写的 `GHX_RUNTIME` 破坏约定。
+2. **parity 测试不能用 `ProcessorTriggerEvent` 当账本**。`processor.py:477-478` 只在处理器**改动了主事件**时才发这个事件，纯透传的处理器一声不吭。要么用 spy 处理器（`test_full_flow.py:106-127` 的既有写法），要么直接比执行器输出与 `get_procs(hook)`。
+
+---
