@@ -615,6 +615,44 @@ graph 路径 prompt    2,174 chars    （其中序列化锥本身 792）
 
 ---
 
+## M7 → V0 · 压缩补记（每模块细节见各 commit message，此处只留骨架与事故）
+
+| 模块 | commit | 一句话 |
+|---|---|---|
+| M7 | `5fae3dd` | 签名变 U 存在性查询；门-动作不变量机械化（表驱动，从代码枚举推导） |
+| M8 | `22e45bd` | Critic 重叠判定改子图相交；三条 portfolio 规则零测试改动；无 ship 权不对称性直接断言 |
+| M9 | `e259807` | 三哈希落位三时刻；U→snapshot 投影明说丢什么（重数/次序/槽通道/工具边）；缺席≠空观测 |
+| M6c | `62fe983` | 锥从「替换内容」改成「挑选内容」；打回一次：既有尺寸测试因退化 fixture 空转，重写为因果瞄准测试 |
+| M10 | `aa934c8` | M7/M8 有了生产者：改前/改后 config 各跑 to_graph 求差 = 精确 GraphEdit；在冻结 prompt 边界处按令停住 |
+| P1 | `bcf1e8b` | Planner 输入加图事实（跨任务共因、节点编辑史）；不动 prompt；unknown≠never 三度设防 |
+| R2 | `fd04bb4` | append_ship 接通——**Critic 封禁规则（论文三规则之一）此前从未生效**；ship 记 unrealized、下轮回填、未实现窗口 hit_rate=None |
+| Z | `f9d3dce` | 离线全链路 smoke：双旗标+identity、真 spawn、child U 落盘；**发现 spawn 静默丢父配置处理器**（→K1） |
+| R1 | `5870f43` | 三个论文 prompt 的模板占位符此前**原样发给模型**（含畸形 `{ % if %}`）；构建期渲染，常量逐字节不动 |
+| V0 | `872aa07` | **照搬官方 AEGIS 包**（下详） |
+
+### 转折 · 上游有官方实现（V0）
+
+用户令查上游 aegis 分支——`Darwin-Agent/HarnessX` 的 `feat/aegis-experiment` 带**完整官方实现**：四角色全是文件工作区上的 agent session、Evolver 自己决定 K（`num_evolvers` 注释明写已死）、Critic 有 `ask_evolver` 工具（≤2 轮/候选，逐轮追加进候选文件）、无任何 30k 上限（压缩在 240k-300k 阈值）、reputation = 每桶 ≤5 窗口的 ship 命中布尔。**我此前说「上游没有四角色」对 main 成立、对仓整体不成立——已更正。**
+
+逐字节 vendor（四个面 `git diff upstream/... --` 全空），官方 6000 行测试本机 UTF-8 下 **249 passed / 12 failed**，12 个全部归因：8 缺 recipe runner（V1 range）、4 上游 POSIX 假设撞 Windows 路径（**其中 ledger 的 briefs 正则在 Windows 真跑时会降级归档指针——runbook 已记**）、1 上游自身 test/code drift（任何 OS 都挂）。GBK 本机另有 6 个编码脆弱测试，`PYTHONUTF8=1` 归零。
+
+`feat/aegis` 上的 regressions off-by-one 修复（`1a62993`）不在 experiment 分支血缘——查明为**重构消解**：orchestrator 的轮语义改为 post-rollout，被修的 bug 与修法都不存在了。
+
+### 事故 · 索引扫掠（历史手术）
+
+V0 的 `git checkout <ref> -- <paths>` 会把文件**直接暂存进共享索引**；我随后提交基线文档时 `git commit` 提交的是整个索引——一个 1 文件的 docs commit 实际带走了 101 个文件。R1 的 commit 反而干净。分支未推送过，做了历史手术：`reset --soft HEAD~2` 拆成三个如实 commit（`4d33727` 文档 1 文件 / `5870f43` R1 3 文件 / `872aa07` V0 100 文件），第二轮顺手洗掉 PowerShell `>` 带入的 BOM。
+
+**规矩**：共享工作树 + 并行 agent 的场合，`git commit` 前必查暂存列；或改用 `git commit -- <paths>` 限定面。
+
+### 方向裁决记录
+
+- 用户令「肯定按论文做」→「官方源码直接照搬」→「**结合**」：官方 AEGIS 当底盘、GHX 当地基，图能力开关化接入（G1/G2），阶梯底盘换官方（L0=官方原样 … L5=图 lineage 模板）。
+- E0/W1/A1/A2 裁撤——官方包原生就有（landscape 机制/data/ ledgers/agent 角色）。
+- baseline（V1+L0）按用户令暂缓；GHX 线继续：G1（图证据 overlay，agentic-pull 设计：锥文件是**给读者的地图不是载荷**）+ K1（spawn 修复）并行施工中。
+- 官方包引入**逐字节完整性钉**（sha256 manifest 测试，G1 范围）——「官方实现未被改动」从声明变成可执行性质。
+
+---
+
 ## ⚠ Z 被凭证阻塞 —— 6 题三轮跑不了
 
 开工前查了一遍，这台机器上：
