@@ -806,3 +806,11 @@ Z 相应改成：
 - **钉的语义更新（诚实记账）**：完整性 manifest 自 G1c 重建起锚定的是"HEAD 的已审计修补态"（含上述 vendored 修复），不再是 pristine 上游——钉的职能从"证明未改"变为"证明无未审计之改"。
 - 并行协同注记：两会话同分支竞写（对面 cherry-pick 与我的 merge 同刻发生），git 自然收敛，无冲突；已推送，origin 为会合点。
 - **对阶梯的意义**：此后一切正式跑用加固判分器打分——判分假阳性（5/36 假 PASS、符号翻转）在源头被杀，名义分≈审计分。
+
+## L0_baseline_v3（pro meta + 严格 judge）收官 + 污染通道现场抓获
+
+- **v3 定档**（45min，exit 0）：**R0 2/6 → R1 2/6 → R2 3/6（Δ=+16.7pp）**，机械审计 7/7 PASS 全真、**零假阳性**——首个名义=审计的可信曲线。判分三层加固全生效：引证强制（f0f09c2）+ 全轨迹窗口（5d43a2b，v3 首发现场修：851e570a 第 5 步作答+15 轮自验证被 5 轮窗口误杀，停跑→修→重发）+ fail-closed。
+- **v4-pro meta 观感**：Evolver 不再烧穿（101/150 步注册 2+4 候选 vs chat 版 200 步零注册）；R1 ship processor+prompt、R2 ship tools+processor；R2 的 +1 来自 851e570a（前两轮 GitHub raw 拉词典挂了的环境噪声恢复，归因存疑不记 ship 功）。72e110e7 三版九轮零真过=全床最硬题。
+- **污染通道现场抓获（重大）**：v3 R2 的 72e110e7 里 agent 搜到 `github.com/harbor-framework/harbor-datasets`——GAIA 任务连 instruction.md/solve.sh/`tests/expected_answer.txt` 全量公开镜像，直接抄到 "The correct answer is **Guatemala**"，20 步撞限没交卷 + judge 掷硬币 FAIL（重放 1P/2F，污染轨迹连 judge 一起毒：有次把 GT 幻觉成泄漏轨迹里的 Kenya）→ 分数侥幸未染。
+- **防泄漏层三跑全程空膛（审计发现）**：`HARNESSX_URL_BLOCKLIST` 是 env 驱动、接线在重构臂 `anti_contamination.py`，官方臂 recipe/ 从未装弹。**已装弹**：两份 .env 加官方 GAIA_ANSWER_DOMAINS + harbor-framework 三路径（api.github/github/raw）+ query 规则；6/6 验证（harbor/HF-datasets 拦、words_alpha/维基放行）。v3 暴露期 score-neutral（唯一触点被 FAIL），数据保真；此后所有跑（含 L1+）武装状态，对比口径一致。
+- 三版终局：v1 名义 4/6→3/6→4/6（审计 3→3→4）；v2 名义 4/6→5/6→3/6（审计 3→3→2）；**v3 名义=审计 2→2→3**。结论：弱 judge 的名义曲线方向性不可信；严格口径下本任务臂真实底线 2-3/6，v4-pro meta 首现正向末轮。
