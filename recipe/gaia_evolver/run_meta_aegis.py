@@ -76,6 +76,52 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("gaia_aegis_pilot")
+
+
+def _maybe_use_serper_backend(config, backend: str):
+    """Swap the ``WebSearch`` tool for the Serper drop-in (port of the
+    identically-named helper in ``run_variant_pool.py``).
+
+    ``chain`` (default) returns the config unchanged — byte-identical official
+    behavior, ``harnessx/tools/contrib`` never imported. ``serper`` replaces the
+    live registry's ``WebSearch`` entry in place with ``serper_web_search_tool``
+    (identical name/description/schema, Serper-first fn, native-chain fallback).
+    ``serper_only`` swaps in the fallback-free variant and fails fast without
+    ``SERPER_API_KEY``. The swapped tool carries ``__hx_target__``, so round
+    configs serialised to YAML round-trip as ``tool_registry.custom`` and every
+    evolved config resolves ``WebSearch`` to the same backend.
+    """
+    if backend == "chain":
+        return config
+    if backend not in ("serper", "serper_only"):
+        raise ValueError(f"--search-backend must be chain|serper|serper_only, got {backend!r}")
+
+    if backend == "serper_only":
+        if not os.environ.get("SERPER_API_KEY"):
+            raise SystemExit(
+                "--search-backend serper_only requires SERPER_API_KEY: the backend "
+                "has no native fallback, so a run must not start without the key."
+            )
+        from harnessx.tools.contrib.serper_search import (
+            serper_only_web_search_tool as swap_tool,
+        )
+    else:
+        from harnessx.tools.contrib.serper_search import (
+            serper_web_search_tool as swap_tool,
+        )
+
+    registry = getattr(config, "tool_registry", None)
+    tools = getattr(registry, "_tools", None)
+    if isinstance(tools, dict) and "WebSearch" in tools:
+        registry.register(swap_tool, replace=True)
+        logger.info("search-backend=%s: WebSearch swapped for Serper drop-in", backend)
+    else:
+        logger.warning(
+            "--search-backend %s: no 'WebSearch' tool in the registry to swap; "
+            "leaving the tool set unchanged",
+            backend,
+        )
+    return config
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 logging.getLogger("litellm").setLevel(logging.WARNING)
 try:
@@ -469,6 +515,7 @@ async def run_pilot(args: argparse.Namespace) -> None:
     _judge_dict = _serialize_processor(LLMJudgeProcessor(judge_model=args.meta_model))
     if _judge_dict:
         original_base = _dcs.replace(original_base, processors=[*original_base.processors, _judge_dict])
+    original_base = _maybe_use_serper_backend(original_base, args.search_backend)
 
     # ── AegisAgent ────────────────────────────────────────────────────────────
     # ``replay_model`` is the GAIA model (not the meta-model); Stage 4's
@@ -956,6 +1003,17 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Enable Anthropic extended thinking for meta model. Off by default — some gateways reject 'thinking.type.enabled'.",
     )
     p.add_argument("--run-tag", default=None)
+    p.add_argument(
+        "--search-backend",
+        choices=("chain", "serper", "serper_only"),
+        default="chain",
+        help=(
+            "chain (default) keeps the built-in WebSearch fallback chain "
+            "byte-identical; serper swaps in the Serper-first drop-in "
+            "(serper.dev, SERPER_API_KEY); serper_only is Serper with no "
+            "native fallback."
+        ),
+    )
     p.add_argument("--clean", action="store_true")
     p.add_argument(
         "--start-round",
