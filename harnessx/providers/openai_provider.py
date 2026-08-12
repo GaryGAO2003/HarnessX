@@ -283,9 +283,10 @@ class OpenAIProvider(BaseModelProvider):
             except Exception as e:
                 status = getattr(e, "status_code", None) or getattr(e, "status", None)
                 err_str = str(e).lower()
-                is_retryable = status in (429, 500, 502, 503, 529) or "rate" in err_str
-                # Retry on timeouts with longer backoff
-                if "timeout" in err_str or "timed out" in err_str:
+                is_retryable = status in (429, 500, 502, 503, 504, 529) or "rate" in err_str
+                # Retry on timeouts with longer backoff. Gateways spell it both
+                # ways: "timed out" and "504 Gateway Time-out" (nginx/alibaba-ga).
+                if "timeout" in err_str or "timed out" in err_str or "time-out" in err_str:
                     is_retryable = True
                     base_delay = max(base_delay, 30.0)
                 # Content policy flags can be non-deterministic — retry once
@@ -375,7 +376,9 @@ class OpenAIProvider(BaseModelProvider):
             except Exception as e:
                 status = getattr(e, "status_code", None) or getattr(e, "status", None)
                 err_str = str(e).lower()
-                is_retryable = status in (429, 500, 502, 503, 529) or "rate" in err_str
+                is_retryable = status in (429, 500, 502, 503, 504, 529) or "rate" in err_str
+                if "timeout" in err_str or "timed out" in err_str or "time-out" in err_str:
+                    is_retryable = True
                 if status == 400 and ("flagged" in err_str or "content_policy" in err_str) and attempt == 1:
                     is_retryable = True
                 if is_retryable and attempt < max_retries:
