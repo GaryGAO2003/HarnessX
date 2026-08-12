@@ -147,9 +147,9 @@ async def test_recent_assistant_turns_capped():
 
     many_turns = [
         Message(role="assistant", content=f"turn_{i}")
-        for i in range(20)
+        for i in range(25)
     ]
-    # Inject the real answer at the SECOND-TO-LAST turn so the cap (5)
+    # Inject the real answer at the SECOND-TO-LAST turn so the cap (20)
     # still catches it.
     many_turns.append(Message(role="assistant", content="FINAL ANSWER: 42"))
     many_turns.append(Message(role="assistant", content=""))
@@ -160,11 +160,12 @@ async def test_recent_assistant_turns_capped():
         final_output="",
         trajectory_messages=many_turns,
     )
-    # Only the last 5 assistant turns with content should appear in the
-    # prompt. turn_0..turn_14 should NOT be there.
+    # Only the last 20 assistant turns with content should appear in the
+    # prompt (26 contentful turns above → turn_0..turn_5 fall off).
     assert "turn_0" not in stub.last_prompt
-    assert "turn_14" not in stub.last_prompt
-    # FINAL ANSWER turn (recent) SHOULD be there.
+    assert "turn_5" not in stub.last_prompt
+    # The boundary turn and the FINAL ANSWER turn (recent) SHOULD be there.
+    assert "turn_6" in stub.last_prompt
     assert "42" in stub.last_prompt
 
 
