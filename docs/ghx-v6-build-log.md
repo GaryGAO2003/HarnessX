@@ -822,3 +822,29 @@ Z 相应改成：
 - **blocklist 实战首胜**：L1 R2 的 72e110e7，agent 再次尝试答案泄漏路径，**2 条拦截消息、零 harbor 抓取**，只剩空猜、诚实 FAIL。装弹后的防泄漏层在生产跑里首次实际拦截成功。
 - **v4-pro Critic 首次行使否决权**：R1 meta 轮注册 2 候选全拒（noop），R2 注册 2 候选放行——四角色对话质量肉眼高于 chat 版。
 - 阶梯状态：**L0 ✅ L1 ✅**，同一冻结 commit、同模型、同判分、同武装。L2（Digester 吃锥文件）依赖 G1/G2 接线，在 ghx 分支冻结点之后——上 L2 前需决策：推进 baseline 冻结点或从 ghx 跑。
+
+## 提速包（2026-08-12）— 用户时限收紧
+
+**问**：怎么加快？10 轮够不够？Flash 超时怎么办？
+
+**轮数裁定：3 轮/臂，不是 10。** 官方 pilot 自己的默认就是 `NUM_ROUNDS=3`。
+证据：e2 十五轮零采纳（轮数不买信号）；103×3 的 APPLY 出现在 r1；证据注入从
+R1 起每轮生效。多余的轮只给 Evolver 买彩票，而彩票率已被 v4-pro 修复（smoke 1/1）。
+
+**臂数裁定：3 臂。** L1 兼作基线——身份三哈希逐轮证明其上下文与 L0 逐字节相同，
+省掉整条 L0 臂；正式 = L1（基线+记录）/ L2（证据）/ L4（证据+门）。
+
+**两个墙钟杀手（commit edf660d）**：
+1. `_MIN_REQUEST_INTERVAL=1.0` 模块级全局节流——所有并发共享 1 请求/秒，
+   并发 >6-8 后加并发买不到吞吐。新旋钮 `HARNESSX_MIN_REQUEST_INTERVAL`（.env=0.25）。
+2. SDK 客户端无显式超时 → 默认 600 秒；挂死请求占坑 10 分钟才进 6 次退避重试。
+   新旋钮 `HARNESSX_HTTP_TIMEOUT`（.env=300）。
+   两旋钮不设即旧行为，7 个单测钉住。预期任务阶段 1.5-2.5×；两臂并行再 ~1.8×。
+
+**顺带核验**：judge_provider = meta 模型 + `OPENAI_API_BASE` env 回落（run_meta.py:117）
+→ 判分确实在 v4-pro 上，无静默降级；判分超时的兜底（字符串匹配）风险随超时修复同步缩小。
+
+**正式跑命令模板**（每臂只换 --ghx-level；--seed 固定同床）：
+`python -m recipe.gaia_evolver.run_meta_aegis_ghx --ghx-level {1|2|4} --tasks <bed> --max-tasks 0 --num-rounds 3 --concurrency 8 --seed 42`
+
+待用户：床位点头（建议 103；缩床会把 delta 淹进 ±5 题噪声包络）。
