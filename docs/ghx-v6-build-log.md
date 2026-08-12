@@ -963,3 +963,34 @@ docstring 明文），正式臂不该在它上面跑。noserper 半跑封存（L
 - 烧掉预算：**$654.98 / 210.9M tok = s1k8b103 记录成本的 15.4%，全语料 6.2%**。
 - 全量 S4：117 个静态通过者**全部** `mismatch_stabilizes`（pre-v5.3 旧序列化
   一次归一，g3=g2）、**零 divergent**——S4 判别力 + 语料时代归属双实证。
+
+## 标本：判决格式彩票（2026-08-12 17:00，L2 R1 = noop 的真因）
+
+**R0 曲线点**：L0 62.1%（64/103，$64.6）· L2 59.2%（61/103，$65.6）——Δ=3 题，
+±5 包络内，基线轮统计打平。L2 图证据管线首次正式臂全链验证：42 失败任务 →
+42 因果锥 + injections.json 43 条（42 digester + 1 planner）。
+
+**R1 分岔的机械原因**：L2 Critic 在 decision.md 里 ship 两个候选
+（C-R1-01 步预算 20→40 · C-R1-02 SmartFetch，均带 Level-2 往返证据、
+Critic 推理≈两页且引证到行号），但两份判决书 **全部被 anchor 格式门判废**：
+
+```
+Verdict V-C-R1-01.md failed validation: critic verdict anchor malformed:
+  {'applied/_verify_proc.py (L1+L2 assertion': 'GAIA 20->4…
+```
+
+锚点字符串 `applied/_verify_proc.py (L1+L2 assertion: GAIA 20->40; …)` 内含
+`: `，YAML 把它解析成嵌套映射 → 校验器判"锚点非纯字符串" → **整份判决作废
+→ ship 链在最后一厘米断掉 → evolve_status=noop**。同一时刻 landscape 的
+strategy_concern 解析也报 `mapping values are not allowed here`（非致命）。
+
+**L0 同病**：err.log 同款告警 ×2（其 R1 仍 ok，说明有候选的判决书恰好没写
+冒号——每轮 ship 是否存活取决于 v4-pro 这一轮的标点运气）。
+
+**定性（论文级）**：官方管线的引证纪律实现为"字符串 YAML + 事后正则/解析校验"，
+采纳吞吐被 LLM 标点可靠性抽税——两个证据充分的候选死于格式，不是死于证据。
+这正是 Δ9/GHX 的结构化引证论证：引用应是图引用（节点 id），不是待解析的散文。
+CH5 标本 + CH7 威胁（双臂对称、同模型同 prompt，配对内部有效性不受损，但
+adoption 吞吐双侧被压，曲线功效变平）。**跑动中不修**：判决校验在 vendored
+judge 阶段，动它=分叉双臂。哨兵 v3 已加 `anchor malformed` 逐次上报，若成
+噪声主导（连续多轮双臂 noop-by-format）再由用户裁决是否重发加格式提示。
