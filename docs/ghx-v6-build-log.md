@@ -1008,3 +1008,33 @@ judge 阶段，动它=分叉双臂。哨兵 v3 已加 `anchor malformed` 逐次�
   通过，R2 config 实际含候选痕迹——重提机制兜住了彩票损失，代价一轮延迟。
 - **曲线**：L0 62.1% → 62.1%（R1 带 2 ship 持平）；L2 59.2% → 58.2%（noop 轮
   纯噪声重掷，−1 题在包络内）。彩票账：L0 判决废 2+3，L2 废 2+0。
+
+## 标本：Critic 判空目录（L2 R1 复盘升级）+ GHX/HX 运行面对比（18:4x）
+
+**L2 R1 的 noop 其实拦下的是幽灵采纳。** 时序铁证：Evolver R1
+`exit=budget_exceeded steps=200 $27.16 candidates=0`，`R1/candidates/` **空目录**；
+但 `R1/applied/` 里躺着它烧穿前写的验证脚本（`_verify_proc.py` 16:52、
+`_verify_smartfetch.py` 16:46、`_verify_both_confs.py` 16:55…）。Critic 随后
+47 步进场，把这些**半成品残留当成品判**，给两个从未落盘的候选写了整页
+Level-2 判决书并 ship（decision.md 16:59:48）。官方管线 Evolver→Critic 之间
+**没有候选存在性检查 = 开环**——元代理研究里"只写不读/开环诊断"病理的现场版。
+本次未酿成幽灵采纳靠的是双重偶然：anchor 格式门废掉判决 + 零候选无从 compose。
+R2 Evolver 重跑收敛（120 步 $14.6 → 3 候选真落盘），Critic ship，此番为真。
+
+**逐角色运行面（R1/R2，L0 vs L2）**：
+
+| 角色 | L0 R1 | L2 R1 | L0 R2 | L2 R2 |
+|---|---|---|---|---|
+| Planner | 21 步 $4.3 | 30 步 $5.6 | 23 步 $3.3 | 33 步 $5.1 |
+| Evolver | 189 步 $26.9→2 | 200 步 $27.2→**0 烧穿** | 169 步 $23.2→3 | 120 步 $14.6→3 |
+| Critic | 22 步 $5.9 | **47 步** $6.9 | 27 步 $4.7 | **54 步** $8.2 |
+
+- **GHX Planner 稳定 +40–50% 步数/成本**——图事实（facts.md）消费的直接开销面。
+- **GHX Critic 步数 ×2**（22→47 / 27→54）：判决文本自述"re-running their
+  in-session proof scripts"——多出的步花在重跑验证脚本上。归因待定
+  （L2 无 Critic 注入面，那是 L4 的），先记录不下结论。
+- Evolver 烧穿是单点，无法归因 GHX；R2 反而是四次里最省的一次。
+- **GHX 机构落盘实证**：evolver 会话带 `_unfolded.jsonl`（U 图展开记录）；
+  graph_evidence 全链（42 锥 + facts + 43 injections）；11/102 份 digest 文本
+  显式引用 cone/graph 证据（消费深度审计待做——injection 是指针注入，
+  引用率≠阅读率）。
