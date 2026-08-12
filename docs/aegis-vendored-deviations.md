@@ -51,6 +51,19 @@ operator resume (user decision), official patience=2 preserved in code"。
 依据：`experiments/docs/EVOLVER-BURNOUT-PROMPT-AUDIT.md`（输入面清点 + 因果链 +
 预期读数）。校验器合同出处：`harnessx/aegis/gates/structure.py:41-61`。
 
+## 发车门裁决记录（2026-08-13，用户）
+
+- **P-3 / P-4 / P-5：批准上车。** 生效仍按本台账流程在发车门统一执行——**在飞
+  战役不追溯**（模板每轮从盘上重读，跑批中途 apply 会造成两臂不对称），待
+  L0/L2_103x10 收官后 apply + 重钉 + 全阶梯 smoke。
+- **P-3 预声明升级梯**（治判决彩票，逐级解锁，届时按新偏离行登记）：
+  ① 提示合同（本补丁）→ ② 确定性 sanitizer（只修格式类：锚点行冒号/注释；
+  配"救回判决数"计数器）→ ③ 校验错误回喂原 Critic 限一次重发（治语义类
+  非法前缀）。禁止第三方 LLM 改写判决——那是代裁。
+- **P-6：押后**（用户 08-13"先不急"）；早停由上节预声明续跑协议兜底。
+- **P-1 / P-2：待先例文献核查**（budget-in-prompt / draft-early 两族实测
+  结果，调查在飞），出结果后再裁。
+
 ## 登记纪律
 
 1. 新偏离 = 先在本表加行（含动机），再施工；一条偏离一个 commit，消息前缀
