@@ -994,3 +994,17 @@ CH5 标本 + CH7 威胁（双臂对称、同模型同 prompt，配对内部有�
 adoption 吞吐双侧被压，曲线功效变平）。**跑动中不修**：判决校验在 vendored
 judge 阶段，动它=分叉双臂。哨兵 v3 已加 `anchor malformed` 逐次上报，若成
 噪声主导（连续多轮双臂 noop-by-format）再由用户裁决是否重发加格式提示。
+
+### 追踪（18:05/18:15，R2 边界）——彩票第二轮开出一好一坏
+
+- **L0 R2 = crashed**（进程活着，evolve 阶段守卫抛错，R2 照跑旧配置）：三份判决
+  又全部 anchor-malformed（本轮花样：`'…verify_load.py' (IV-4)` 引号串带尾注）。
+  随后 compose 对 shipped_cids=[C-R2-01,C-R2-02] 产出与 base 语义相等的 merged.yaml，
+  等价守卫抛 crash。vendored 错误文本自带病因假设："candidate 的 bucket 列表被
+  字符串化 → bucket applier 分发落空"——**vendored 已知味道的 bug**；是否由判决
+  解析失败的降级路径触发，未验证（记为假设）。
+- **L2 R2 = ok，L2 首次真采纳**：Evolver 把 R1 被格式杀掉的两个候选原样重提
+  （步预算 20→40 + SmartFetch）再加第三个（空返回标记链路），本轮判决书解析
+  通过，R2 config 实际含候选痕迹——重提机制兜住了彩票损失，代价一轮延迟。
+- **曲线**：L0 62.1% → 62.1%（R1 带 2 ship 持平）；L2 59.2% → 58.2%（noop 轮
+  纯噪声重掷，−1 题在包络内）。彩票账：L0 判决废 2+3，L2 废 2+0。
