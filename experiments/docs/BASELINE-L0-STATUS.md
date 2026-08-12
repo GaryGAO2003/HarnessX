@@ -49,9 +49,9 @@ recipe/gaia_evolver/
 | G2 · 第六道门（图存在性计数替代正则数文本；`checked` 诚实不变量） | ✅ |
 | G3 · 阶梯启动器 `--ghx-level 0..4` + meta 模型单钥解析 | ✅ `dc3ac39` |
 | G1b · brief 指针注入（让 L2/L3 证据**被读到**，不只可读） | 🔄 施工中 |
-| P2/E3 · 图 lineage 模板（L5 真偏离） | ⏳ 等阶梯数据 |
+| P2/E3 · L5 图原生候选表面（GraphProposal 四工具 + 双 rebind 接缝 + 启动器 5 档） | ✅ `1846e5c`+`f25e098` |
 
-套件基线：tests/ghx+recipe 61 ｜ graph+core+integration 872 ｜ variant_pool 1184 ｜ unit 976（+2 Windows 既有失败）｜ aegis 267（+5 已归因环境失败，Linux CI 绿）。
+套件基线（08-12 L5 落地后实测）：tests/ghx+recipe 103 ｜ graph 655 + core/integration 221 ｜ aegis 274 全绿（Windows）｜ variant_pool 1184 / unit 976（本轮未重测，沿旧基线）。
 
 ---
 
@@ -115,7 +115,9 @@ L3  = L2（facts 与锥共用一个开关；将来可拆，编号不重排）
 L4  + GRAPH_GATE                 第六道门。⚠ 现阶段无真任务 replay U，门诚实放行
                                  （checked=False 记因）——行为上 L4≡L3，直到 replay
                                  改跑真任务的模块落地
-L5  图 lineage 模板（P2/E3，等对照数据后再做）
+L5  + GRAPH_PROPOSALS            图原生候选表面：Evolver 经 GraphProposal 工具产
+                                 类型化图编辑，manifest/config 机器生成、每调用写通；
+                                 读取端（parse/五门/Critic/G2）零改动。已落地待 smoke
 ```
 
 ---

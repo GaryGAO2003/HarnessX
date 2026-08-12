@@ -1103,3 +1103,37 @@ R2 Evolver 重跑收敛（120 步 $14.6 → 3 候选真落盘），Critic ship�
   （彩票累计：L0 8 份、L2 4 份）。**再 noop 一轮即触发官方早停**
   （patience=2，run_meta_aegis.py:963）。预案不变：早停=协议内结局，
   配对分析取重叠轮截齐。
+
+## L5 图原生候选表面落地（21:40）
+
+- **阶梯长出第 5 档**：`--ghx-level 5` = L4 全旗标 + `HARNESSX_GHX_GRAPH_PROPOSALS`
+  （setdefault，显式 env 恒赢）。`_dispatch` 的 OR 条件补上了 proposals——否则
+  0/1 级单开该旗标会静默不接线，"任意等级可单开"就是句空话。
+- **机制**：Evolver 获得 GraphProposalOpen/Edit/Manifest/Status 四工具；提案 =
+  类型化图编辑（逐调用 `transactional_apply(materialize=True)`，失败带层号死因
+  当轮回给模型重试）；manifest frontmatter 与 applied config.yaml 全部机器
+  safe_dump——**换字节的产生方式，不换读法**：parse/五门/Critic/G2 零改动，
+  机器产物过真 `validate_candidate_manifest` / `validate_applied_config`（killer tests）。
+  编译 = merge（父 YAML 为底只换 processors 键，to_yaml 全量序列化实证过洞）+
+  写后回读 genotype 对账，失败回滚不留未验字节。
+- **两死法的机制级根除**：载体死（手写 YAML 解析彩票，标本 ×3）→ safe_dump 免疫；
+  仪式死（提交末置烧穿，R1 200 步实证）→ 每调用写通 + graph_edits.jsonl 增量交付，
+  无收尾仪式可漏。与 P-1/P-2/P-4/P-5 提示纪律补丁同病异药可叠加；补丁两臂同改属
+  公模，L5−L4 差分不受污染。
+- **接缝**：双 rebind（stages.propose 模块级导入 + agents.evolver 定义模块，覆盖
+  orchestrator.py:454 ask-more 惰性导入），finally 复原；ask-more 只挂
+  Manifest/Status（守"修订只动 manifest"契约 + 单文件 WriteScope）；提示注入含
+  节点清单、锚点合同、P-1 手写压制句、元数据物化陷阱警告（`_hook_`/`_order_`/
+  `_singleton_group_`/`_after_` dict 键不过 S4 重建，仅 ctor kwargs 存活——
+  builder 只认目标类属性，施工中实测）。
+- **lineage**：`applied/{cid}/graph_edits.jsonl` + `graph_lineage.json/.md`
+  （父/子三哈希、编辑序列、校验报告、危险锥、provenance
+  tool_path|hand_written_detected——手写检出 diff_graphs 反推入账后机器覆写）。
+- **纯净**：vendored 面零字节（钉照绿，含 install/restore 周期哈希钉测试）；
+  旗标关 = wrapper 透传逐字节原样。commits：`1846e5c`（模块 + 17 测试）、
+  `f25e098`（接缝 + 启动器 + 16 测试）。套件：ghx+recipe 103、graph 655、
+  core+integration 221、aegis 274 全绿。
+- **已知边界（存档）**：failure_evidence 含裸 `---` 行会提前截断 frontmatter
+  匹配（登记未修）；ask-more 工具对为独立实现（vendored 侧只读 final_output，
+  scratch 形状非承重）；L5 一档捆绑四机制（载体可靠·类型合法·交互修复·增量持久），
+  内部不可分性入 CH7；工具摩擦对 K_t 的影响方向未知，过程指标见分晓。
