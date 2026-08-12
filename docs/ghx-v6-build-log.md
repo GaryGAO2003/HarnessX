@@ -893,3 +893,15 @@ L0_103x10 基线出现两个同参数 python 进程，误诊为双开并建议�
 `Set-ItemProperty` 关掉 UX 自动重启或至少设活动时段——付费轨迹顶不住一次
 TrustedInstaller；(c) 判废标准前置：单轮 run_loop error 占比超阈值即整轮弃用，
 不等曲线画完。
+
+## 重发（2026-08-12 15:09）— 模型别名换小写，双臂复飞
+
+**504 的真凶大概率是大写别名**：`DeepSeek-V4-Flash` 路由到坏部署持续 504，而用户令
+换 `deepseek-v4-flash`（小写）后探针秒回 200（v4-pro 同验）。两处 .env 的 GAIA_MODEL
+已改小写。
+
+- **L0_103x10**：15:02 由对面/用户重发，小写模型，baseline .env 已带传输旋钮；毒数据
+  归档为 `_aborted_504storm` / `_aborted2_hostkill`。
+- **L2_103x10**（bg bav22j6u8）：15:09 复飞，横幅三旗生效、meta=v4-pro、103 题；首任务
+  15:09:17 即 PASS（1.7s）——端点在小写路由上健康。毒数据归档
+  `L2_103x10_aborted_504storm/`（R0 15.5%/R1 3.9% 仅作端点故障标本，不入任何曲线）。
