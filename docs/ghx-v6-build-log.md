@@ -1214,3 +1214,9 @@ R5/R4 双双出包络冲峰——跑步机审判段的数据比预期更戏剧�
   可数性须与 U 节点命名对齐，否则第六门误杀诚实候选（lineage derived=true
   可分段）。
 - 套件：ghx 83 + recipe 24 = 107 全绿；vendored 零字节。
+
+### 用户裁决"l2继续"（00:39）——二次续跑复飞
+
+bg b6erh0nc3，同令 `--start-round 5`：`resume: loading … R4\applied\merged.yaml
+(curves has 5 rounds)`，config=f66cc904cbc3e48f 与首次续跑一致（播种确定性）。
+R5 从头重跑（此前两段被杀的 R5 半程为沉没成本）。哨兵继续双臂值守。
