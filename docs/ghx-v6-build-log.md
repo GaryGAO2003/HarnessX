@@ -934,4 +934,32 @@ docstring 明文），正式臂不该在它上面跑。noserper 半跑封存（L
   Wikipedia-fail=0、Serper-fail=0，config=241ab58b5ddac9d9（工具注册表变更所致，
   两臂同变）。
 - 同机另见 `experiments.analysis.replay_validator` 进程在啃历史语料
-  （a1big5/aprime_dress/…多 root）——验证器回放已在别处开动，勘察代理回报后合账。
+  （a1big5/aprime_dress/…多 root）——后查实：那是本会话勘察代理的探跑，非第三方。
+
+## 验证器历史语料回放 · 收官（2026-08-12 16:2x，零 API）
+
+论文保底主读数（THESIS-RESTRUCTURE-GHX §3.2 任务书）落地。勘察代理探明五个洞
+（语料清单未钉死 142/140/143 三数打架、父目录单 --root 撞 id 漏 57%、"S4"措辞与
+实际调用不齐、"已评估"用正则宽松匹配、7 条无 config 候选口径未定），全部补上：
+
+**新胶水** `experiments/analysis/replay_corpus.py`（+4 测试全绿，ruff 干净）：
+- **钉死语料清单**：VP 时代 6 个幸存 root（e_pervar3 41 · s1k8 10 · s1k8b103 36 ·
+  s2k8b50 32 · a1big5 6 · organic1 4 = **129 config 候选**），逐 root 期望数落码、
+  漂移即打印。后时代 root（z_6x3/aprime_dress2/gaia_calib6_ds/MetaPro）默认排除。
+  与 doc-12 的 142 之差 = 已删 run（a1big4 + a1pilot2/3、forceprobe2、paper4、
+  smoke_hard2）；与 08-10 约定"133+7"之差与 z_6x3 的时代归属一致。
+- **严格 decision 切**：合并终局 pool_report（list 行）∪ 逐轮 pool_state（dict 行，
+  晚轮胜），非空 decision 恒胜。**42 个已评估（24 reject / 11 fork / 7 apply）**——
+  比 doc-12 的 34 多，因为轮级行保存了终局报告丢失的决策（s2k8b50 终局零行）。
+  4 条 metadata-only（无 config 落盘）单列，不进分母。
+- **全量 S4 腿**：逐候选跑 `roundtrip_config`（transactional_apply + re-graph
+  genotype 稳定性），"S0–S4 全量 + Δ8"的措辞从此为真。
+
+**读数**（experiments/analysis/out/replay_corpus_vp.json + burned_budget_vp.json）：
+- 可拦截 **11/129 = 8.5%**（全部 s1k8b103、全部 build_failed 非 import；
+  1 条 import-uncertain 按公平性剔除）。
+- **其中 4 条赢下过 fork 门决策**——门在今天连 build 都过不了的 config 上
+  做过采纳级决策。
+- 烧掉预算：**$654.98 / 210.9M tok = s1k8b103 记录成本的 15.4%，全语料 6.2%**。
+- 全量 S4：117 个静态通过者**全部** `mismatch_stabilizes`（pre-v5.3 旧序列化
+  一次归一，g3=g2）、**零 divergent**——S4 判别力 + 语料时代归属双实证。
