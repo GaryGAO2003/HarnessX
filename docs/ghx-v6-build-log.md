@@ -1038,3 +1038,23 @@ R2 Evolver 重跑收敛（120 步 $14.6 → 3 候选真落盘），Critic ship�
   graph_evidence 全链（42 锥 + facts + 43 injections）；11/102 份 digest 文本
   显式引用 cone/graph 证据（消费深度审计待做——injection 是指针注入，
   引用率≠阅读率）。
+
+### 烧穿机理解剖（L2 R1 Evolver，200 步逐步账）
+
+用户问"为啥总是烧穿没结果"。解剖 R1 evolver 会话（5 个 compaction 分段）：
+
+- **工具分布**：Bash 115 / Read 41 / Write 41 / Grep 11 / Edit 2——57% 步数在跑验证。
+- **产物都造出来了，就是没提交**：step39 写 `applied/C-R1-01/step_budget_relax.py`，
+  step46 写 `applied/C-R1-02/smart_fetch.py`，step83/127 写两份 config.yaml——
+  但官方协议的"候选"=`candidates/C-R1-0X.md` 规格文件（R2 成功轮的三个 .md 为证），
+  **这一步它到 200 步帽都没走到**。
+- **验证无底洞**：临帽前 `_verify_stepbudget_roundtrip.py` 在 step187/191/194/198
+  重写四版——Critic 的 Level-2 证据要求 + v4-pro 的严谨风格 = 无截止感的完善循环。
+- **压缩失忆嫌疑**：会话被 compaction 切成 5 段，"我还没提交"的状态每段都可能丢
+  ——M4c（压缩分段身份修复）的现场版。
+- **系统的自愈**：工作区跨轮存续，R2 evolver 继承 R1 的 applied/ 设计遗产，
+  120 步收敛出 3 个真候选（同设计重提）。单次烧穿的代价 ≈ $27 + 一轮延迟。
+
+**病理命名**：提交末置 + 验证无底洞 + 压缩失忆。三个都是协议/表示层问题，
+不是步帽大小问题——步帽 300 只是把无底洞挖深。真解在 (a) 提交先行的提示协议、
+(b) M4c、(c) L5/E3：图编辑即交付物，根除"最后一步文件仪式"。CH5 标本。
