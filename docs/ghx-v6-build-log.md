@@ -916,3 +916,22 @@ TrustedInstaller；(c) 判废标准前置：单轮 run_loop error 占比超阈�
   实际链条始于 Bing→DDG 回落。全链失败率两臂对称（同机同 IP 同工具字节），
   配对比较不受影响；绝对分与论文口径的偏差记 CH7 环境威胁。
   **不热改 UA**：正式臂跑动中动工具字节=分叉 config、作废臂。
+
+## 三发（2026-08-12 15:29）— 用户令停跑接 Serper，双臂对称换装
+
+用户裁决推翻上一条的"不动"：原生刮链本就是旧裁定判死的后端（serper_search.py
+docstring 明文），正式臂不该在它上面跑。noserper 半跑封存（L0 aborted3：R0 36/103
+24P/12F/0E，链路健康仅后端错；L2 aborted2：24 题 15P/9F）。
+
+- **补丁**（用户产）：`_maybe_use_serper_backend` 从 variant_pool 原样搬入
+  run_meta_aegis.py + `--search-backend chain|serper|serper_only`。默认 chain
+  字节不变；换装工具带 `__hx_target__`，轮次 YAML 往返后演化配置仍解析到 Serper。
+  baseline `0fd17a2` → cherry-pick ghx `98084d2`。主动偏离，与 critic.md 行同台账。
+- **GHX 启动器零改动透传**：launcher 复用 pilot argparser，swap 挂 H0 基座，
+  与轮次 wiring 正交——验证 `--help` 即见旗标。
+- **15:29 双臂复飞，旗标严格对称** `--search-backend serper`（L0 15:29 用户发，
+  L2 15:29:44 本会话发，bg bym0ke86f）。换装横幅两侧齐见；L2 前 3 题
+  Wikipedia-fail=0、Serper-fail=0，config=241ab58b5ddac9d9（工具注册表变更所致，
+  两臂同变）。
+- 同机另见 `experiments.analysis.replay_validator` 进程在啃历史语料
+  （a1big5/aprime_dress/…多 root）——验证器回放已在别处开动，勘察代理回报后合账。
