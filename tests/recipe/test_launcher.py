@@ -100,9 +100,9 @@ def test_help_exits_zero_and_shows_ghx_level(capsys):
 def test_ghx_level_default_and_choices():
     parser = ghx.build_parser()
     assert parser.parse_args([]).ghx_level == 0
-    assert parser.parse_args(["--ghx-level", "4"]).ghx_level == 4
+    assert parser.parse_args(["--ghx-level", "5"]).ghx_level == 5
     with pytest.raises(SystemExit):
-        parser.parse_args(["--ghx-level", "5"])  # out of the 0..4 ladder
+        parser.parse_args(["--ghx-level", "6"])  # out of the 0..5 ladder
 
 
 # ── test 2: level → flag mapping (exactly the documented set, nothing extra) ───

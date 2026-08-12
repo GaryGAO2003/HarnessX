@@ -29,6 +29,13 @@ The ladder (``--ghx-level``):
 * **L4** — ``+HARNESSX_GHX_GRAPH_GATE``.  Additionally wraps the round with
   :func:`~harnessx.ghx.graph_gate.run_round_with_graph_gate`, the sixth (graph-
   existence) gate.
+* **L5** — ``+HARNESSX_GHX_GRAPH_PROPOSALS``.  Rebinds the Evolver's builder (both
+  the Stage 2 call site and the ask-more lazy-import call site — see
+  :func:`~harnessx.ghx.proposal_seam.install_graph_proposals`) so its session gets
+  the four graph-native ``GraphProposal*`` tools in place of hand-written
+  manifests/config.yaml.  The rebind itself installs unconditionally alongside the
+  round-loop seam; the flag gates only what the *wrapper* does, so — like every
+  other flag on this ladder — it can be switched independently of the level.
 
 Precedence.  ``--ghx-level`` is a convenience that sets each flag with
 ``setdefault`` — an environment variable the user exported already wins.  So
@@ -79,6 +86,7 @@ from harnessx.aegis.orchestrator import AegisOrchestrator  # noqa: E402
 from harnessx.ghx.evidence_files import core_layout_resolver  # noqa: E402
 from harnessx.ghx.graph_gate import run_round_with_graph_gate  # noqa: E402
 from harnessx.ghx.overlay import run_round_with_graph_evidence  # noqa: E402
+from harnessx.ghx.proposal_seam import install_graph_proposals  # noqa: E402
 
 # ─── Level → flag table ───────────────────────────────────────────────────────
 #
@@ -89,6 +97,7 @@ _UNFOLD = "HARNESSX_GHX_UNFOLD"
 _IDENTITY = "HARNESSX_GHX_IDENTITY"
 _EVIDENCE = "HARNESSX_GHX_AEGIS_EVIDENCE"
 _GATE = "HARNESSX_GHX_GRAPH_GATE"
+_PROPOSALS = "HARNESSX_GHX_GRAPH_PROPOSALS"  # matches harnessx.ghx.graph_proposals.FLAG
 
 LEVEL_FLAGS: dict[int, tuple[str, ...]] = {
     0: (),
@@ -96,6 +105,7 @@ LEVEL_FLAGS: dict[int, tuple[str, ...]] = {
     2: (_UNFOLD, _IDENTITY, _EVIDENCE),
     3: (_UNFOLD, _IDENTITY, _EVIDENCE),
     4: (_UNFOLD, _IDENTITY, _EVIDENCE, _GATE),
+    5: (_UNFOLD, _IDENTITY, _EVIDENCE, _GATE, _PROPOSALS),
 }
 MAX_LEVEL = max(LEVEL_FLAGS)
 
@@ -282,12 +292,17 @@ def _make_wrapped_run_round(orig_run_round, capture: dict, gate_u_resolver):
 def _ghx_round_wiring():
     """Install the run-id capture + overlay seam for the duration of a pilot run.
 
-    Two runtime patches, both restored on exit (no vendored bytes touched):
+    Three runtime patches, all restored on exit (no vendored bytes touched):
 
     1. ``run_meta_aegis._run_task`` → a wrapper that records ``(session_id, run_id)`` per
        ``(round, task_id)`` from each rollout's ``HarnessResult`` — the pilot itself keeps
        no task→run_id map, so we capture it here at the rollout call site.
     2. ``AegisOrchestrator.run_round`` → the overlay router (see :func:`_make_wrapped_run_round`).
+    3. ``install_graph_proposals()`` → the Evolver-builder double rebind (see
+       :func:`~harnessx.ghx.proposal_seam.install_graph_proposals`), installed
+       unconditionally at the same level as #2 — the flag it guards is read inside
+       its own wrapper at call time, not here, so ``HARNESSX_GHX_GRAPH_PROPOSALS``
+       stays independently switchable exactly like the evidence/gate flags are.
 
     Yields the capture dict so callers/tests can inspect it.
     """
@@ -309,13 +324,15 @@ def _ghx_round_wiring():
             pass
         return record
 
-    _pilot._run_task = _capturing_run_task
-    AegisOrchestrator.run_round = _make_wrapped_run_round(orig_run_round, capture, _gate_u_resolver)
-    try:
-        yield capture
-    finally:
-        _pilot._run_task = orig_run_task
-        AegisOrchestrator.run_round = orig_run_round
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(install_graph_proposals())
+        _pilot._run_task = _capturing_run_task
+        AegisOrchestrator.run_round = _make_wrapped_run_round(orig_run_round, capture, _gate_u_resolver)
+        try:
+            yield capture
+        finally:
+            _pilot._run_task = orig_run_task
+            AegisOrchestrator.run_round = orig_run_round
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -342,7 +359,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Graph-hardening ladder (cumulative, off by default): "
             "0=vendored pilot; 1=+UNFOLD+IDENTITY; 2=+AEGIS_EVIDENCE; "
-            "3=same as 2 (facts share L2's materialiser); 4=+GRAPH_GATE. "
+            "3=same as 2 (facts share L2's materialiser); 4=+GRAPH_GATE; "
+            "5=+GRAPH_PROPOSALS (graph-native Evolver candidate tools). "
             "Explicit HARNESSX_GHX_* env vars always win over the level."
         ),
     )
@@ -369,7 +387,7 @@ def _print_ghx_plan(level: int, applied: tuple[str, ...], meta_model: str | None
         print(f"  meta model (explicit > GAIA_META_MODEL > follows --model): {meta_model}")
     on = [
         f
-        for f in (_UNFOLD, _IDENTITY, _EVIDENCE, _GATE)
+        for f in (_UNFOLD, _IDENTITY, _EVIDENCE, _GATE, _PROPOSALS)
         if os.environ.get(f, "").strip().lower() in {"1", "true", "on", "yes"}
     ]
     print(f"  flags effective now: {', '.join(on) or '(none)'}")
@@ -379,9 +397,15 @@ def _print_ghx_plan(level: int, applied: tuple[str, ...], meta_model: str | None
 async def _dispatch(args: argparse.Namespace) -> None:
     """Run the pilot, wiring the overlay seam only when an overlay flag is effective."""
     from harnessx.ghx.graph_gate import graph_gate_enabled
+    from harnessx.ghx.graph_proposals import graph_proposals_enabled
     from harnessx.ghx.overlay import aegis_evidence_enabled
 
-    if aegis_evidence_enabled() or graph_gate_enabled():
+    # graph_proposals_enabled() is in this OR on purpose: it is the only thing that
+    # installs install_graph_proposals() at all (see _ghx_round_wiring), so without
+    # it here, setting HARNESSX_GHX_GRAPH_PROPOSALS=1 at a level below 5 (or with no
+    # --ghx-level given) would never wire the seam — breaking the "explicit env wins
+    # at any level" contract every other GHX flag already has.
+    if aegis_evidence_enabled() or graph_gate_enabled() or graph_proposals_enabled():
         with _ghx_round_wiring():
             await _pilot.run_pilot(args)
     else:
