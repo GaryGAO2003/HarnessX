@@ -1127,6 +1127,20 @@ R2 Evolver 重跑收敛（120 步 $14.6 → 3 候选真落盘），Critic ship�
 - L0 逃过早停：R4 末 evolve ok（streak 归零），R5 开跑。彩票再废 2 份
   （`data/task_history.jsonl` 前缀，新花样），累计 L0 10 份、L2 6 份。
 
+## L2 进程被外部终止 + 首次续跑（22:54 → 22:56）
+
+22:54:28 L2 后台任务收到终止信号（非本会话所发；L0 与机器无恙，非重启事件），
+死于 **R4→R5 meta 中途**（evolver step 62 截断）。R4 分数 70.9% 已安全落盘。
+
+**首次动用续跑预案**（bg b0ofpazv4）：`--start-round 5`，22:56:33 复飞——
+`resume: loading current_config from R4/applied/merged.yaml (curves has 5 rounds)`，
+即 R5 跑在 R4 实跑配置（含其全部 ship）上，历史曲线完整；三旗 + serper 横幅齐。
+
+**代价与残留（分析期须知）**：被截断的那次进化机会丢失——R5 无新 ship
+（等效强制 noop 过渡，不进 noop_streak 因为是新进程）；R5/ 下可能有孤儿
+meta 半成品（截断的 digester/graph_evidence 残件），最终引证审计要按
+"R5 证据无消费者"处理，不得计入注入统计。
+
 ## L5 图原生候选表面落地（21:40）
 
 - **阶梯长出第 5 档**：`--ghx-level 5` = L4 全旗标 + `HARNESSX_GHX_GRAPH_PROPOSALS`
