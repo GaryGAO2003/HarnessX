@@ -848,3 +848,10 @@ R1 起每轮生效。多余的轮只给 Evolver 买彩票，而彩票率已被 v
 `python -m recipe.gaia_evolver.run_meta_aegis_ghx --ghx-level {1|2|4} --tasks <bed> --max-tasks 0 --num-rounds 3 --concurrency 8 --seed 42`
 
 待用户：床位点头（建议 103；缩床会把 delta 淹进 ±5 题噪声包络）。
+
+## 事故记录（2026-08-12 凌晨）— venv 垫片误诊为双开
+
+L0_103x10 基线出现两个同参数 python 进程，误诊为双开并建议杀 0-CPU 侧；
+实为 Windows venv python.exe 垫片（父）+ 基础解释器（子）的单启动标准形态
+（ParentProcessId 已验证）。用户重启 run，R0 已跑 23 条付费轨迹作废。
+教训入永久记忆：判双开先查父子链，venv 垫片永不手杀。
