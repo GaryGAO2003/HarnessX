@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 from ..core.events import Message, ModelResponseEvent, ToolSchema, Usage
@@ -17,14 +18,46 @@ _last_request_time = 0.0
 _MIN_REQUEST_INTERVAL = 1.0
 
 
+def _min_request_interval() -> float:
+    """Global inter-request spacing in seconds (HARNESSX_MIN_REQUEST_INTERVAL).
+
+    The 1 req/s default protects shared gateways, but it is process-global —
+    at any task concurrency > ~3 it, not model latency, is the wall-clock
+    governor (a 103-task round serializes to ~0.55 calls/s regardless of the
+    concurrency knob). On a self-hosted gateway set 0.2–0.3 to lift the cap."""
+    raw = os.environ.get("HARNESSX_MIN_REQUEST_INTERVAL", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return _MIN_REQUEST_INTERVAL
+
+
+def _client_timeout() -> float | None:
+    """Per-request HTTP timeout in seconds (HARNESSX_HTTP_TIMEOUT), None = SDK default.
+
+    Without an explicit value the OpenAI SDK waits 600 s, so a hung gateway
+    request pins a task slot for the full 10 minutes before the retry loop in
+    ``complete`` ever sees the failure (observed: DeepSeek-Flash via LiteLLM)."""
+    raw = os.environ.get("HARNESSX_HTTP_TIMEOUT", "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 async def _throttle():
     global _throttle_lock, _last_request_time
     if _throttle_lock is None:
         _throttle_lock = asyncio.Lock()
     async with _throttle_lock:
         elapsed = time.monotonic() - _last_request_time
-        if elapsed < _MIN_REQUEST_INTERVAL:
-            await asyncio.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+        interval = _min_request_interval()
+        if elapsed < interval:
+            await asyncio.sleep(interval - elapsed)
         _last_request_time = time.monotonic()
 
 
@@ -221,6 +254,9 @@ class OpenAIProvider(BaseModelProvider):
         if self.extra_headers:
             client_kwargs["default_headers"] = self.extra_headers
         client_kwargs["max_retries"] = 0
+        timeout = _client_timeout()
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
         client = AsyncOpenAI(**client_kwargs)
 
         oai_messages = []
