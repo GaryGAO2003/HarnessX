@@ -1141,6 +1141,21 @@ R2 Evolver 重跑收敛（120 步 $14.6 → 3 候选真落盘），Critic ship�
 meta 半成品（截断的 digester/graph_evidence 残件），最终引证审计要按
 "R5 证据无消费者"处理，不得计入注入统计。
 
+### 二次终止 + 值守暂停（23:41，等用户裁决）
+
+续跑的 L2 在 R5 任务段 ~45 分钟处**再次被外部终止**（两次均非本会话所发）。
+同期发现另一工作流活跃：23:28 本机发射 `L5_smoke1`
+（`run_meta_aegis_ghx.py --ghx-level 5 --tasks holdout6.json --max-tasks 1
+--num-rounds 2 --model deepseek/deepseek-chat --search-backend serper`）——
+**ghx-level 5 已被造出**（P2/E3 线，对面会话产），与 L2 run 目录无冲突。
+
+**判断**：两次定点终止 + 用户在机 = 大概率主动接管/腾资源，小概率对面会话
+清进程误伤。**停止自动续跑**（避免 kill-relaunch 拉锯，每轮拉锯烧 $30+），
+推送已发，等用户裁决：续跑（`--start-round 5` 一条命令，R4 merged 播种）
+或封存（R0–R4 五轮完整曲线已在手：59.2/58.2/60.2/67.0/70.9，本身可用）。
+L0 不受影响继续值守（R6 任务段，R5=71.8% 出包络新高）。同期曲线注意两臂
+R5/R4 双双出包络冲峰——跑步机审判段的数据比预期更戏剧化。
+
 ## L5 图原生候选表面落地（21:40）
 
 - **阶梯长出第 5 档**：`--ghx-level 5` = L4 全旗标 + `HARNESSX_GHX_GRAPH_PROPOSALS`
