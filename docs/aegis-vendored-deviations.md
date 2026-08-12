@@ -61,8 +61,13 @@ operator resume (user decision), official patience=2 preserved in code"。
   配"救回判决数"计数器）→ ③ 校验错误回喂原 Critic 限一次重发（治语义类
   非法前缀）。禁止第三方 LLM 改写判决——那是代裁。
 - **P-6：押后**（用户 08-13"先不急"）；早停由上节预声明续跑协议兜底。
-- **P-1 / P-2：待先例文献核查**（budget-in-prompt / draft-early 两族实测
-  结果，调查在飞），出结果后再裁。
+- **P-1：批准上车**（用户 08-13 裁决原话"可以实施，但是明确记录"）。证据基础：
+  `experiments/docs/EVIDENCE-P1P2-BUDGET-DRAFT-EARLY.md` P-1 族——方向证据一致
+  （MLE-bench/AIDE 有效提交率差 3–38pp、deer-flow 反面印证），**但无任何正面
+  消融**，此注记随行进论文偏差表。物理 apply 仍按发车门流程（在飞不追溯）。
+- **P-2：深研中**（用户 08-13 令 deep-research 补证后再裁）。已知：一次性告知
+  为文献弱形态（s1 反例 / 谈判域持续可见 8×），"留收尾余量"子命题有正证据；
+  P-2b（driver 侧逐步倒数注入）作为候选升级梯随深研结论一并裁。
 
 ## 登记纪律
 
