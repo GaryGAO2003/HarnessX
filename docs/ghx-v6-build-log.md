@@ -855,3 +855,17 @@ L0_103x10 基线出现两个同参数 python 进程，误诊为双开并建议�
 实为 Windows venv python.exe 垫片（父）+ 基础解释器（子）的单启动标准形态
 （ParentProcessId 已验证）。用户重启 run，R0 已跑 23 条付费轨迹作废。
 教训入永久记忆：判双开先查父子链，venv 垫片永不手杀。
+
+## 正式跑批点火（2026-08-12 04:12）— L0 ∥ L2 双臂
+
+- **L0_103x10**（baseline worktree，对面会话值守）：官方原样，Flash@litellm + v4-pro meta，
+  10 轮 × 103 题文件序。03:46 重发后从首请求起全代理（连接表核实，此前"仍在官方 API"
+  为本会话陈旧证据误读，已收回）。
+- **L2_103x10**（本会话，bg task bewy93y1z）：`run_meta_aegis_ghx --ghx-level 2`，三旗生效
+  （UNFOLD/IDENTITY/AEGIS_EVIDENCE），meta=v4-pro，与 L0 仅差开关。console →
+  recipe/gaia_evolver/runs_L2_103x10.console.log。
+- 点火前端点实测（顶着 L0 负载）：单请求 1.8s，+6 并发 1.4–2.0s 零膨胀；L0 实际压强
+  ≈0.1 调用/秒（墙钟在工具网页抓取）。判定：双臂安全。
+- 预注册读数：peak−final 非退化 + 双分支；±5 题单轮噪声规则；偏差表 15→10 轮、3→1 种子、
+  无 pass@2。L4 排队，降档纪律 L1+L2 不可降 > L4。
+- 跑批看板 artifact 首发：ghx-v6-runboard（快照 04:13，L0 44/103 · L2 2/103）。
