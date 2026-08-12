@@ -814,3 +814,11 @@ Z 相应改成：
 - **污染通道现场抓获（重大）**：v3 R2 的 72e110e7 里 agent 搜到 `github.com/harbor-framework/harbor-datasets`——GAIA 任务连 instruction.md/solve.sh/`tests/expected_answer.txt` 全量公开镜像，直接抄到 "The correct answer is **Guatemala**"，20 步撞限没交卷 + judge 掷硬币 FAIL（重放 1P/2F，污染轨迹连 judge 一起毒：有次把 GT 幻觉成泄漏轨迹里的 Kenya）→ 分数侥幸未染。
 - **防泄漏层三跑全程空膛（审计发现）**：`HARNESSX_URL_BLOCKLIST` 是 env 驱动、接线在重构臂 `anti_contamination.py`，官方臂 recipe/ 从未装弹。**已装弹**：两份 .env 加官方 GAIA_ANSWER_DOMAINS + harbor-framework 三路径（api.github/github/raw）+ query 规则；6/6 验证（harbor/HF-datasets 拦、words_alpha/维基放行）。v3 暴露期 score-neutral（唯一触点被 FAIL），数据保真；此后所有跑（含 L1+）武装状态，对比口径一致。
 - 三版终局：v1 名义 4/6→3/6→4/6（审计 3→3→4）；v2 名义 4/6→5/6→3/6（审计 3→3→2）；**v3 名义=审计 2→2→3**。结论：弱 judge 的名义曲线方向性不可信；严格口径下本任务臂真实底线 2-3/6，v4-pro meta 首现正向末轮。
+
+## L1_unfold_v1 收官 — 记录层零干预实证 + blocklist 实战首胜
+
+- **L1 定档**（56min，exit 0，冻结 baseline 分支 `5d43a2b` + `HARNESSX_GHX_UNFOLD=1`/`HARNESSX_GHX_IDENTITY=1`，其余与 L0-v3 完全同构）：**R0 2/6 → R1 2/6 → R2 3/6——与 L0-v3 逐轮同分同题**，审计 7/7 PASS 全真零假阳性。"只记录不干预"的 L1 主张拿到最强形式的实证：分数曲线逐轮重合。
+- **U 覆盖全量**：18/18 任务 rollout + 10 个 meta session 各有 `*_unfolded.jsonl`（schema `ghx-unfolded-v1`；单个 20 步 rollout 1200 节点/1086 边）。R1 噪声细节：851e570a 连续四轮挂在 GitHub raw 拉词典（wget/urllib 全空），R2 恢复后 5 步过——两级末轮"+1"同源于此环境噪声，不记 ship 功。
+- **blocklist 实战首胜**：L1 R2 的 72e110e7，agent 再次尝试答案泄漏路径，**2 条拦截消息、零 harbor 抓取**，只剩空猜、诚实 FAIL。装弹后的防泄漏层在生产跑里首次实际拦截成功。
+- **v4-pro Critic 首次行使否决权**：R1 meta 轮注册 2 候选全拒（noop），R2 注册 2 候选放行——四角色对话质量肉眼高于 chat 版。
+- 阶梯状态：**L0 ✅ L1 ✅**，同一冻结 commit、同模型、同判分、同武装。L2（Digester 吃锥文件）依赖 G1/G2 接线，在 ghx 分支冻结点之后——上 L2 前需决策：推进 baseline 冻结点或从 ghx 跑。
