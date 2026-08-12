@@ -41,10 +41,6 @@ def _prompt_text(cfg) -> str:
     raise AssertionError("no SystemPromptProcessor entry found in config")
 
 
-def _tools_in(cfg) -> dict:
-    return dict(cfg.tool_registry._tools)
-
-
 def _make_inputs(tmp_path: Path, **overrides) -> EvolverInputs:
     defaults = dict(
         round=5,
@@ -137,10 +133,11 @@ async def test_flag_on_normal_mode_registers_tools_and_appends_prompt(tmp_path, 
     assert "processor node(s)" in injected  # node inventory
     assert "trajectories/, sessions/, and digests/" in injected  # anchor contract
     assert "_hook_/_order_/_singleton_group_/" in injected  # metadata materialization trap
+    assert "IV-9" in injected  # F3: bucket/extension gate warning
     assert "REPLACES the entire" in injected  # failure_evidence full-replace warning
 
 
-# ── 4. flag on, ask-more mode: only Manifest/Status, single-file write scope ───────
+# ── 4. flag on, ask-more mode: NO wiring at all -- cfg is orig(inputs), untouched ──
 
 
 def _ask_more_inputs(tmp_path: Path, **overrides) -> EvolverInputs:
@@ -156,7 +153,15 @@ def _ask_more_inputs(tmp_path: Path, **overrides) -> EvolverInputs:
     return _make_inputs(tmp_path, **base)
 
 
-async def test_flag_on_ask_more_mode_registers_only_manifest_and_status(tmp_path, monkeypatch):
+async def test_flag_on_ask_more_mode_returns_cfg_unmodified(tmp_path, monkeypatch):
+    """F1: the answer channel for ask-more is final_output (evolver.md L1-9 tells the
+    model so directly; judge.py:30 is the only place the answer is read back), and
+    ask_more_candidate_path is a defensive write-scope release valve nothing
+    downstream reads. Wiring a Manifest/Status pair onto it -- as an earlier revision
+    of this module did -- gives the model a tool that LOOKS authoritative and drains
+    the answer into a file nobody reads, starving final_output. So in ask-more mode
+    the wrapper must be a pure passthrough: no new tools, no prompt text appended, no
+    file ever written to ask_more_candidate_path."""
     monkeypatch.setenv(graph_proposals.FLAG, "1")
     import harnessx.aegis.stages.propose as propose_mod
 
@@ -166,50 +171,9 @@ async def test_flag_on_ask_more_mode_registers_only_manifest_and_status(tmp_path
     with install_graph_proposals():
         cfg = propose_mod.build_evolver_harness(inputs)
 
-    new_names = set(cfg.tool_registry.list_names()) - set(baseline.tool_registry.list_names())
-    assert new_names == {"GraphProposalManifest", "GraphProposalStatus"}
-
-
-async def test_ask_more_manifest_single_file_full_replace_and_status(tmp_path, monkeypatch):
-    """Functional check on the standalone ask-more tool pair (not just registration):
-    wrong candidate_id is refused, a successful call REPLACES (not appends) the body,
-    and the scratch dir never grows a second (e.g. config.yaml) file."""
-    monkeypatch.setenv(graph_proposals.FLAG, "1")
-    import harnessx.aegis.stages.propose as propose_mod
-
-    inputs = _ask_more_inputs(tmp_path)
-    scratch = inputs.ask_more_candidate_path
-
-    with install_graph_proposals():
-        cfg = propose_mod.build_evolver_harness(inputs)
-    tools = _tools_in(cfg)
-
-    bad = await tools["GraphProposalManifest"].fn(candidate_id="C-R5-99", notes="wrong candidate")
-    assert bad["ok"] is False
-    assert not scratch.exists()
-
-    status_before = await tools["GraphProposalStatus"].fn()
-    assert status_before["file_written"] is False
-    assert "failure_evidence" in status_before["manifest_missing_fields"]
-
-    res1 = await tools["GraphProposalManifest"].fn(candidate_id="C-R5-01", failure_evidence="first cut")
-    assert res1["ok"] is True
-    assert res1["files"] == [str(scratch)]
-    assert "first cut" in scratch.read_text(encoding="utf-8")
-
-    res2 = await tools["GraphProposalManifest"].fn(
-        candidate_id="C-R5-01", failure_evidence="second cut, complete answer",
-    )
-    assert res2["ok"] is True
-    text2 = scratch.read_text(encoding="utf-8")
-    assert "second cut, complete answer" in text2
-    assert "first cut" not in text2  # replaced, not appended
-
-    assert [p.name for p in scratch.parent.iterdir()] == [scratch.name]  # single file, no companions
-
-    status_after = await tools["GraphProposalStatus"].fn()
-    assert status_after["file_written"] is True
-    assert "failure_evidence" not in status_after["manifest_missing_fields"]
+    assert cfg.tool_registry.list_names() == baseline.tool_registry.list_names()
+    assert _prompt_text(cfg) == _prompt_text(baseline)
+    assert not inputs.ask_more_candidate_path.exists()
 
 
 # ── 5. preflight failure is loud, not swallowed ────────────────────────────────────

@@ -288,7 +288,8 @@ _SCHEMA_OPEN = {
             "type": ["string", "array"],
             "items": {"type": "string"},
             "description": (
-                "One of prompt|tools|config|processor, or a list for a cross-bucket candidate."
+                "One of prompt|tools|config|processor, or a list for a cross-bucket candidate. "
+                "Must cover every file extension you will write (IV-9 checks by extension)."
             ),
         },
         "iterates_from": {
@@ -508,8 +509,11 @@ class ProposalSession:
         return [graph_proposal_open, graph_proposal_edit, graph_proposal_manifest, graph_proposal_status]
 
     def session_report(self) -> dict:
-        """End-of-session summary across every candidate (#5 persists this in a
-        ``finally`` block — this method itself performs no file I/O)."""
+        """Convenience summary across every candidate opened this session — performs
+        no I/O itself. The durable, on-disk source of truth is each candidate's own
+        lineage file (written on every successful edit/manifest call, not only at
+        session end); a caller MAY additionally persist this summary when a session
+        ends, but nothing in this module requires it."""
         return {
             "round": self.round_n,
             "parent_config_path": str(self.parent_config_path),
@@ -569,11 +573,14 @@ class ProposalSession:
             opened_at=_utcnow(),
         )
 
-        ok, err = self._write_config_verified(candidate)
+        ok, err = self._write_config_manifest_lineage(candidate)
         if not ok:
-            return {"ok": False, "error": f"skeleton config.yaml failed post-write verification: {err}"}
-        self._write_manifest(candidate)
-        self._write_lineage(candidate)
+            # F9: a candidate that fails mid write-phase must not leave files behind
+            # that make a same-cid retry look like it already has work in progress,
+            # and must not be registered -- an unregistered cid must never become a
+            # permanently-unopenable dead end (Refuse forever, Status not knowing it).
+            self._cleanup_failed_open(candidate)
+            return {"ok": False, "error": f"candidate creation failed while writing: {err}"}
         self._candidates[candidate_id] = candidate
 
         return {
@@ -636,25 +643,70 @@ class ProposalSession:
 
         # Candidate identity contract (mirrors apply_operator): advance to the S4
         # build fixed point, not the raw apply_edits result (see module docstring).
+        old_snapshot = candidate.snapshot
+        old_danger_nodes = set(candidate.danger_nodes)
+        old_danger_edges = set(candidate.danger_edges)
+        old_edits_len = len(candidate.edits_log)
+
         candidate.snapshot = report.fixed_point if report.fixed_point is not None else result
         candidate.danger_nodes |= danger_nodes
         candidate.danger_edges |= danger_edges
 
         ts = _utcnow()
+        new_lines = []
         for ge in group:
             line = _edit_to_jsonable(ge)
             line["timestamp"] = ts
-            candidate.edits_log.append(line)
-            _append_jsonl(candidate.edits_path, line)
+            new_lines.append(line)
+        candidate.edits_log.extend(new_lines)
 
-        ok, err = self._write_config_verified(candidate)
+        # F2: "On failure: ... genotype UNCHANGED" (_EDIT_DESC) must hold even when
+        # the FAILURE happens after the in-memory edit already applied cleanly --
+        # write config+manifest+lineage first, jsonl (append-only, never rewritten
+        # in place) last, and if ANY of the four write steps fails, roll the memory
+        # back and re-run the first three writes against the rolled-back state so
+        # disk matches memory again.
+        ok, err = self._write_config_manifest_lineage(candidate)
+        jsonl_err = ""
+        if ok:
+            try:
+                for line in new_lines:
+                    _append_jsonl(candidate.edits_path, line)
+            except Exception as exc:  # noqa: BLE001 -- pure ledger disk fault, still rolls back
+                ok = False
+                jsonl_err = f"{type(exc).__name__}: {exc}"
+
         if not ok:
+            candidate.snapshot = old_snapshot
+            candidate.danger_nodes = old_danger_nodes
+            candidate.danger_edges = old_danger_edges
+            del candidate.edits_log[old_edits_len:]
+
+            restore_ok, restore_err = self._write_config_manifest_lineage(candidate)
+            if jsonl_err:
+                # config/manifest/lineage were already rewritten with the NEW state
+                # before the ledger append itself failed (pure disk fault on the
+                # jsonl only) -- best-effort a compensating marker; a failure here
+                # is not chased further.
+                try:
+                    _append_jsonl(candidate.edits_path, {
+                        "rollback": True, "reason": jsonl_err, "timestamp": _utcnow(),
+                    })
+                except Exception:  # noqa: BLE001 -- best-effort only
+                    pass
+
+            message = jsonl_err or err
+            if not restore_ok:
+                message = f"{message}; disk restore to prior state ALSO failed: {restore_err}"
+
+            candidate.reports.append({
+                "timestamp": _utcnow(), "trigger": "write", "passed": False,
+                "issues": [{"layer": "write", "error_type": "write_failed", "message": message}],
+            })
             return {
-                "ok": False, "genotype": genotype_hash(candidate.snapshot),
-                "issues": [{"layer": "write", "error_type": "config_write_failed", "message": err}],
+                "ok": False, "genotype": current_genotype,
+                "issues": [{"layer": "write", "error_type": "write_failed", "message": message}],
             }
-        self._write_manifest(candidate)
-        self._write_lineage(candidate)
 
         return {
             "ok": True,
@@ -681,6 +733,11 @@ class ProposalSession:
             }
 
         self._reconcile_hand_written(candidate)
+
+        old_manifest_fields = dict(candidate.manifest_fields)
+        old_fields_set = set(candidate.fields_set)
+        old_failure_evidence_body = candidate.failure_evidence_body
+        old_derived_fields = set(candidate.derived_fields)
 
         updated: list[str] = []
         if capability_evidence is not None:
@@ -713,11 +770,16 @@ class ProposalSession:
                 ),
             }
 
-        ok, err = self._write_config_verified(candidate)
+        ok, err = self._write_config_manifest_lineage(candidate)
         if not ok:
-            return {"ok": False, "error": f"config re-verify failed: {err}"}
-        self._write_manifest(candidate)
-        self._write_lineage(candidate)
+            # F2: on failure the model-supplied fields must go back UNCHANGED too --
+            # a caller retrying the same call after a transient write fault should
+            # not find half its previous fields already clobbered in memory.
+            candidate.manifest_fields = old_manifest_fields
+            candidate.fields_set = old_fields_set
+            candidate.failure_evidence_body = old_failure_evidence_body
+            candidate.derived_fields = old_derived_fields
+            return {"ok": False, "error": f"manifest write failed, fields unchanged: {err}"}
 
         return {
             "ok": True,
@@ -799,6 +861,40 @@ class ProposalSession:
         candidate.last_config_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         return True, ""
 
+    def _write_config_manifest_lineage(self, candidate: _CandidateState) -> "tuple[bool, str]":
+        """Write config.yaml (verified) + manifest + lineage as one failable unit --
+        never raises. An exception from either of the latter two is caught and
+        turned into the same ``(False, message)`` shape ``_write_config_verified``
+        already uses, so callers (:meth:`_open`, :meth:`_edit`, :meth:`_manifest`)
+        can treat "write everything this call touches" as a single step to roll
+        back together (F2/F9)."""
+        ok, err = self._write_config_verified(candidate)
+        if not ok:
+            return False, f"config_write_failed: {err}"
+        try:
+            self._write_manifest(candidate)
+            self._write_lineage(candidate)
+        except Exception as exc:  # noqa: BLE001 -- surfaced as a structured failure, never raised out
+            return False, f"{type(exc).__name__}: {exc}"
+        return True, ""
+
+    def _cleanup_failed_open(self, candidate: _CandidateState) -> None:
+        """Best-effort cleanup after :meth:`_open`'s write phase fails partway (F9)
+        -- an unregistered candidate must not leave files on disk that make a
+        same-cid retry look like it already has work in progress."""
+        for p in (candidate.config_path, candidate.manifest_path, candidate.edits_path,
+                  candidate.lineage_json_path, candidate.lineage_md_path):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        scratch_dir = candidate.config_path.parent
+        try:
+            if scratch_dir.exists() and not any(scratch_dir.iterdir()):
+                scratch_dir.rmdir()
+        except OSError:
+            pass
+
     def _file_changes_for(self, candidate: _CandidateState) -> list[dict]:
         type_counts: dict[str, int] = {}
         for e in candidate.edits_log:
@@ -814,16 +910,24 @@ class ProposalSession:
         scratch_dir = candidate.config_path.parent
         if scratch_dir.exists():
             for p in sorted(scratch_dir.rglob("*")):
-                if p.is_file() and p.name not in _BOOKKEEPING_NAMES:
-                    changes.append({
-                        "path": str(p), "action": "create", "diff_summary": "model-authored asset file",
-                    })
+                if not p.is_file():
+                    continue
+                if p.parent == scratch_dir and p.name in _BOOKKEEPING_NAMES:
+                    continue  # our own ledger files at the scratch ROOT only -- a
+                    # same-named file in a model-authored subdirectory is a real asset
+                changes.append({
+                    "path": str(p), "action": "create", "diff_summary": "model-authored asset file",
+                })
         return changes
 
     def _derive_attribution_signature(self, candidate: _CandidateState) -> "dict | None":
         """Auto-derive attribution_signature when the model hasn't given one and an
         applied edit touched a proc:/tool: node (§4.2). Marked derived=true in lineage
         via ``candidate.derived_fields`` — never overrides a model-given value."""
+        # Forward note: once replay U lands, a processor_invocation signature's
+        # countability must line up with U's own node-naming scheme, or the sixth
+        # gate reads an honest candidate as "edited but never actually run" --
+        # lineage's derived=true exists so that class can be segmented in analysis.
         for e in candidate.edits_log:
             for nid in (e.get("target_node_id"), e.get("edge_source_id"), e.get("edge_target_id")):
                 if nid and (nid.startswith("proc:") or nid.startswith("tool:")):

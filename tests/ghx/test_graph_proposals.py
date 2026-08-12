@@ -510,3 +510,128 @@ async def test_status_reports_checklist_missing_fields_and_gate(tmp_path: Path):
 
     missing = await tools["GraphProposalStatus"].fn(candidate_id="C-R9-99")
     assert missing["ok"] is False
+
+
+# ── 13. F2: _edit write-phase failure rolls back, genotype UNCHANGED ──────────
+
+
+async def test_edit_write_config_verified_failure_rolls_back_and_retry_succeeds(
+    tmp_path: Path, monkeypatch,
+):
+    session = _make_session(tmp_path, round_n=7)
+    tools = _tools(session)
+    await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="config")
+    rp_id = _node_ids(session)[_ECHO_TARGET]
+    candidate = session._candidates["C-R7-01"]
+    before_genotype = genotype_hash(candidate.snapshot)
+
+    monkeypatch.setattr(ProposalSession, "_write_config_verified", lambda self, cand: (False, "boom"))
+
+    edits = [{"edit_type": "replace_same_group", "target_node_id": rp_id,
+              "node_spec": _echo_node_spec("v2")}]
+    res = await tools["GraphProposalEdit"].fn(candidate_id="C-R7-01", edits=edits, reason="flaky write")
+
+    assert res["ok"] is False
+    assert res["genotype"] == before_genotype
+    assert genotype_hash(candidate.snapshot) == before_genotype  # session snapshot unchanged
+    jsonl_path = session.applied_root / "C-R7-01" / "graph_edits.jsonl"
+    assert not jsonl_path.exists()  # no new edit line recorded
+
+    monkeypatch.undo()  # un-patch -- back to the real _write_config_verified
+    res2 = await tools["GraphProposalEdit"].fn(candidate_id="C-R7-01", edits=edits, reason="retry")
+    assert res2["ok"] is True, res2
+
+
+async def test_edit_manifest_write_oserror_rolls_back_config_bytes_on_disk(
+    tmp_path: Path, monkeypatch,
+):
+    session = _make_session(tmp_path, round_n=7)
+    tools = _tools(session)
+    await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="config")
+    rp_id = _node_ids(session)[_ECHO_TARGET]
+    candidate = session._candidates["C-R7-01"]
+
+    config_path = session.applied_root / "C-R7-01" / "config.yaml"
+    before_bytes = config_path.read_bytes()
+    before_genotype = genotype_hash(candidate.snapshot)
+
+    def _boom(self, cand):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ProposalSession, "_write_manifest", _boom)
+
+    edits = [{"edit_type": "replace_same_group", "target_node_id": rp_id,
+              "node_spec": _echo_node_spec("v2")}]
+    res = await tools["GraphProposalEdit"].fn(candidate_id="C-R7-01", edits=edits, reason="manifest boom")
+
+    assert res["ok"] is False
+    assert res["genotype"] == before_genotype
+    assert genotype_hash(candidate.snapshot) == before_genotype
+    assert config_path.read_bytes() == before_bytes  # rolled back to pre-edit bytes ON DISK
+
+
+async def test_manifest_write_failure_leaves_fields_set_unchanged(tmp_path: Path, monkeypatch):
+    session = _make_session(tmp_path, round_n=7)
+    tools = _tools(session)
+    await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="config")
+    candidate = session._candidates["C-R7-01"]
+
+    def _boom(self, cand):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ProposalSession, "_write_manifest", _boom)
+
+    res = await tools["GraphProposalManifest"].fn(
+        candidate_id="C-R7-01", failure_evidence="trajectories/abc.jsonl#step_1",
+    )
+    assert res["ok"] is False
+    assert "failure_evidence" not in candidate.fields_set
+    assert candidate.failure_evidence_body == ""
+
+
+# ── 14. F9: _open write-phase failure cleans up, cid is not a dead end ────────
+
+
+async def test_open_write_failure_cleans_up_and_retry_succeeds(tmp_path: Path, monkeypatch):
+    session = _make_session(tmp_path, round_n=7)
+    tools = _tools(session)
+
+    def _boom(self, cand):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ProposalSession, "_write_manifest", _boom)
+
+    res = await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="config")
+    assert res["ok"] is False
+    assert "C-R7-01" not in session._candidates
+    assert not (session.candidates_dir / "C-R7-01.md").exists()
+    assert not (session.applied_root / "C-R7-01").exists()  # scratch dir cleaned up too
+
+    monkeypatch.undo()  # un-patch -- back to the real _write_manifest
+    res2 = await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="config")
+    assert res2["ok"] is True, res2
+
+
+# ── 15. F4: bookkeeping exclusion is scratch-ROOT only, not by bare name ──────
+
+
+async def test_bookkeeping_exclusion_is_scratch_root_only(tmp_path: Path):
+    session = _make_session(tmp_path, round_n=7)
+    tools = _tools(session)
+    await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="config")
+    candidate = session._candidates["C-R7-01"]
+
+    sub = session.applied_root / "C-R7-01" / "sub"
+    sub.mkdir(parents=True, exist_ok=True)
+    nested = sub / "config.yaml"
+    nested.write_text("note: nested-asset\n", encoding="utf-8", newline="\n")
+
+    changes = session._file_changes_for(candidate)
+    paths = {c["path"]: c for c in changes}
+    assert str(nested) in paths
+    assert paths[str(nested)]["action"] == "create"
+
+    # The scratch-ROOT config.yaml is still excluded (it already has its own "modify"
+    # entry from the top of _file_changes_for) -- exactly one entry for it, not two.
+    root_config = str(candidate.config_path)
+    assert sum(1 for c in changes if c["path"] == root_config) == 1

@@ -43,47 +43,42 @@ every time IT is called and is a byte-for-byte passthrough when the flag is off.
 This is what lets ``HARNESSX_GHX_GRAPH_PROPOSALS`` be flipped independently of
 whatever ``--ghx-level`` the launcher was given, exactly like every other GHX flag.
 
-**The ask-more path does not use ProposalSession.** ``EvolverInputs.ask_more_candidate_path``
+**The ask-more path gets no wiring at all — on purpose.** ``EvolverInputs.ask_more_candidate_path``
 is a scratch file the orchestrator allocates FRESH per subcall
 (``askmore_scratch/{cid}_{uuid4().hex[:8]}.md`` — never pre-existing, never the
-original candidate's real manifest) and the vendored pipeline never reads it back:
-``make_evolver_runner`` (``harnessx/aegis/stages/judge.py``) takes the Evolver's
-answer from ``result.final_output`` only. The write-scope gate allows exactly this
-one path as a defensive release valve, not because anything downstream consumes it.
-``ProposalSession._open`` hard-codes ``candidates_dir / f"{candidate_id}.md"``, so it
-cannot target this random-suffixed filename, and even if it could, ``_manifest()``
-always writes FOUR files (manifest, config.yaml, two lineage files) where the
-ask-more write-scope permits exactly one. So ask-more mode gets its own small,
-standalone ``GraphProposalManifest``/``GraphProposalStatus`` pair (:func:`_wire_ask_more`)
-that writes only ``ask_more_candidate_path`` and nothing else — same tool names,
-descriptions, and JSON schemas as normal mode (imported from
-:mod:`harnessx.ghx.graph_proposals`, not re-derived) for a consistent model-facing
-contract, but a from-scratch implementation underneath. ``GraphProposalOpen`` and
-``GraphProposalEdit`` are simply never registered in this mode — a tool that does
-not exist is a structural refusal that needs no runtime check.
+original candidate's real manifest), and nothing downstream ever reads it back. The
+vendored ask-more prompt (``harnessx/aegis/templates/evolver.md``, lines 1-9) tells
+the model in plain language to "answer in `final_output`" and that "your answer is
+appended to the candidate manifest by the Critic" — and that is exactly what
+``make_evolver_runner`` (``harnessx/aegis/stages/judge.py``, line 30) does:
+``result.final_output or "(no answer)"`` is the ENTIRE read path for an ask-more
+subcall's answer. ``ask_more_candidate_path`` exists only as a defensive write-scope
+release valve for a model that ignores the prompt and tries to write a file anyway
+(the write-scope gate allows exactly this one path) — it is not a channel anything
+downstream consumes.
+
+An earlier revision of this module wired a standalone ``GraphProposalManifest``/
+``GraphProposalStatus`` pair onto that path. That was actively wrong: handing the
+model a tool that LOOKS authoritative and answering the question by calling it
+instead of writing to ``final_output`` routes the answer straight into a file
+nobody reads, starving the one channel the Critic actually collects. So the
+wrapper below does the only thing that cannot misdirect the model in ask-more
+mode — it returns ``orig(inputs)`` completely unmodified: no new tools registered,
+no prompt text appended, ``GraphProposalOpen``/``GraphProposalEdit``/
+``GraphProposalManifest``/``GraphProposalStatus`` all absent, same as if this seam
+were never installed. The lazy import at ``orchestrator.py``'s
+``evolver_harness_factory`` still resolves to this wrapper on every ask-more
+subcall (see "The double rebind" above) — it just passes the call straight through.
 """
 
 from __future__ import annotations
 
 import contextlib
-from pathlib import Path
-from typing import Any
-
-import yaml
 
 from .brief_pointers import _append_pointer_to_config
-from .graph_proposals import (
-    _MANIFEST_DESC,
-    _MODEL_SUPPLIED_FIELDS,
-    _SCHEMA_MANIFEST,
-    _SCHEMA_STATUS,
-    _STATUS_DESC,
-    ProposalSession,
-    graph_proposals_enabled,
-)
+from .graph_proposals import ProposalSession, graph_proposals_enabled
 
 _PROMPT_HEADER = "## Graph-native candidate tools (GHX)"
-_ASK_MORE_PROMPT_HEADER = "## Graph-native candidate tools (GHX) -- ask-more"
 
 # Verbatim per L5 build-report follow-up #1: P-1 (a prior patch) taught the vendored
 # prompt to write manifests/config.yaml by hand; this session must say the opposite
@@ -132,6 +127,22 @@ _INCREMENTAL_DISCIPLINE = (
     "no closing ceremony required."
 )
 
+# F3: IV-9 (harnessx/aegis/gates/structure.py) rejects a candidate whose file_changes
+# include an extension outside its declared bucket's whitelist -- and file_changes is
+# assembled by scanning what the model actually wrote (see _file_changes_for), not by
+# trusting the bucket field, so a mismatched bucket is unrecoverable after the fact.
+_BUCKET_EXTENSION_WARNING = (
+    "Bucket/extension gate (IV-9): bucket=config allows only .yaml/.yml; "
+    "bucket=prompt allows .md/.yaml/.yml; bucket=processor and bucket=tools each "
+    "allow .py/.yaml/.yml. file_changes is assembled by scanning every file you "
+    "actually wrote in this candidate's scratch directory -- you cannot hide a .py "
+    "asset under bucket=config, IV-9 checks by extension against what is really on "
+    "disk. If a candidate legitimately touches more than one bucket's file types, "
+    "pass bucket as a LIST (e.g. [\"prompt\", \"processor\"]) instead of a single "
+    "string. Before finishing, call GraphProposalStatus to run the real structure "
+    "gate against your candidate and catch a bucket/extension mismatch yourself."
+)
+
 
 def _register_tools(cfg, tools) -> None:
     """Register ``tools`` (``@tool``-decorated objects) into ``cfg``'s tool registry.
@@ -169,6 +180,8 @@ def _render_prompt_section(session: ProposalSession) -> str:
         "",
         _METADATA_TRAP_WARNING,
         "",
+        _BUCKET_EXTENSION_WARNING,
+        "",
         _FAILURE_EVIDENCE_REPLACE_WARNING,
         "",
         _ANCHOR_CONTRACT,
@@ -187,130 +200,6 @@ def _render_prompt_section(session: ProposalSession) -> str:
 
 def _append_prompt(cfg, session: ProposalSession) -> None:
     _append_pointer_to_config(cfg, _render_prompt_section(session))
-
-
-def _render_ask_more_prompt_section(candidate_id: str, candidate_path: Path) -> str:
-    lines = [
-        "",
-        "",
-        _ASK_MORE_PROMPT_HEADER,
-        "",
-        f"This ask-more session has ONE tool pair, scoped to candidate {candidate_id}:",
-        "GraphProposalManifest (writes your answer's structured fields to",
-        f"{candidate_path} -- layout is machine-generated, content is yours; the file",
-        "is rewritten in full on every call) and GraphProposalStatus (read-only).",
-        "GraphProposalOpen and GraphProposalEdit do not exist in this session -- graph",
-        "edits are not available for a clarifying answer.",
-        "",
-        _FAILURE_EVIDENCE_REPLACE_WARNING,
-        "",
-        _ANCHOR_CONTRACT,
-        "",
-    ]
-    return "\n".join(lines)
-
-
-def _wire_ask_more(cfg, inputs):
-    """Ask-more subcall wiring: a standalone Manifest/Status pair, single-file scope.
-
-    Does not construct a :class:`ProposalSession` (see module docstring for why) --
-    writes ONLY ``inputs.ask_more_candidate_path``, matching the WriteScope's
-    single-file allowance (``evolver.py:170-171``) exactly, never a companion
-    config.yaml or lineage file the way the normal-mode Manifest tool would.
-    """
-    if inputs.ask_more_candidate_path is None or inputs.ask_more_candidate_id is None:
-        return cfg  # nothing to bind to -- leave the vendored config untouched
-
-    from ..tools.base import tool
-
-    path = Path(inputs.ask_more_candidate_path)
-    bound_cid = inputs.ask_more_candidate_id
-    state: dict = {"fields": {}, "fields_set": set(), "failure_evidence": ""}
-
-    def _render() -> str:
-        fm: dict = {"candidate_id": bound_cid, "ask_more": True}
-        for key in ("capability_evidence", "predicted_impact", "attribution_signature"):
-            if key in state["fields_set"]:
-                fm[key] = state["fields"][key]
-        if "notes" in state["fields"]:
-            fm["notes"] = state["fields"]["notes"]
-        fm_yaml = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False)
-        body_text = state["failure_evidence"].strip() or "(no answer given yet)"
-        return f"---\n{fm_yaml}---\n## Failure Evidence\n\n{body_text}\n"
-
-    async def graph_proposal_manifest(
-        candidate_id: str,
-        capability_evidence: Any = None,
-        predicted_impact: Any = None,
-        failure_evidence: "str | None" = None,
-        attribution_signature: Any = None,
-        notes: "str | None" = None,
-    ) -> dict:
-        if candidate_id != bound_cid:
-            return {
-                "ok": False,
-                "error": f"this ask-more session only has {bound_cid!r} open, not {candidate_id!r}",
-            }
-        updated: list[str] = []
-        if capability_evidence is not None:
-            state["fields"]["capability_evidence"] = capability_evidence
-            state["fields_set"].add("capability_evidence")
-            updated.append("capability_evidence")
-        if predicted_impact is not None:
-            state["fields"]["predicted_impact"] = predicted_impact
-            state["fields_set"].add("predicted_impact")
-            updated.append("predicted_impact")
-        if attribution_signature is not None:
-            state["fields"]["attribution_signature"] = attribution_signature
-            state["fields_set"].add("attribution_signature")
-            updated.append("attribution_signature")
-        if notes is not None:
-            state["fields"]["notes"] = notes
-            updated.append("notes")
-        if failure_evidence is not None:
-            state["failure_evidence"] = failure_evidence
-            state["fields_set"].add("failure_evidence")
-            updated.append("failure_evidence")
-        if not updated:
-            return {
-                "ok": False,
-                "error": (
-                    "no fields given -- pass at least one of capability_evidence/"
-                    "predicted_impact/failure_evidence/attribution_signature/notes"
-                ),
-            }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_render(), encoding="utf-8", newline="\n")
-        return {"ok": True, "candidate_id": bound_cid, "updated_fields": updated, "files": [str(path)]}
-
-    async def graph_proposal_status(candidate_id: str = "") -> dict:
-        missing = [f for f in _MODEL_SUPPLIED_FIELDS if f not in state["fields_set"]]
-        checklist: list[str] = []
-        if not path.exists():
-            checklist.append("no GraphProposalManifest call yet -- nothing written")
-        if missing:
-            checklist.append(f"GraphProposalManifest not yet called for: {', '.join(missing)}")
-        if not checklist:
-            checklist.append("every model-supplied field has been given")
-        return {
-            "ok": True,
-            "candidate_id": bound_cid,
-            "ask_more": True,
-            "file_written": path.exists(),
-            "manifest_missing_fields": missing,
-            "checklist": checklist,
-        }
-
-    manifest_tool = tool(
-        name="GraphProposalManifest", description=_MANIFEST_DESC, input_schema=_SCHEMA_MANIFEST
-    )(graph_proposal_manifest)
-    status_tool = tool(
-        name="GraphProposalStatus", description=_STATUS_DESC, input_schema=_SCHEMA_STATUS
-    )(graph_proposal_status)
-
-    _register_tools(cfg, [manifest_tool, status_tool])
-    _append_pointer_to_config(cfg, _render_ask_more_prompt_section(bound_cid, path))
-    return cfg
 
 
 @contextlib.contextmanager
@@ -334,7 +223,9 @@ def install_graph_proposals():
         if not graph_proposals_enabled():
             return cfg
         if inputs.ask_more_brief_path is not None:
-            return _wire_ask_more(cfg, inputs)
+            # F1: ask-more gets no wiring at all -- see module docstring. cfg is
+            # orig(inputs) untouched: no new tools, no injected prompt text.
+            return cfg
         session = ProposalSession(
             parent_config_path=inputs.current_config_path,
             candidates_dir=inputs.candidates_dir,
