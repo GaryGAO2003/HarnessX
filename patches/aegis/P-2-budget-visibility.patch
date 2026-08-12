@@ -1,0 +1,17 @@
+diff --git a/harnessx/aegis/stages/propose.py b/harnessx/aegis/stages/propose.py
+index 37d7571..655870f 100644
+--- a/harnessx/aegis/stages/propose.py
++++ b/harnessx/aegis/stages/propose.py
+@@ -61,7 +61,11 @@ async def run_stage_2(
+                     f"Round {round_n} Evolver. Produce K candidate manifests + "
+                     f"K applied scratch dirs under {candidates_dir} / {applied_root}. "
+                     f"K is your choice based on evidence (K ≥ 0). Final_output alone "
+-                    f"is discarded — only files written via write_tool survive."
++                    f"is discarded — only files written via write_tool survive. "
++                    f"HARD LIMITS (not visible to you at runtime): 200 tool steps, "
++                    f"${max_cost_usd:.0f} total. Draft every manifest EARLY and "
++                    f"reserve the final ~30 steps for finalizing manifests — an "
++                    f"unsubmitted candidate counts as zero."
+                 ),
+                 max_steps=200,
+                 max_cost_usd=max_cost_usd,

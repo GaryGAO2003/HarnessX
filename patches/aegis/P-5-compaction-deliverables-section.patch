@@ -1,0 +1,16 @@
+diff --git a/harnessx/aegis/agents/evolver.py b/harnessx/aegis/agents/evolver.py
+index ca12bf2..dd825d3 100644
+--- a/harnessx/aegis/agents/evolver.py
++++ b/harnessx/aegis/agents/evolver.py
+@@ -237,7 +237,10 @@ def build_evolver_harness(inputs: EvolverInputs) -> "HarnessConfig":
+                     "1) Decisions\n"
+                     "2) Facts and Constraints\n"
+                     "3) Errors and Unresolved Risks\n"
+-                    "4) Pending Actions\n\n"
++                    "4) Pending Actions\n"
++                    "5) Deliverables status — for EACH candidate under work: "
++                    "manifest written to candidates/? applied config.yaml "
++                    "written? list the exact file paths still missing\n\n"
+                     "Preserve: failure evidence cited, root cause analysis, targeted fix\n"
+                     "description, predicted impact, file changes planned, open questions.\n"
+                     "Discard: repeated status lines and filler.\n\n"

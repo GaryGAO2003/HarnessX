@@ -1,0 +1,18 @@
+diff --git a/harnessx/aegis/templates/evolver.md b/harnessx/aegis/templates/evolver.md
+index a6e2df4..726513b 100644
+--- a/harnessx/aegis/templates/evolver.md
++++ b/harnessx/aegis/templates/evolver.md
+@@ -171,6 +171,13 @@ Pure prompt-bucket candidates (no .py / code asset, just `.md`
+ template changes) are exempt from this loop — the counterfactual gate
+ provides the equivalent smoke check for prompt diffs.
+ 
++**Verification is DONE when, for each candidate, one Level-1 check and
++one Level-2 check have passed.** Do not re-run verification after
++unrelated edits, do not write more than two verify scripts per
++candidate, and do not polish evidence that already passes. Every step
++spent past that point is a step the manifest write-out does not get —
++an over-verified candidate with no manifest ships nothing.
++
+ ## Available to read
+ 
+ - Planner's synthesis: `{{ landscape_path }}`

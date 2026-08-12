@@ -1,0 +1,24 @@
+diff --git a/harnessx/aegis/templates/critic.md b/harnessx/aegis/templates/critic.md
+index 5b1d203..206a969 100644
+--- a/harnessx/aegis/templates/critic.md
++++ b/harnessx/aegis/templates/critic.md
+@@ -154,6 +154,19 @@ evidence_anchors:
+ <Why this verdict. Cite the anchors above. 2-4 short paragraphs.>
+ ```
+ 
++**Anchor contract — a verdict that violates it is DISCARDED WHOLE (your
++accept dies with it, the candidate cannot ship).** `evidence_anchors`
++accepts ONLY these three shapes, one bare path per line:
++`trajectories/<file>#step_N` · `sessions/<file>#step_N` ·
++`digests/<file>` (optional `#section`). No other prefix is legal — in
++particular `applied/…` verify scripts and `meta_sessions/…` paths are
++NOT valid anchors; cite them (with their observed output) in the
++`## Reasoning` body instead. Never append annotations, parentheses, or
++any `: ` (colon+space) inside an anchor line — YAML parses it as a
++nested mapping and the whole verdict fails validation.
++GOOD: `- trajectories/abc123_r0.jsonl#step_5`
++BAD:  `- applied/_verify_proc.py (L1+L2 assertion: GAIA 20->40)`
++
+ **After all verdicts**, `decision.md`:
+ ```
+ ---

@@ -1,0 +1,33 @@
+diff --git a/harnessx/aegis/templates/evolver.md b/harnessx/aegis/templates/evolver.md
+index a6e2df4..735544f 100644
+--- a/harnessx/aegis/templates/evolver.md
++++ b/harnessx/aegis/templates/evolver.md
+@@ -93,8 +93,9 @@ check is enforced by structure gate.
+ **Build → verify → iterate (mandatory for code candidates).** For any
+ candidate that introduces new executable code (new processor class,
+ new `@tool`-decorated function, or a new asset that gets imported at
+-runtime), you MUST complete this loop IN YOUR SESSION before writing
+-the manifest:
++runtime), you MUST complete this loop IN YOUR SESSION before FINALIZING
++the manifest (write the draft manifest FIRST — see "Draft manifests
++EARLY" under "Where to write"):
+ 
+ 1. **Write** the code to your scratch dir.
+ 2. **Verify** by actually running it in this session — not by reasoning
+@@ -196,6 +197,16 @@ supports your candidates.
+ 
+ ## Where to write
+ 
++**Draft manifests EARLY — the manifest is the deliverable.** As soon as a
++candidate direction is chosen, write its manifest skeleton to
++`{{ candidates_dir }}/C-R{{ round }}-<NN>.md` (full frontmatter with
++`capability_evidence: []` placeholders + stubbed body sections) and the
++applied config draft — THEN verify and refine both in place. A drafted
++manifest with thin evidence is reviewable (the Critic can ask-more or
++reject it); an unwritten manifest is a wasted session. NEVER end the
++session with work under `{{ applied_root }}/` that has no manifest in
++`{{ candidates_dir }}/`.
++
+ Per candidate, pick a NN (01, 02, …) and emit:
+ 
+ 1. Manifest at `{{ candidates_dir }}/C-R{{ round }}-<NN>.md`
