@@ -40,6 +40,13 @@ cherry-pick 到 ghx 分支——与 V-D4 同流程。**两臂必须同改**；�
 | V-D7 (P-3) | `P-3-anchor-contract.patch` | `templates/critic.md` | 锚点合同显式化：仅三种前缀、禁 `: `、禁 `applied/`/`meta_sessions/`，GOOD/BAD 例 | 判决格式彩票（双臂已废 ≥6 份） |
 | V-D8 (P-4) | `P-4-verification-done-cap.patch` | `templates/evolver.md` | 每候选一次 L1+L2 通过即"验证完成"，验证脚本 ≤2 | 验证无底洞 |
 | V-D9 (P-5) | `P-5-compaction-deliverables-section.patch` | `agents/evolver.py` | 压缩摘要强制第五节 Deliverables status | 压缩失忆 |
+| V-D10 (P-6) | `P-6-noop-patience-flag.patch` | `run_meta_aegis.py` | `--noop-patience N` 旗标（默认 2 = 官方语义字节级不变；调大即不早停） | 用户裁决 2026-08-12"别早停，一直跑"；官方 patience=2 在判决格式彩票下会截断臂 |
+
+**配套的运行期协议偏离（非 vendored 字节，预先声明）**：当前战役（L0/L2_103x10）
+若任一臂触发官方早停，立即以 `--start-round <N>` 续跑至满 10 轮（新进程
+noop_streak 归零，续跑段代码与原段完全同字节）。这改变的是**删失规则**而非任何
+单轮行为——逐轮配对比较不受影响；论文偏差表记一行"early-stop overridden by
+operator resume (user decision), official patience=2 preserved in code"。
 
 依据：`experiments/docs/EVOLVER-BURNOUT-PROMPT-AUDIT.md`（输入面清点 + 因果链 +
 预期读数）。校验器合同出处：`harnessx/aegis/gates/structure.py:41-61`。

@@ -1,0 +1,35 @@
+diff --git a/recipe/gaia_evolver/run_meta_aegis.py b/recipe/gaia_evolver/run_meta_aegis.py
+index 111a962..629f9a1 100644
+--- a/recipe/gaia_evolver/run_meta_aegis.py
++++ b/recipe/gaia_evolver/run_meta_aegis.py
+@@ -960,8 +960,11 @@ async def run_pilot(args: argparse.Namespace) -> None:
+                 noop_streak,
+             )
+ 
+-            if noop_streak >= 2:
+-                logger.info("EARLY STOP: %d consecutive unchanged configs", noop_streak)
++            if noop_streak >= max(1, args.noop_patience):
++                logger.info(
++                    "EARLY STOP: %d consecutive unchanged configs "
++                    "(patience=%d)", noop_streak, args.noop_patience,
++                )
+                 early_stopped = True
+                 break
+ 
+@@ -1015,6 +1018,16 @@ def _build_argparser() -> argparse.ArgumentParser:
+         ),
+     )
+     p.add_argument("--clean", action="store_true")
++    p.add_argument(
++        "--noop-patience",
++        type=int,
++        default=2,
++        help=(
++            "Consecutive unchanged-config (noop) rounds before early stop. "
++            "Official protocol default: 2. Set high (e.g. 99) to run every "
++            "round regardless of noop streaks."
++        ),
++    )
+     p.add_argument(
+         "--start-round",
+         type=int,
