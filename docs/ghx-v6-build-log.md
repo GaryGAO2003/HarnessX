@@ -1058,3 +1058,23 @@ R2 Evolver 重跑收敛（120 步 $14.6 → 3 候选真落盘），Critic ship�
 **病理命名**：提交末置 + 验证无底洞 + 压缩失忆。三个都是协议/表示层问题，
 不是步帽大小问题——步帽 300 只是把无底洞挖深。真解在 (a) 提交先行的提示协议、
 (b) M4c、(c) L5/E3：图编辑即交付物，根除"最后一步文件仪式"。CH5 标本。
+
+### Prompt 输入面审计（用户令：优化 prompt 降烧穿率）
+
+全输入面逐件清点 + 因果链 + 五条改法落成
+`experiments/docs/EVOLVER-BURNOUT-PROMPT-AUDIT.md`。三个实锤：
+
+1. **提交末置是明令**——evolver.md:96-97 "you MUST complete this loop … **before
+   writing the manifest**"。模板亲手规定了验证在前、提交在后。
+2. **预算对模型完全不可见**——max_steps=200 只在 BaseTask 里
+   （stages/propose.py:66），无 countdown 处理器，任务消息不提预算。
+   200 步里它没有任何"该收尾"的信号。
+3. **压缩假设失效 14 倍**——agents/evolver.py:228 注释按 600k tok 设计
+   （"至多压 2 次"），v4-pro 实际 8.77M tok，压了 ~4 次（5 段），
+   "还没提交"状态无保单。
+
+改法 P-1 提交先行（draft-manifest-early，改 96-97 行语义）、P-2 预算可见性
+（任务消息一句 + 可选 step_countdown）、P-3 锚点格式防线（critic.md，顺手治
+判决彩票）、P-4 验证上限（每候选一次 L1+L2 即完成）、P-5 压缩摘要加
+"Deliverables status" 第五节。边界：Level-2 证据标准不降、步帽不动、早停
+耐心不动。部署=两臂同改、L4 发车前生效、偏离台账逐条记（与 serper 同流程）。
