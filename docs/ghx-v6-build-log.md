@@ -1174,3 +1174,28 @@ meta 半成品（截断的 digester/graph_evidence 残件），最终引证审�
   匹配（登记未修）；ask-more 工具对为独立实现（vendored 侧只读 final_output，
   scratch 形状非承重）；L5 一档捆绑四机制（载体可靠·类型合法·交互修复·增量持久），
   内部不可分性入 CH7；工具摩擦对 K_t 的影响方向未知，过程指标见分晓。
+
+## L5 落地后二轮审计 + 一揽子修复（0c7e04e）
+
+首手全量审计（两模块整读 + vendored 断言逐条回验），9 项发现全修：
+
+- **F1（必修·翻案）**：ask-more 接线拆除。vendored 契约实证：`evolver.md`
+  ask-more 段 "answer in `final_output`"、`judge.py:30` 只取 final_output、
+  scratch 文件四个解析点无一回读——设计时"手改 .md 会带回载体死"的担忧
+  **不成立**（该文件根本不被读），而装上的工具反而会把模型答案引流进死文件、
+  饿死真通道、系统性偏压 L5 臂。ask-more 现回归 vendored 原生零接线。
+- **F2（应修）**：`_edit`/`_manifest` 写失败回滚——先暂存后推进，
+  config+manifest+lineage 三写一体成败，失败内存+磁盘同回滚，失败返回携带
+  编辑前 genotype（兑现工具契约"On failure: genotype UNCHANGED"）；jsonl
+  只在三写成功后追加，账本侧独立故障补偿 rollback 行。
+- **F3**：IV-9 桶×扩展名白名单警告进注入提示 + Open schema（机器扫描资产
+  藏不住，跨桶必须声明 bucket 列表）。**F4**：记账文件排除改 scratch 根
+  相对路径（子目录同名资产不再被错排除）。**F9**：`_open` 局部写失败清理，
+  cid 可重开。**F5/F6**：session_report 文档对齐、派生签名 replay 对齐注释。
+- **F7（更正前条）**：上一条目"failure_evidence 裸 `---` 行截断 frontmatter"
+  经复核**不成立**——body 是正则第二组（贪婪到尾），首个分隔符由机器发出即
+  闭合；fm 侧受 YAML emitter 文档标记规避保护。登记撤销。
+- **F6 前向提醒仍在**：replay U 落地后，processor_invocation 派生签名的
+  可数性须与 U 节点命名对齐，否则第六门误杀诚实候选（lineage derived=true
+  可分段）。
+- 套件：ghx 83 + recipe 24 = 107 全绿；vendored 零字节。
