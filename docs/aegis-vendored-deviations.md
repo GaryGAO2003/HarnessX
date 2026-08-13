@@ -37,7 +37,7 @@ cherry-pick 到 ghx 分支——与 V-D4 同流程。**两臂必须同改**；�
 |---|---|---|---|---|
 | V-D5 (P-1) | `P-1-draft-manifest-early.patch` | `templates/evolver.md` | "before writing the manifest"→"before FINALIZING" + Draft-manifests-EARLY 段 | 提交末置（烧穿主因） |
 | V-D6 (P-2) | `P-2-budget-visibility.patch` | `stages/propose.py` | 任务消息写明 200 步/$上限，留 30 步收尾 | 无截止感 |
-| V-D7 (P-3) | `P-3-anchor-contract.patch` | `templates/critic.md` | 锚点合同显式化：仅三种前缀、禁 `: `、禁 `applied/`/`meta_sessions/`，GOOD/BAD 例 | 判决格式彩票（双臂已废 ≥6 份） |
+| V-D7 (P-3) | `P-3-anchor-contract.patch` | `templates/critic.md` | 锚点合同显式化：仅三种前缀、禁 `: `、禁 `applied/`/`meta_sessions/`，GOOD/BAD 例 | **动机已更正**：锚点校验不影响采纳（`judge.py:85-94` 显式 don't hard-fail，`broken_verdict_count` 全库无读取方），故本条治的是**审计可追溯性**，不是救 ship。升级梯 ②③ 无须解锁 |
 | V-D8 (P-4) | `P-4-verification-done-cap.patch` | `templates/evolver.md` | 每候选一次 L1+L2 通过即"验证完成"，验证脚本 ≤2 | 验证无底洞 |
 | V-D9 (P-5) | `P-5-compaction-deliverables-section.patch` | `agents/evolver.py` | 压缩摘要强制第五节 Deliverables status | 压缩失忆 |
 | V-D10 (P-6) | `P-6-noop-patience-flag.patch` | `run_meta_aegis.py` | `--noop-patience N` 旗标（默认 2 = 官方语义字节级不变；调大即不早停） | 用户裁决 2026-08-12"别早停，一直跑"；官方 patience=2 在判决格式彩票下会截断臂 |

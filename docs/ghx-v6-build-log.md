@@ -1438,3 +1438,47 @@ P-1/P-5 施工后此对照可作前后基准。
   ④ 跨 firing 步链边（仅兜底，单做无区分度）。
 - **本轮不热修**：中途改证据生成会把 L2 劈成两个臂。随 L4 发车门统一上车。
   空锥臂保留为对照——它给出"注入了但没信息"的下界。
+
+## 更正：判决锚点校验不影响采纳——"格式彩票杀死自愈的手"这条是错的
+
+本日志此前多处把 Critic 判决的锚点校验失败当成"判决被作废、候选因此没上车"，
+并据此把 L0 的早停归因于格式彩票（"格式彩票杀死了官方臂自愈的那只手"）。
+**该因果结论错误，此处更正。**
+
+**代码实证**（`harnessx/aegis/stages/judge.py:85-94`，原注释）：
+
+```python
+# IV-4: validate each Critic verdict has citation anchors. Don't hard-fail
+# (the ship decision is already made), but surface broken verdicts so the
+# orchestrator/audit records them.
+```
+
+校验只发一条 `warning` 并把数量塞进返回值 `broken_verdict_count`
+（judge.py:99/107/111）。全库检索：**该字段无任何读取方**；
+`validate_critic_verdict` 也只有 judge.py:91 一个调用点（其余全在测试里）。
+采纳与否完全由 Critic 自己写的 `decision.md` 决定，与锚点格式无关。
+
+**现场反证（今晨 07:28）**：L2 R8 四份判决 V-C-R8-01..04 **全部**校验失败
+（`applied/_probe/diff2.py`、`harnessx/core/runloop.py#L626-644`、
+`data/ship_outcomes.json#C-R3-01`），该轮照样 `decision_type: ship`，
+采纳 C-R8-01 + C-R8-02 + C-R8-03。四废四上车。
+
+**L0 早停的真实因果**（重查 decision.md 得）：
+- R6→R7 meta：Evolver 零候选（烧穿）→ noop（streak 1）
+- R7→R8 meta：Evolver 出 2 候选，**Critic 以实质技术理由逐条否决**
+  （C-R8-01 的 ContentDeref 触发不到 spill 路径，因为 `runloop.py:642-648`
+  只用 `result` 拼工具消息；C-R8-02 的 StepCountdown 读 `task.max_steps=20`
+  而真实预算是 `State.max_steps=40`）→ noop（streak 2）→ 早停
+
+两次 noop 都不是格式造成的。Critic 在这两处判得是对的——尤其 C-R8-02 那条，
+它指出倒计时读错了预算源，这是个真 bug。
+
+**对 P-3 的影响（须在发车门重新过目）**：P-3 的登记动机
+"判决格式彩票（双臂已废 ≥6 份）"前提不成立——那些判决在运行上没有被废，
+只是审计线索脏了。P-3 仍可上车（用户 08-13 已批），但**价值定位须下调**：
+从"救回被格式杀掉的 ship"改为"审计可追溯性"。P-3 升级梯 ②③（sanitizer、
+回喂重发）在新认知下不必解锁——它们要救的东西本来没死。已在偏离台账改写该行。
+
+**反倒露出一条真问题**：IV-4 是一道**只写不读的门**——校验跑了、日志发了、
+计数返回了，没有任何消费者。这与元代理研究里记录的"灭因账只写不读"是同一种病，
+出现在官方底盘自己身上，且有代码级实锤。这条进论文（开环诊断一节的第二个实例）。
