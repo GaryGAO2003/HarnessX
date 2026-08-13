@@ -800,6 +800,64 @@ class BashShieldProcessor(MultiHookProcessor):
 补丁承重性已验：拒绝来自 `layer: write`，编辑时 S3 单独抓不住这个形状
 （探针实测，非推断）。套件 ghx+recipe 114、aegis 274、钉绿、零 vendored 字节。
 
+---
+
+## L5 6×3 v3：链路走通（08-13 10:45→11:36）
+
+| | R0 | R1 | R2 | 落地 |
+|---|---|---|---|---|
+| v1 | 50.0% | 50.0% ok | 50.0% crashed | 3 候选贴错桶，**0 落地** |
+| v2 | 50.0% | 33.3% ok | 50.0% crashed | 1 落地，**毒死父配置** |
+| **v3** | 50.0% | **66.7%** ok | 50.0% noop | **2 候选同轮共存，都落地**，父配置健康 |
+
+### R1 是干净的一轮
+
+```
+R1/config.yaml = R0
+  + StepCountdownProcessor(escalate_within=2)      ← C-R1-01, processor 桶
+  + template_path → C-R1-02/gaia_agent_winprompt.md ← C-R1-02, prompt 桶
+```
+
+**正是 v1 里互相回滚的那个组合。** 派生把 C-R1-02 判成 `prompt` 而非 `config`，
+`_apply_config` 不上工，P-7 的碰撞自然避开——不靠改 vendored 字节。
+五门全绿、`critic_failed: false`、preflight 读得回来。
+
+### R2 的 noop：`.pyc` 杀候选（已修 `76ac4b8`）
+
+模型写 `write_fallback.py` 并 **import** 它测试 → CPython 掉
+`__pycache__/write_fallback.cpython-312.pyc` → `_file_changes_for` 全树扫描把它
+申报 → IV-9 白名单无 `.pyc` → 结构门拒 → canonicalize/replay 跳过 → 整轮 noop。
+
+**是我自己的提示词教出来的**：`_BUCKET_EXTENSION_WARNING` 告诉模型 processor 桶下
+`.py` 助手合法，它照做，一 import 就死。vendored 的 `__pycache__` 排除
+（`structure.py:180`）只匹配**以该名结尾**的路径即目录本身，管不到目录内的文件。
+现修为过滤 `.pyc/.pyo/.pyd` 与四类缓存目录，真资产不动（测试双向钉住，并驱动真门）。
+
+### 这张床的定论：只验机制，不验增益
+
+| 对照 | 同一份配置？ | 两次读数 |
+|---|---|---|
+| v2 R1 vs R2 | 是（R1 evolve crashed） | 33.3% / 50.0% |
+| v3 R1 vs R2 | 是（R1 evolve noop） | 66.7% / 50.0% |
+
+**同配置跨轮波动 ±1 题 = ±16.7pp**，大于任何真实干预效应。**v3 的 66.7% 不构成
+"L5 有效"的证据。** 6 题床的用途到此为止：它已证明落地链路通了。读数须上 103 床。
+
+### 威胁节必写：最大单项增益是"修床"不是"改图"
+
+C-R1-02 的 winprompt 反记忆规则**一字未动**（"ALWAYS search the web BEFORE
+answering. Do NOT answer from memory" 原样保留），它改的是 **Windows 环境错配**：
+官方提示词教 agent 用 `python3`/`curl`/`wget`/`unzip`/`pdftotext`/`/tmp`/heredoc，
+本机一个都没有，每条都白烧一步。这是 memory 里"三重污染"第三项（Windows 摩擦）
+**以进化产物的形式冒了出来**。换 Linux 床该增益直接消失——属修床，不属图编辑能力。
+
+### 机制收敛：StepCountdownProcessor 第三次独立出现
+
+v1 C-R1-02、L0 官方臂 R7 的 C-R8-02（死于锚点格式）、v3 C-R1-01。三次中两次发生在
+**无图证据**的官方臂条件下。它正是 08-13 夜按文献裁掉的 P-2b（逐步倒计时）。
+手写 YAML 路径上模型看不见未接线的处理器；图表面让它看见了——但官方臂也独立摸到了，
+所以"可见性"这条因果还需要 103 床的配对证据。
+
 **取全锥（控制+数据），不取纯数据锥——理由来自 prompt 不是尺寸。** Digester 要把失败归因到**组件**，分类里包含 `tool_output_dropped` 这种——而「工具结果被丢弃」**恰恰是一条数据边的缺席**（工具结果进 `raw_messages` 不进槽位）。纯数据锥会**系统性抹掉这整类失败**。全锥保留了组件归因需要的控制骨架。
 
 **加法接入，走哪条路要记账不要推断。** 没有 U 时今天的路径原样跑，且**默认如此**。这个仓已经被「从配置推导而非从执行推导的审计字段」咬过一次（`4e0810f`），不重蹈。
