@@ -601,6 +601,103 @@ graph 路径 prompt    2,174 chars    （其中序列化锥本身 792）
 
 **锚点取运行的终末调用。** Digester 手上关于失败的信息很薄——一个 outcome、一个 level 分类、一条轨迹路径，**没有牵连组件**；而 U 只记「工具跑过」不记「成没成功」。没有更锋利的东西可锚。终末调用产生了最终状态，它的祖先锥就是「所有可能塑造了这次运行结局的东西」。空 U 无锚，按原因回退。
 
+---
+
+## L5 首次完整 6×3：候选真上船，但 compose 把内容吃掉了（08-13 05:46→07:18）
+
+`L5_holdout6x3`，holdout6 × 3 轮，`deepseek-v4-flash` / `deepseek-v4-pro`，exit 0。
+
+### 读数
+
+| 轮 | pass | config_hash | evolve_status | 成本 |
+|---|---|---|---|---|
+| R0 | 3/6 50.0% | `c3ddfb29eddbe932` | baseline | $5.44 |
+| R1 | 3/6 50.0% | `1ecc19cdd919e6ad` | ok | $3.78 |
+| R2 | 3/6 50.0% | `422688db90eadceb` | **crashed** | $3.11 |
+
+Δ=+0.0pp。L1 2/2、L2 1/3、L3 0/1，三轮完全不动。
+
+### L5 表面本身：全部达标
+
+- **零载体死**：三条 propose 的 `reason` 全空（手写 frontmatter 解析失败会写进这个字段）。manifest 由 `GraphProposalManifest` 机器生成。
+- **五门全绿 ×3**：`structure/novelty/canonicalize/counterfactual/replay` 对 C-R1-01 / C-R1-02 / C-R2-01 全 true，`reasons` 空。
+- **判决零废件**：`critic_failed: false` ×2，`decision_type: ship` ×2。**本项目第一次连续两轮采纳**（对比 e2_A 十五轮零采纳、L2 首采纳靠再提案）。
+- 候选配置本身正确：`applied/C-R1-02/config.yaml` 里 `EnvironmentContextInjector` /
+  `ToolFailureGuard` / `StepCountdownProcessor` 三个节点都在，写通的 reload+genotype
+  复核过了。
+
+### 但 merged.yaml ≡ 基线
+
+`diff R0/config.yaml R1/applied/merged.yaml` 只有两处：三行注释头（重序列化丢弃）+
+LLMJudge 节点上 9 行 canonicalize 展开的元数据（`_hooks_`/`_order_`/…）。
+**语义零变化。** R2/config.yaml = R1/merged.yaml（仅 `base_dir` 随轮改写）。
+三个候选"上船"了，实际跑的是父配置。
+
+### 根因：两条，一 L5 一 vendored
+
+**(1) bucket 与编辑类型不匹配 —— L5 侧缺口（我的）。**
+`compose.py:173` 按 bucket 分派应用器，每个只懂一种改法：
+
+| bucket | 应用器 | 能表达什么 |
+|---|---|---|
+| `prompt` | `_apply_prompt` | 只搬 SystemPromptProcessor 的 `template_path` |
+| `config` | `_apply_config` | **只改已存在 `_target_` 的 kwargs，加不了新处理器**（`compose.py:129-130` 直接 continue） |
+| `processor` | `_apply_processor` | 按 `_target_` 增删 |
+| `tools` | `_apply_tools` | 只动 `tool_registry.custom` |
+
+C-R1-02 做了三个 `insert_node`，却声明 `bucket: config` → `_apply_config` 把三个新
+处理器全部静默丢弃。**GraphProposal 工具允许模型声明任意 bucket，不校验该 bucket 的
+应用器是否表达得了它实际做的编辑。** 另外 `change_dependency`（改边）**在四个应用器
+里没有任何一个能表达**——L5 暴露了一个 compose 层不存在的操作。
+
+**(2) `_apply_config` 拿被改过的 base 做差，不是冻结的 parent —— vendored bug。**
+`compose.py:116` 是 `del parent`。C-R1-02 的配置里 SystemPromptProcessor 仍指向原始
+`benchmarks/gaia/prompts/gaia_agent.md`（它没碰 prompt），而此时 base 已被
+`_apply_prompt` 换成 C-R1-01 的 scratch 路径 → 两者不等 → 整个 `system_builder`
+子字典被覆盖回去。**config 桶候选静默回滚了 prompt 桶候选的改动。**
+`compose.py:206-211` 专门冻了 `parent` 快照就是为了防这个，`_apply_config` 把它扔了。
+实证：`merged.yaml` 的 `template_path` = 原始 benchmarks 路径。
+**这条与 L5 无关，官方臂任何 config+其他桶的多采纳轮都会中。**
+
+### 那道守卫为什么只拦住了 R2
+
+`orchestrator.py:81 _assert_merged_differs_from_base` 正是防"ship 空转"的，它比对
+`_strip_volatile_keys` 后的 base 与 merged（只剥 `tracer.base_dir`/`session_id`）。
+
+- **R1 漏网**：`_apply_config` 逐 kwarg 把 C-R1-02 那份**已 canonicalize** 的
+  LLMJudge 节点抄进 base，带进 9 行元数据 → base ≠ merged → 守卫放行。
+  **守卫被 canonicalize 噪声满足了，不是被真改动满足的。** L5 放大了这条：写通
+  发出的就是 canonicalize 过的 YAML。
+- **R2 命中**：base 此时已含那批元数据，compose 再无新噪声可加 → 完全相等 →
+  `ShipNotLandedError` → `evolve_status: crashed`。守卫是诚实的，只是晚了一轮。
+
+### 修法
+
+- **L5 侧（我的代码，不碰 vendored，不影响在飞双臂）**：`GraphProposalManifest` 改为
+  **从实际编辑类型推导 bucket**，不再让模型自填——insert/remove/swap → `processor`；
+  replace_same_group 仅改 kwargs → `config`；replace_same_group 命中
+  SystemPromptProcessor 且换 `template_path` → `prompt`；`change_dependency` 在
+  `GraphProposalEdit` 处直接拒绝（compose 无法承载）。C-R1-02 若声明 `processor`，
+  `_apply_processor` 会真把三个节点加进去，且它**用了冻结 parent**，顺带不会回滚
+  C-R1-01 的 prompt。两个症状一并解决。
+- **vendored 侧（记为 P-7，押到发车门）**：`_apply_config` 应对 parent 做差（只搬
+  candidate≠parent 的 kwargs），而非对 base 做差。附带把
+  `_strip_volatile_keys` 扩展到剥 canonicalize 元数据，让守卫不再被噪声满足。
+  **两臂同改，在飞不追溯。**
+
+### 顺带的两条素材
+
+- **Evolver 自己在图上翻出了 P-2b。** C-R1-02 接的 `StepCountdownProcessor(escalate_within=2)`
+  就是昨夜裁掉的逐步倒计时；理由写的是"全部失败都恰好 budget_exceeded 于 step 20，
+  无一吐出 FINAL ANSWER"。与 L0 R7 那份被锚点格式杀掉的 C-R8-02（同样接
+  StepCountdownProcessor）独立同归。**手写 YAML 那条路上模型看不见这些未接线的处理器；
+  图表面让它看见了。**
+- **自报证据的可审计缺口。** C-R1-02 的 `capability_evidence` 称跑了
+  `applied/C-R1-02/_verify.py` 得 canonicalize OK。会话记录里 Write→sed→运行链完整，
+  `ALL C-R1-02 CHECKS PASSED` 出现 7 次，**是真的**；但该文件最终不在盘上（大概率模型
+  依 bucket×扩展名警告自清，config 桶只许 `.yaml`）。结果：证据在会话日志里可查，在
+  applied 产物里查不到。正是 P-1 那条"capability_evidence 自报永不单独承重"的活标本。
+
 **取全锥（控制+数据），不取纯数据锥——理由来自 prompt 不是尺寸。** Digester 要把失败归因到**组件**，分类里包含 `tool_output_dropped` 这种——而「工具结果被丢弃」**恰恰是一条数据边的缺席**（工具结果进 `raw_messages` 不进槽位）。纯数据锥会**系统性抹掉这整类失败**。全锥保留了组件归因需要的控制骨架。
 
 **加法接入，走哪条路要记账不要推断。** 没有 U 时今天的路径原样跑，且**默认如此**。这个仓已经被「从配置推导而非从执行推导的审计字段」咬过一次（`4e0810f`），不重蹈。
@@ -1319,3 +1416,25 @@ C-R8-01..04 在 07:05–07:08 全部落盘**，applied 目录齐全，step 190 �
 在手。这是本战役首次"多候选 + 提交不末置"的 Evolver 会话——与 R0→R1 那次
 candidates 全空的烧穿形成同臂对照。样本 n=1，只记现象不作因果主张；
 P-1/P-5 施工后此对照可作前后基准。
+
+## 头号收官结论：L2 的因果锥在结构上是空的（07:3x）
+
+详见 `experiments/docs/GHX-L2-EMPTY-CONE-ROOT-CAUSE.md`。摘要：
+
+- **现象**：L2 各轮 160 份 `graph_evidence/cones/*.md` 全部退化——每份恰好是末步
+  一次 `task_end` 派发的 8–9 个处理器调用，"要读哪些步"恒为 1 个数字，方差为零。
+  `facts.md` 的跨任务共享节点因此退化成"全部处理器 × 全部失败任务"满矩阵。
+- **根因（两条独立事实的合取）**：
+  ① `unfold.py:204-210` 明写 control 边不跨 firing 边界 → U 是 ~57 条断链；
+  ② 实测 412 份 U 抽样 12 份，`observed_data` 恒 0、slot 访问恒 0
+  （GAIA 栈的真实数据流走 messages，不走 slot 字典）。
+  锚点取 `terminal_node`（最大 ordinal，通常 OTelProcessor）→ 反向 BFS 无路可回。
+  `causal.py`/`evidence_files.py` 各自无 bug，是锚点落在了没有过去的边集上。
+- **后果**：注入管线可复核（R8 记 33 条注入、文件与指针都到位），但载荷不含
+  "哪一步/哪个工具/哪次响应导致失败"。**L2−L0 的差值不得解释为图证据的效果**；
+  真正的 L2 实验尚未做过。L1 的三哈希身份证明不受影响（那证的是记录不改行为）。
+- **修法排序**：① 数据面换成 message 到达定值（治本，也是"图运行时 vs 日志"的
+  实质增量）② 锚点改选到产出最终答案的调用 ③ 对比锥（失败锥减通过锥）
+  ④ 跨 firing 步链边（仅兜底，单做无区分度）。
+- **本轮不热修**：中途改证据生成会把 L2 劈成两个臂。随 L4 发车门统一上车。
+  空锥臂保留为对照——它给出"注入了但没信息"的下界。
