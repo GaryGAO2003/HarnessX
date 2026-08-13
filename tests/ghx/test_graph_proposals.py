@@ -602,6 +602,38 @@ async def test_write_verify_rejects_a_config_it_could_not_read_back(tmp_path: Pa
     assert reopened._parent_hashes["genotype"]
 
 
+async def test_pycache_from_running_a_helper_does_not_fail_iv9(tmp_path: Path):
+    """Regression for L5_holdout6x3_v3 R2 (no-op'd a whole round).
+
+    The injected prompt tells the model a .py helper is legal under a processor
+    bucket. Importing that helper to test it makes CPython drop a .pyc beside it,
+    and declaring the .pyc in file_changes fails IV-9 -- no bucket whitelists it.
+    The vendored gate's own guard only skips the __pycache__ *directory*, so the
+    file inside it reaches the extension check.
+    """
+    session = _make_session(tmp_path, round_n=7)
+    res = await _open_and_insert(session)
+    assert res["ok"] is True, res
+    candidate = session._candidates["C-R7-01"]
+    scratch = candidate.config_path.parent
+
+    _write(scratch / "write_fallback.py", "VALUE = 1\n")
+    (scratch / "__pycache__").mkdir(exist_ok=True)
+    _write(scratch / "__pycache__" / "write_fallback.cpython-312.pyc", "\x00fake bytecode")
+    _write(scratch / "sidecar.yaml", "note: authored asset\n")
+
+    declared = [c["path"] for c in session._file_changes_for(candidate)]
+    assert not any(p.endswith(".pyc") for p in declared), declared
+    # Not over-filtered: both genuinely-authored assets still get declared.
+    assert any(p.endswith("write_fallback.py") for p in declared), declared
+    assert any(p.endswith("sidecar.yaml") for p in declared), declared
+
+    fm = session._build_frontmatter(candidate)
+    assert fm["bucket"] == "processor"
+    gate = validate_candidate_manifest(fm, session._build_body(candidate))
+    assert "IV-9" not in (gate.reason or ""), gate.reason
+
+
 async def test_insert_node_derives_processor_bucket_overriding_declared_config(tmp_path: Path):
     session = _make_session(tmp_path, round_n=7)
     res = await _open_and_insert(session)

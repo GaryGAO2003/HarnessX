@@ -100,6 +100,26 @@ _BOOKKEEPING_NAMES = frozenset({
     "config.yaml", "graph_edits.jsonl", "graph_lineage.json", "graph_lineage.md",
 })
 
+# Interpreter droppings, not authored assets. The workflow actively produces these:
+# the injected prompt tells the model a .py helper is legal, and the moment it
+# *imports* one to test it, CPython writes __pycache__/<mod>.cpython-3XX.pyc beside
+# it. Declaring that .pyc in file_changes fails IV-9 (no bucket whitelists .pyc) and
+# kills an otherwise-good candidate at the structure gate -- which is exactly what
+# no-op'd L5_holdout6x3_v3 R2. The vendored gate's own guard only skips paths ENDING
+# in "__pycache__" (structure.py:180), i.e. the directory, never the files inside it.
+_ARTEFACT_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+_ARTEFACT_SUFFIXES = (".pyc", ".pyo", ".pyd")
+
+
+def _is_build_artefact(path: Path, scratch_dir: Path) -> bool:
+    if path.suffix in _ARTEFACT_SUFFIXES:
+        return True
+    try:
+        parts = path.relative_to(scratch_dir).parts[:-1]
+    except ValueError:
+        parts = path.parts[:-1]
+    return any(p in _ARTEFACT_DIRS for p in parts)
+
 _PREDICTED_IMPACT_KEYS = (
     "tasks_will_unlock", "tasks_will_stabilize", "tasks_at_risk", "tasks_will_pass",
 )
@@ -1057,6 +1077,9 @@ class ProposalSession:
                 if p.parent == scratch_dir and p.name in _BOOKKEEPING_NAMES:
                     continue  # our own ledger files at the scratch ROOT only -- a
                     # same-named file in a model-authored subdirectory is a real asset
+                if _is_build_artefact(p, scratch_dir):
+                    continue  # see _ARTEFACT_DIRS: byproducts of running the model's
+                    # own helper, not authored assets, and fatal to IV-9 if declared
                 changes.append({
                     "path": str(p), "action": "create", "diff_summary": "model-authored asset file",
                 })
