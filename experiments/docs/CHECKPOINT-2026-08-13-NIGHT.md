@@ -23,9 +23,14 @@ L2 ghx PID 对，垫片成对）——按台账"在飞不追溯"铁律（vendore
   点火 `--ghx-level 5 --tasks holdout6.json --num-rounds 3 --max-tasks 0
   --search-backend serper --run-tag L5_holdout6x3`；12h 无恢复放弃。
   日志：`recipe/gaia_evolver/runs/L5_holdout6x3.launch.log`。
-- **端点故障未解**（就寝时状态）：proxy /models 200，但 deepseek 模型组无健康
-  部署（gpt-4o 等亦曾探得全挂）——**在飞战役的 rollout 同样在撞死**，代理进程
-  未动，留晨间裁。
+- ~~端点故障未解~~ **【08-13 晨更正：这是误诊，根因是代理用错模型名】**
+  `deepseek/deepseek-chat`（抄自本文档旧版）在本机 proxy 无健康部署；战役实际
+  用 `deepseek-v4-flash`/`deepseek-v4-pro`，两者一直正常。**"在飞战役 rollout
+  也在撞死"这句是错的**——战役全程未受影响（L2 已到 R7、L0 已按续跑协议
+  `--start-round 8` 重启）。夜班的 L5 smoke rollout 腿空转与哨兵 29 次白探
+  （6×3 从未点火，损失约 5 小时）全部由此错误造成。
+  已修：BASELINE-L0-STATUS.md 模型名节 + 示例命令；6×3 已用正确模型重发。
+  **教训（进运维红线）：点火前必须先探针目标模型名，不得从文档抄了就跑。**
 
 ## L5 状态（本会话主线，已收口）
 

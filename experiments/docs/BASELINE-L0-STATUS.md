@@ -82,7 +82,12 @@ OPENAI_API_KEY=<litellm key>            # LITELLM_API_KEY 亦可
 SERPER_API_KEY=...                       # 任务 harness 的 WebSearch
 ```
 
-模型名以端点认的为准：LiteLLM proxy 常用 `deepseek/deepseek-chat`；直连 DS 用 `deepseek-chat` / `deepseek-reasoner`（非 anthropic/ 前缀的名字原样透传）。
+**⚠ 模型名（2026-08-13 实测更正，踩坑一次损失一夜）**：本机 LiteLLM proxy 上
+`deepseek/deepseek-chat` **无健康部署**（报 "no healthy deployments"，且 proxy
+`/models` 仍返回 200，故障只在 chat/completions 才暴露）。当前在飞战役与所有
+新跑一律用 **`--model deepseek-v4-flash --meta-model deepseek-v4-pro`**（两者
+实测可用）。直连 DS 才用 `deepseek-chat` / `deepseek-reasoner`。点火前先探针：
+`curl -s -H "Authorization: Bearer $KEY" -d '{"model":"deepseek-v4-flash",...}' $BASE/chat/completions`。
 
 **L0 基线（Windows PowerShell；`PYTHONUTF8=1` 必须，cp936 环境防编码炸）**：
 
@@ -92,7 +97,7 @@ python recipe/gaia_evolver/run_meta_aegis_ghx.py `
   --ghx-level 0 `
   --tasks recipe/gaia_evolver/data/holdout6.json `
   --num-rounds 3 --max-tasks 0 `
-  --model deepseek/deepseek-chat `
+  --model deepseek-v4-flash --meta-model deepseek-v4-pro `
   --run-tag L0_official_baseline
 ```
 
