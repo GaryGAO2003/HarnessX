@@ -535,6 +535,26 @@ class _InsertProbe(MultiHookProcessor):
 _INSERT_TARGET = "tests.ghx.test_graph_proposals._InsertProbe"
 
 
+class _BareEventFieldProbe(MultiHookProcessor):
+    """Reproduces the model-authored BashShieldProcessor from L5_holdout6x3_v2 R1.
+
+    ``_writes_event_fields`` names bare event fields instead of ``EventClass.field``.
+    The Evolver's node_spec never mentions them -- canonicalize lifts them off the
+    class -- so edit-time S3 has nothing to reject, and the genotype hash does not
+    cover them either. Only reading the persisted file back catches it.
+    """
+
+    _order = 5
+    _singleton_group = "bare_field_sg"
+    _writes_event_fields = ("tool_input", "approved", "synthetic_result")
+
+    async def on_before_tool(self, event):
+        yield event
+
+
+_BARE_FIELD_TARGET = "tests.ghx.test_graph_proposals._BareEventFieldProbe"
+
+
 async def _open_and_insert(session: ProposalSession) -> dict:
     tools = _tools(session)
     await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="config")
@@ -547,6 +567,39 @@ async def _open_and_insert(session: ProposalSession) -> dict:
     return await tools["GraphProposalEdit"].fn(
         candidate_id="C-R7-01", edits=edits, reason="wire an unshipped processor"
     )
+
+
+async def test_write_verify_rejects_a_config_it_could_not_read_back(tmp_path: Path):
+    """Anything we write must pass the preflight we demand of anything we read.
+
+    Regression for L5_holdout6x3_v2 R1: the node shipped, ran a full round, and
+    then killed the next Evolver's ProposalSession at preflight -- the write path
+    only compared genotype hashes, which do not cover event-field metadata.
+    """
+    session = _make_session(tmp_path, round_n=7)
+    tools = _tools(session)
+    await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="processor")
+    before = genotype_hash(session._candidates["C-R7-01"].snapshot)
+
+    res = await tools["GraphProposalEdit"].fn(
+        candidate_id="C-R7-01",
+        edits=[{"edit_type": "insert_node", "target_node_id": "proc:__bare_field_probe",
+                "node_spec": {"_target_": _BARE_FIELD_TARGET, "_hook_": "*",
+                              "_singleton_group_": "bare_field_sg", "_order_": 5}}],
+        reason="wire a model-authored processor with bare event-field names",
+    )
+
+    assert res["ok"] is False, res
+    blob = json.dumps(res)
+    assert "S0-S4 preflight" in blob or "bad_event_field" in blob, res
+    # Rejected while the model can still fix it: nothing advanced, nothing on disk.
+    assert genotype_hash(session._candidates["C-R7-01"].snapshot) == before
+    assert not (session.applied_root / "C-R7-01" / "graph_edits.jsonl").exists()
+
+    # And the parent stays loadable -- the whole point is that the next session's
+    # preflight is not poisoned by what this one wrote.
+    reopened = _make_session(tmp_path, round_n=7)
+    assert reopened._parent_hashes["genotype"]
 
 
 async def test_insert_node_derives_processor_bucket_overriding_declared_config(tmp_path: Path):

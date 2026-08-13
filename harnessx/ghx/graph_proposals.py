@@ -954,11 +954,27 @@ class ProposalSession:
         return yaml.safe_dump(base, allow_unicode=True, sort_keys=False)
 
     def _write_config_verified(self, candidate: _CandidateState) -> "tuple[bool, str]":
-        """Write config.yaml, then reload + re-graph it and require the genotype to
-        match the in-memory fixed point. Mismatch rolls the write back to whatever
-        was on disk before (or removes the file if there was nothing) and returns a
-        structured failure -- never leaves an unverified file in place."""
+        """Write config.yaml, reload it, and require BOTH that the genotype matches
+        the in-memory fixed point AND that the reloaded config still passes the same
+        S0-S4 preflight this session demands of its own parent. Either failure rolls
+        the write back to whatever was on disk before (or removes the file if there
+        was nothing) -- never leaves an unverified file in place.
+
+        The second check exists because the first is not sufficient. A node_spec can
+        be silently completed at canonicalize time from the target CLASS's own
+        attributes: a model-authored processor declaring
+        ``_writes_event_fields = ("tool_input", ...)`` (bare names rather than
+        ``EventClass.field``) contributes nothing at edit time, gets emitted into the
+        persisted YAML by canonicalize, and survives the genotype comparison because
+        the hash does not cover those fields. It then fails S3 the moment anything
+        reads the file back -- which is what killed R1's whole evolve stage in
+        L5_holdout6x3_v2 (see docs/ghx-v6-build-log.md, 08-13). Writing something we
+        would refuse to read is the asymmetry this closes: the edit is rejected while
+        the model can still fix it, instead of shipping a config that poisons the
+        round parent for the next session's preflight.
+        """
         from ..core.harness import HarnessConfig
+        from ..graph.validate import transactional_apply
 
         path = candidate.config_path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -971,6 +987,13 @@ class ProposalSession:
             want = genotype_hash(candidate.snapshot)
             if got != want:
                 raise ValueError(f"post-write genotype mismatch: in-memory={want} reread={got}")
+            _result, report = transactional_apply(to_graph(reloaded), [], materialize=True)
+            if not report.passed:
+                raise ValueError(
+                    "persisted config fails the same S0-S4 preflight a session runs on its "
+                    "parent, so shipping it would break the next round's Evolver: "
+                    + (report.reason() or "preflight rejected the reloaded config")
+                )
         except Exception as exc:  # noqa: BLE001 -- fail closed, roll back the write
             if previous is not None:
                 path.write_bytes(previous)
