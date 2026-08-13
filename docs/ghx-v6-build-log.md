@@ -1239,3 +1239,83 @@ R7/config.yaml（noop 轮无 merged），curves 8 轮历史完整。R8/R9 收尾
 **曲线现状**：L0 62.1/62.1/59.2/60.2/63.1/71.8/**73.8**/71.8（峰 R6）；
 L2 …/70.9/**74.8**（R5，无新 ship 轮）——两臂均在峰区，均已超原论文
 Global 峰（73.8%）。
+
+## 同配置重复实测：两臂的"峰值"都不是采纳造成的（08-13 07:2x）
+
+早先我把"两臂已过峰、在退化"写进了本日志——**那条读法是错的，此处更正**。
+L0 R8 跳到 77.7%（80/103），越过自己 R6 的 73.8%；顺着这条线去查配置来源，
+查出了整晚最硬的一条。
+
+**做法**：把每轮 `R<N>/config.yaml` 按行归一化（`base_dir:` 整行替换、
+checkout 根名统一），取 sha256。归一化只抹掉两处逐轮/逐 checkout 的记账路径，
+处理器栈、参数、`_code_hash` 一律参与哈希。
+
+**结果——行为等价轮分组**：
+
+| 组 | 通过题数 | 同配置离散 |
+|---|---|---|
+| L0 R1/R2 | 64, 61 | 3 题 |
+| L0 R3/R4 | 62, 65 | 3 题 |
+| **L0 R6/R7/R8** | 76, 74, **80** | **6 题 = 5.8pp** |
+| L2 R0/R1 | 61, 60 | 1 题 |
+| **L2 R4/R5** | 73, **77** | 4 题 = 3.9pp |
+| L2 R6/R7 | 73, 71 | 2 题 |
+| 跨臂 L0R0/L2R0 | 64, 61 | 3 题 |
+
+- **L0 的峰 80（R8）与 R7 的 74、R6 的 76 是同一套处理器栈的三次抽样。**
+  R7→R8 是货真价实的 `no_op`（decision.md `decision_type: no_op`，两候选各有
+  实质否决理由：C-R8-01 的 ContentDeref 触发不到 spill 路径，C-R8-02 的
+  StepCountdown 读 `task.max_steps=20` 而真预算是 `State.max_steps=40`）。
+  配置 diff 只剩 `base_dir` 一行。
+- **L2 的峰 77（R5）与 R4 的 73 是同一套配置的两次抽样**（R5 由续跑播种，
+  meta 阶段被跳过，故 R5/candidates 与 R5/verdicts 为空——这不是丢件）。
+- 于是：**两臂各自的峰值都落在同配置重复组的高端。** 在 103×10 单种子协议下，
+  "峰"这个量本身有 ~6 题的抽样成分。
+
+**对预注册端点的后果**：peak−final 的判读阈必须对齐实测同配置包络
+（本战役 max 6 题 = 5.8pp，此前 ghx_103x3 测得 ±5 题）。任何小于 5.8pp 的
+peak−final 差值不构成退化证据。这条在收官读数里前置声明，不等看到数字再改。
+原论文 Global 臂 −24.3pp 远在包络之外，其"退化"结论不受此影响；受影响的是
+我们这种轮数减半、单种子的复现臂。
+
+**顺带落一条方法学**：`config_hash` 是含路径的，跨 checkout 必然不同
+（L0 R0 `a07d5446` vs L2 R0 `241ab58b`），归一化后同为 `c3ea850dc4`。
+论文里凡引用 config_hash 处均须注明这一点，否则读者会把路径差读成配置差。
+
+## 两臂底盘同一性：机械核验（07:20）
+
+`diff -rq` 两 checkout 的 `harnessx/aegis` 整树 → 零差异（除 `__pycache__`）；
+`run_meta_aegis.py`、`run_meta.py` 逐字节相同；`benchmarks/gaia/prompts/
+gaia_agent.md` 与题库 `webthinker_gaia_dev.json` md5 相同；R0 config 归一化后
+同哈希。**两臂唯一差别 = GHX 启动器 + `--ghx-level 2` 注入**，别无其他。
+这条进论文正文（"同底盘"不再是声明，是可复核的命令）。
+
+## Digester 侧也有锚点彩票（新病种，07:1x）
+
+L2 R7→R8 meta：写出 97 份 digest，**23 份被 `stages.preprocess` 判锚点无效**——
+10 份 `digest contains zero citation anchors (IV-1)`、10 份 `anchor target
+missing`、3 份 `anchor target unreadable`。缺件类指向
+`R8\trajectories\<task>_r0.jsonl` 而盘上只有 `_r1`（轮末把本轮轨迹复制进
+下一轮目录供 Digester 引用，重试轨迹后缀不匹配）。
+
+这与已记录的 Critic 判决彩票是**两张不同的桌子**：判决彩票废的是审批桌的票，
+digest 彩票废的是诊断桌的证据。P-3 只治后者的一半（Critic 面），Digester 面
+需要单独一行——**登记为 P-7 候选**（暂不施工，等收官）。
+
+## L0 R9（末轮）判决又废两份（07:11:11）
+
+- V-C-R9-01：`harnessx/processors/control/loop_detection.py#L195-205 (…)`
+  ——非法前缀 + 括号注释，语义类，属 P-3 升级梯 ③ 的射程。
+- V-C-R9-02：`trajectories/c365c1c7-…_r0.jsonl#step_1 (presidentsusa WebFetch
+  returns content"" …)` ——**前缀合法，纯粹死于尾随括号注释**。这份是升级梯
+  ② 确定性 sanitizer 的正面标本：剥掉 ` (...)` 即可救回，无需任何模型改写。
+
+截至末轮，锚点废件累计：L0 ≥14 份、L2 ≥8 份。
+
+## L2 R7→R8：Evolver 首次没烧穿（07:05–07:08）
+
+同一段 200 步会话里 4 次压缩（06:53/07:01/07:06/07:09），但 **4 份 manifest
+C-R8-01..04 在 07:05–07:08 全部落盘**，applied 目录齐全，step 190 时交付物已
+在手。这是本战役首次"多候选 + 提交不末置"的 Evolver 会话——与 R0→R1 那次
+candidates 全空的烧穿形成同臂对照。样本 n=1，只记现象不作因果主张；
+P-1/P-5 施工后此对照可作前后基准。
