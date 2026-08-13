@@ -698,6 +698,34 @@ C-R1-02 做了三个 `insert_node`，却声明 `bucket: config` → `_apply_conf
   依 bucket×扩展名警告自清，config 桶只许 `.yaml`）。结果：证据在会话日志里可查，在
   applied 产物里查不到。正是 P-1 那条"capability_evidence 自报永不单独承重"的活标本。
 
+### 修复落地（同日）
+
+`derive_landing_buckets()` + `ProposalSession._landing_buckets()`：bucket 不再取模型
+自填，**从"父快照 vs 候选快照"经 `graph_to_config_dict` 的真实差异反推**——比按编辑
+类型硬编码更忠实，因为比的正是 compose 自己读的那张表。
+
+| 差异 | 推出的桶 | 对应应用器 |
+|---|---|---|
+| `_target_` 增/删 | `processor` | `_apply_processor`（用冻结 parent，无回滚风险） |
+| kwargs 变，仅 prompt 节点且仅 `template_path` | `prompt` | `_apply_prompt` |
+| kwargs 变，其余一切 | `config` | `_apply_config`（按 `_target_` 匹配，涵盖 prompt 节点） |
+| `tool_registry` 变（读盘，抓手写路径） | `tools` | `_apply_tools` |
+
+- 空集 = 没有任何应用器能承载 → **`GraphProposalManifest` 硬拒**（不是提示）。
+  capability_evidence/predicted_impact 只能经此工具设置，所以拒了就永远过不了结构门。
+  F2 回滚语义保持：被拒的调用不动任何模型字段。
+- `change_dependency` 实测：事务合法通过，配置层零差异，derived=`[]`。**边的改动确实
+  落不了地**，不是推测。
+- `GraphProposalStatus` 现报 `declared_bucket` / `landing_buckets` / `bucket_in_manifest`，
+  模型自己看得见纠正。Open 的 schema 改口为"你的意图，仅供参考"。
+- 顺带：C-R1-02 那类纯 insert 候选现在推成 `processor`，IV-9 下 `.py` 合法——它那个
+  自清掉的 `_verify.py` 本来可以留在产物里。
+
+测试 +6（`tests/ghx/test_graph_proposals.py`），两条是**打真 `compose_shipped_configs`
+的端到端**：派生桶让节点进 merged.yaml、声明桶照旧丢掉（bug 复现钉住）；多采纳同轮
+prompt+config 共存不再互相回滚。套件：ghx+recipe 113（原 107）、vendored aegis 274 不变、
+完整性钉绿。**零 vendored 字节改动**——修的全在 GHX overlay。
+
 **取全锥（控制+数据），不取纯数据锥——理由来自 prompt 不是尺寸。** Digester 要把失败归因到**组件**，分类里包含 `tool_output_dropped` 这种——而「工具结果被丢弃」**恰恰是一条数据边的缺席**（工具结果进 `raw_messages` 不进槽位）。纯数据锥会**系统性抹掉这整类失败**。全锥保留了组件归因需要的控制骨架。
 
 **加法接入，走哪条路要记账不要推断。** 没有 U 时今天的路径原样跑，且**默认如此**。这个仓已经被「从配置推导而非从执行推导的审计字段」咬过一次（`4e0810f`），不重蹈。

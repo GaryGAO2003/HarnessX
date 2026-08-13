@@ -41,6 +41,15 @@ L2 ghx PID 对，垫片成对）——按台账"在飞不追溯"铁律（vendore
   候选（机器 manifest+真 L1/L2 证据），死于 Critic 判决锚点非法（源码路径变种）
   ——P-3 病灶活标本 + 升级梯方向佐证。
 
+## 两臂物理位置（08-13 晨补记，找它花了若干次探查）
+
+| 臂 | checkout | run 目录 |
+|---|---|---|
+| L0 官方 | **`D:\PycharmProj\HarnessX-baseline`**（独立克隆，纯 vendored） | `…-baseline\recipe\gaia_evolver\runs\L0_103x10`（+ `.out.log`/`.err.log` 同级） |
+| L2 GHX | `D:\PycharmProj\HarnessX`（本 repo） | `recipe\gaia_evolver\runs\L2_103x10` |
+
+在本 repo 里搜 `L0_103x10` 永远搜不到——不是没跑，是不在这个盘位。
+
 ## 晨间 TODO（建议顺序）
 
 1. 裁端点：修 litellm 代理 deepseek 组（战役与 6×3 都卡在这）。

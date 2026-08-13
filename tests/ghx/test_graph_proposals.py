@@ -512,6 +512,200 @@ async def test_status_reports_checklist_missing_fields_and_gate(tmp_path: Path):
     assert missing["ok"] is False
 
 
+# ── bucket derivation: the manifest must declare what compose can carry ───────
+#
+# Regression for the 08-13 L5_holdout6x3 R1 autopsy: C-R1-02 applied three
+# insert_node edits under a model-declared `bucket: config`. `_apply_config`
+# only rewrites kwargs of processors already present (compose.py:129-130), so
+# all three new nodes were silently dropped, merged.yaml came out semantically
+# equal to the parent, and a 5/5-gate-green ship landed nothing.
+
+
+class _InsertProbe(MultiHookProcessor):
+    _order = 40
+    _singleton_group = "insert_sg"
+
+    def __init__(self, tag: str = "new") -> None:
+        self.tag = tag
+
+    async def on_task_start(self, event):
+        yield event
+
+
+_INSERT_TARGET = "tests.ghx.test_graph_proposals._InsertProbe"
+
+
+async def _open_and_insert(session: ProposalSession) -> dict:
+    tools = _tools(session)
+    await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="config")
+    edits = [{
+        "edit_type": "insert_node",
+        "target_node_id": "proc:__insert_probe",
+        "node_spec": {"_target_": _INSERT_TARGET, "_hook_": "*",
+                      "_singleton_group_": "insert_sg", "_order_": 40, "tag": "new"},
+    }]
+    return await tools["GraphProposalEdit"].fn(
+        candidate_id="C-R7-01", edits=edits, reason="wire an unshipped processor"
+    )
+
+
+async def test_insert_node_derives_processor_bucket_overriding_declared_config(tmp_path: Path):
+    session = _make_session(tmp_path, round_n=7)
+    res = await _open_and_insert(session)
+    assert res["ok"] is True, res
+
+    candidate = session._candidates["C-R7-01"]
+    assert candidate.bucket == "config"          # what the model declared
+    assert session._landing_buckets(candidate) == ["processor"]
+
+    fm = session._build_frontmatter(candidate)
+    assert fm["bucket"] == "processor"           # what goes into the manifest
+
+    manifest_text = (session.candidates_dir / "C-R7-01.md").read_text(encoding="utf-8")
+    assert "bucket: processor" in manifest_text
+
+
+async def test_kwargs_only_change_derives_config_bucket(tmp_path: Path):
+    session = _make_session(tmp_path, round_n=7)
+    tools = _tools(session)
+    await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="prompt")
+
+    rp_id = _node_ids(session)[_ECHO_TARGET]
+    res = await tools["GraphProposalEdit"].fn(
+        candidate_id="C-R7-01",
+        edits=[{"edit_type": "replace_same_group", "target_node_id": rp_id,
+                "node_spec": _echo_node_spec("v2")}],
+    )
+    assert res["ok"] is True, res
+    assert session._landing_buckets(session._candidates["C-R7-01"]) == ["config"]
+
+
+def test_prompt_branch_needs_template_path_to_be_the_only_change():
+    """``_apply_prompt`` copies only ``system_builder.template_path``; anything
+    else on the prompt node has to travel as ``config`` or it is dropped."""
+    from harnessx.ghx.graph_proposals import _prompt_change_is_template_only
+
+    base = {"_target_": "x.SystemPromptProcessor",
+            "system_builder": {"_target_": "x.B", "template_path": "/a.md"}}
+    swapped = {"_target_": "x.SystemPromptProcessor",
+               "system_builder": {"_target_": "x.B", "template_path": "/b.md"}}
+    also_builder = {"_target_": "x.SystemPromptProcessor",
+                    "system_builder": {"_target_": "x.OTHER", "template_path": "/b.md"}}
+
+    assert _prompt_change_is_template_only(base, swapped) is True
+    assert _prompt_change_is_template_only(base, also_builder) is False
+
+
+async def test_edge_only_candidate_cannot_finalize_and_status_says_why(tmp_path: Path):
+    """A ``change_dependency`` edit applies cleanly through the S4 transaction but
+    leaves no trace in the composed config -- compose never reads edges. Such a
+    candidate must be stopped before it can collect manifest fields."""
+    session = _make_session(tmp_path, round_n=7)
+    tools = _tools(session)
+    await tools["GraphProposalOpen"].fn(candidate_id="C-R7-01", bucket="processor")
+
+    ids = _node_ids(session)
+    res = await tools["GraphProposalEdit"].fn(
+        candidate_id="C-R7-01",
+        edits=[{"edit_type": "change_dependency",
+                "edge_source_id": ids[_ECHO_TARGET],
+                "edge_target_id": ids[_ORDERED_TARGET],
+                "edge_type": "after", "add_edge": False}],
+        reason="drop the ordering edge",
+    )
+    assert res["ok"] is True, res  # the transaction itself is legal
+    assert session._landing_buckets(session._candidates["C-R7-01"]) == []
+
+    status = await tools["GraphProposalStatus"].fn(candidate_id="C-R7-01")
+    assert status["landing_buckets"] == []
+    assert status["declared_bucket"] == "processor"
+    assert any("land nothing" in c for c in status["checklist"])
+
+    blocked = await tools["GraphProposalManifest"].fn(
+        candidate_id="C-R7-01", capability_evidence=[{"type": "filesystem", "claim": "c", "evidence": "e"}]
+    )
+    assert blocked["ok"] is False
+    assert "land NOTHING" in blocked["error"]
+    # F2 contract: a refused call leaves the model-supplied fields untouched.
+    assert "capability_evidence" not in session._candidates["C-R7-01"].fields_set
+
+
+async def test_derived_bucket_actually_lands_through_the_real_composer(tmp_path: Path):
+    """End-to-end against vendored ``compose_shipped_configs``: the derived bucket
+    puts the new processor into merged.yaml, the declared one drops it."""
+    from harnessx.aegis.compose import compose_shipped_configs
+
+    session = _make_session(tmp_path, round_n=7)
+    res = await _open_and_insert(session)
+    assert res["ok"] is True, res
+
+    candidate = session._candidates["C-R7-01"]
+    derived = session._build_frontmatter(candidate)["bucket"]
+    parent_path = session.parent_config_path
+    applied_path = candidate.config_path
+
+    def _targets(out_path: Path) -> set[str]:
+        merged = yaml.safe_load(out_path.read_text(encoding="utf-8")) or {}
+        return {p.get("_target_") for p in merged.get("processors") or [] if isinstance(p, dict)}
+
+    good = tmp_path / "merged_derived.yaml"
+    compose_shipped_configs(parent_path, [("C-R7-01", derived, applied_path)], good)
+    assert _INSERT_TARGET in _targets(good)
+
+    bad = tmp_path / "merged_declared.yaml"
+    compose_shipped_configs(parent_path, [("C-R7-01", "config", applied_path)], bad)
+    assert _INSERT_TARGET not in _targets(bad), (
+        "declared bucket `config` must still drop the node -- if this stops holding, "
+        "vendored compose changed and the derivation rules need rechecking"
+    )
+
+
+async def test_prompt_swap_survives_a_config_bucket_co_ship(tmp_path: Path):
+    """The other half of the R1 autopsy, pinned as a live vendored behaviour probe.
+
+    ``_apply_config`` diffs the candidate against the *running base* rather than
+    the frozen parent (``compose.py:116`` is ``del parent``), so a config-bucket
+    candidate reverts an earlier prompt-bucket candidate's change. Accurate
+    derivation is what keeps a pure-insert candidate out of the ``config`` bucket
+    and therefore out of this collision. Recorded as P-7 for the launch gate.
+    """
+    from harnessx.aegis.compose import compose_shipped_configs
+
+    session = _make_session(tmp_path, round_n=7)
+    res = await _open_and_insert(session)
+    assert res["ok"] is True, res
+    candidate = session._candidates["C-R7-01"]
+    derived = session._build_frontmatter(candidate)["bucket"]
+    assert derived == "processor"
+
+    # A second candidate that only bumps tag v1 -> v2 on the shared echo node.
+    tools = _tools(session)
+    await tools["GraphProposalOpen"].fn(candidate_id="C-R7-02", bucket="config")
+    bump = await tools["GraphProposalEdit"].fn(
+        candidate_id="C-R7-02",
+        edits=[{"edit_type": "replace_same_group",
+                "target_node_id": _node_ids(session)[_ECHO_TARGET],
+                "node_spec": _echo_node_spec("v2")}],
+    )
+    assert bump["ok"] is True, bump
+    second = session._candidates["C-R7-02"]
+    assert session._landing_buckets(second) == ["config"]
+
+    out = tmp_path / "merged_two.yaml"
+    compose_shipped_configs(
+        session.parent_config_path,
+        [("C-R7-01", derived, candidate.config_path),
+         ("C-R7-02", "config", second.config_path)],
+        out,
+    )
+    merged = yaml.safe_load(out.read_text(encoding="utf-8")) or {}
+    by_target = {p.get("_target_"): p for p in merged.get("processors") or [] if isinstance(p, dict)}
+    # Both land: the insert survives because it travelled as `processor`, and the
+    # kwarg bump lands because that is exactly what `config` carries.
+    assert _INSERT_TARGET in by_target
+    assert by_target[_ECHO_TARGET]["tag"] == "v2"
+
+
 # ── 13. F2: _edit write-phase failure rolls back, genotype UNCHANGED ──────────
 
 

@@ -78,6 +78,26 @@ operator resume (user decision), official patience=2 preserved in code"。
   结构性 checkpoint 才是文献支持形态——L5 写通即结构形态，P-1 为提示级弱
   形态服务 L0–L4 臂）+ 论文定位降级为"待验证假设"（~30 工作零消融）。
 
+## P-7 预声明（2026-08-13，L5 6×3 验尸产出，押发车门）
+
+**`compose._apply_config` 对被改过的 base 做差，不是对冻结 parent。**
+`harnessx/aegis/compose.py:116` 是 `del parent`；同一轮多采纳时，config 桶候选会把
+自己那份（未改动的）kwargs 抄回 base，**静默回滚先前 prompt 桶候选的改动**。
+`compose.py:206-211` 专门冻了 parent 快照就是为防这个，这个应用器把它扔了。
+
+实证（`runs/L5_holdout6x3/R1`）：C-R1-01 换 `template_path` → C-R1-02（config 桶）
+把 `system_builder` 整块覆盖回原始 `benchmarks/gaia/prompts/gaia_agent.md`。
+**与 L5 无关，官方臂任何 config+其他桶的多采纳轮都会中。**
+
+附带第二条：`orchestrator._strip_volatile_keys` 只剥 `tracer.base_dir`/`session_id`，
+于是 `_assert_merged_differs_from_base`（防 ship 空转的硬守卫）会**被 canonicalize
+展开的元数据满足**——R1 就是这样漏网的，R2 才拦住。守卫应同时剥这类元数据。
+
+拟改两处，两臂同改，发车门与 P-1..P-5 一并 `git apply` + `deviation(aegis):` commit。
+现不施工：双臂在飞。活体回归已钉在
+`tests/ghx/test_graph_proposals.py::test_prompt_swap_survives_a_config_bucket_co_ship`
+（该测试同时是 vendored 行为探针，compose 语义一变即响）。
+
 ## 登记纪律
 
 1. 新偏离 = 先在本表加行（含动机），再施工；一条偏离一个 commit，消息前缀

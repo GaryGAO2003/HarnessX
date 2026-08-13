@@ -210,6 +210,88 @@ def _edit_to_jsonable(e: GraphEdit) -> dict:
     }
 
 
+# ── bucket derivation (what AEGIS compose can actually carry) ────────────────
+
+_PROMPT_TARGET_MARK = "SystemPromptProcessor"
+
+
+def _procs_by_target(processors: Any) -> dict[str, dict]:
+    """Index a config-dict processor list by ``_target_`` — compose's own key."""
+    out: dict[str, dict] = {}
+    for p in processors or []:
+        if isinstance(p, dict):
+            tgt = p.get("_target_")
+            if tgt:
+                out[str(tgt)] = p
+    return out
+
+
+def _prompt_change_is_template_only(parent_p: dict, cand_p: dict) -> bool:
+    """True when the only difference is ``system_builder.template_path``.
+
+    ``_apply_prompt`` copies *only* that one field when it finds it
+    (``compose.py:58-63``), so any other change to the prompt node needs the
+    ``config`` applier instead or it is silently dropped.
+    """
+    a, b = copy.deepcopy(parent_p), copy.deepcopy(cand_p)
+    for d in (a, b):
+        sb = d.get("system_builder")
+        if isinstance(sb, dict):
+            sb.pop("template_path", None)
+    return a == b
+
+
+def derive_landing_buckets(
+    parent_snapshot: GraphSnapshot,
+    candidate_snapshot: GraphSnapshot,
+    *,
+    parent_tool_registry: Any = None,
+    candidate_tool_registry: Any = None,
+) -> list[str]:
+    """Buckets whose ``aegis.compose`` applier can actually carry this diff.
+
+    AEGIS composes a shipped candidate onto the round base by dispatching on the
+    manifest's ``bucket``, and each applier understands exactly one kind of change
+    (``harnessx/aegis/compose.py:173``). A candidate declaring a bucket whose
+    applier cannot express its edits passes all five gates and then lands
+    *nothing* — the round silently re-runs the parent config and the flat read is
+    mistaken for "the intervention didn't help". So the bucket is derived from the
+    realised diff rather than taken from the model.
+
+    Mapping, mirroring the appliers:
+
+    * added / removed ``_target_``       -> ``processor`` (``_apply_processor``)
+    * kwargs changed, prompt node only,
+      and only its ``template_path``     -> ``prompt``    (``_apply_prompt``)
+    * kwargs changed, anything else      -> ``config``    (``_apply_config``,
+      which matches by ``_target_`` and so subsumes the prompt node too)
+    * ``tool_registry`` changed          -> ``tools``     (``_apply_tools``)
+
+    An empty result means no applier can carry the change. An edge-only edit
+    (``CHANGE_DEPENDENCY``) is the canonical case: compose never looks at edges.
+    Callers must refuse to finalize such a candidate rather than let it ship.
+    """
+    parent = _procs_by_target(graph_to_config_dict(parent_snapshot).get("processors"))
+    cand = _procs_by_target(graph_to_config_dict(candidate_snapshot).get("processors"))
+
+    buckets: list[str] = []
+    if set(cand) - set(parent) or set(parent) - set(cand):
+        buckets.append("processor")
+
+    changed = [t for t in set(parent) & set(cand) if parent[t] != cand[t]]
+    if changed:
+        prompt_only = all(
+            _PROMPT_TARGET_MARK in t and _prompt_change_is_template_only(parent[t], cand[t])
+            for t in changed
+        )
+        buckets.append("prompt" if prompt_only else "config")
+
+    if (parent_tool_registry or None) != (candidate_tool_registry or None):
+        buckets.append("tools")
+
+    return buckets
+
+
 def _issue_to_dict(i: Any) -> dict:
     return {"layer": i.layer, "error_type": i.error_type, "message": i.message}
 
@@ -288,8 +370,12 @@ _SCHEMA_OPEN = {
             "type": ["string", "array"],
             "items": {"type": "string"},
             "description": (
-                "One of prompt|tools|config|processor, or a list for a cross-bucket candidate. "
-                "Must cover every file extension you will write (IV-9 checks by extension)."
+                "Your INTENT: one of prompt|tools|config|processor, or a list. Advisory only -- "
+                "the bucket written into the manifest is derived from the edits you actually "
+                "apply, because AEGIS composes a ship by dispatching on bucket and each applier "
+                "carries exactly one kind of change. Declaring a bucket whose applier cannot "
+                "express your edits would ship through all five gates and land nothing. "
+                "GraphProposalStatus reports declared_bucket vs landing_buckets."
             ),
         },
         "iterates_from": {
@@ -459,6 +545,10 @@ class ProposalSession:
             "deployment": deployment_hash(self._parent_snapshot),
             "phenotype": phenotype_hash(self._parent_snapshot),
         }
+        # Raw parent mapping (non-processor keys compose also reads, e.g.
+        # tool_registry). Preflight already proved the text parses.
+        parent_raw = yaml.safe_load(self._parent_yaml_text) or {}
+        self._parent_config_dict: dict = parent_raw if isinstance(parent_raw, dict) else {}
 
     # ── frozen public surface (§4 interface contract) ───────────────────────
 
@@ -734,6 +824,24 @@ class ProposalSession:
 
         self._reconcile_hand_written(candidate)
 
+        # An unlandable candidate must never reach the gates. Refusing here is a
+        # real stop, not advice: capability_evidence/predicted_impact can only be
+        # set through this call, so a manifest that never gets them cannot pass
+        # the structure gate either.
+        if candidate.edits_log and not self._landing_buckets(candidate):
+            return {
+                "ok": False,
+                "error": (
+                    f"{candidate_id} has {len(candidate.edits_log)} applied edit(s) but none of "
+                    "them change anything AEGIS compose can carry onto the round base. Compose "
+                    "dispatches per bucket over the processor list and tool_registry only -- it "
+                    "never looks at edges -- so an edge-only change (change_dependency) would "
+                    "pass all five gates and then land NOTHING, and the round would silently "
+                    "re-run the parent config. Express the intent as a node change "
+                    "(insert_node / remove_node / replace_same_group) and call this again."
+                ),
+            }
+
         old_manifest_fields = dict(candidate.manifest_fields)
         old_fields_set = set(candidate.fields_set)
         old_failure_evidence_body = candidate.failure_evidence_body
@@ -806,9 +914,17 @@ class ProposalSession:
         missing = [f for f in _MODEL_SUPPLIED_FIELDS if f not in candidate.fields_set]
         gate = validate_candidate_manifest(fm, body)
 
+        landing = self._landing_buckets(candidate) if candidate.edits_log else []
+
         checklist: list[str] = []
         if not candidate.edits_log:
             checklist.append("zero-edit draft -- call GraphProposalEdit before this candidate can ship")
+        elif not landing:
+            checklist.append(
+                "edits applied but NONE of them are carryable by AEGIS compose (it reads the "
+                "processor list and tool_registry, never edges) -- this candidate would ship and "
+                "land nothing; re-express it as a node change"
+            )
         if missing:
             checklist.append(f"GraphProposalManifest not yet called for: {', '.join(missing)}")
         if not gate.ok:
@@ -820,6 +936,9 @@ class ProposalSession:
             "edit_count": len(candidate.edits_log),
             "manifest_missing_fields": missing,
             "config_differs_from_parent": genotype_hash(candidate.snapshot) != self._parent_hashes["genotype"],
+            "declared_bucket": candidate.bucket,
+            "landing_buckets": landing,
+            "bucket_in_manifest": fm.get("bucket"),
             "provenance": candidate.provenance,
             "structure_gate_ok": gate.ok,
             "structure_gate_reason": gate.reason,
@@ -937,8 +1056,39 @@ class ProposalSession:
                     return {"type": "processor_invocation", "tool_name": short, "expected_min_calls": 1}
         return None
 
+    def _landing_buckets(self, candidate: _CandidateState) -> list[str]:
+        """Derived bucket set — see :func:`derive_landing_buckets`.
+
+        The candidate's ``tool_registry`` is read off disk rather than off the
+        snapshot: ``_render_config_yaml`` copies that key from the parent
+        verbatim, so the only way it can differ is a hand-written change, and
+        those are exactly the ones a snapshot-only comparison would miss.
+        """
+        cand_tr = self._parent_config_dict.get("tool_registry")
+        try:
+            on_disk = yaml.safe_load(candidate.config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            on_disk = {}
+        if isinstance(on_disk, dict):
+            cand_tr = on_disk.get("tool_registry")
+        return derive_landing_buckets(
+            self._parent_snapshot,
+            candidate.snapshot,
+            parent_tool_registry=self._parent_config_dict.get("tool_registry"),
+            candidate_tool_registry=cand_tr,
+        )
+
     def _build_frontmatter(self, candidate: _CandidateState) -> dict:
-        fm: dict = {"candidate_id": candidate.candidate_id, "bucket": candidate.bucket}
+        # The bucket AEGIS compose will obey is the one its appliers can carry,
+        # not the one the model declared at Open time. Emitting the declared value
+        # is what let C-R1-02 (three insert_node edits declared `config`) pass five
+        # gates and land nothing -- see docs/ghx-v6-build-log.md, 08-13 autopsy.
+        landing = self._landing_buckets(candidate) if candidate.edits_log else []
+        if landing:
+            bucket: Any = landing[0] if len(landing) == 1 else landing
+        else:
+            bucket = candidate.bucket
+        fm: dict = {"candidate_id": candidate.candidate_id, "bucket": bucket}
         if candidate.iterates_from:
             fm["iterates_from"] = candidate.iterates_from
         fm["capability_evidence"] = candidate.manifest_fields.get("capability_evidence", [])
