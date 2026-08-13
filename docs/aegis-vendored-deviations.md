@@ -65,9 +65,18 @@ operator resume (user decision), official patience=2 preserved in code"。
   `experiments/docs/EVIDENCE-P1P2-BUDGET-DRAFT-EARLY.md` P-1 族——方向证据一致
   （MLE-bench/AIDE 有效提交率差 3–38pp、deer-flow 反面印证），**但无任何正面
   消融**，此注记随行进论文偏差表。物理 apply 仍按发车门流程（在飞不追溯）。
-- **P-2：深研中**（用户 08-13 令 deep-research 补证后再裁）。已知：一次性告知
-  为文献弱形态（s1 反例 / 谈判域持续可见 8×），"留收尾余量"子命题有正证据；
-  P-2b（driver 侧逐步倒数注入）作为候选升级梯随深研结论一并裁。
+- **P-2：终裁上车，载荷不改**（2026-08-13 夜，用户授权代理裁决；四路深研
+  完整依据见 `experiments/docs/DECISION-P1P2-NIGHT-RULING.md` +
+  `EVIDENCE-P1P2-DEEP-APPENDIX.md`）。预期归因预登记：效应归"收尾余量+成组
+  干预"，数字告知按近零贡献变量对待（s1 混合行实证）。**P-2b 裸逐步倒计时
+  不建**（离散域因果缺位、8× 系连续时间+单模型挑选、裸可见 agent 域实测
+  ≈+2pp）；**预声明 P-2b′ 升级梯**：若 P-1..P-5+L5 打满后烧穿残留 → 阈值式
+  两档催促（75%/90%，生产界三处独立实现收敛形状）；再升级走 L5 Status
+  主动查询式。届时按新偏离行登记。
+- **P-1 深查复核（08-13 夜）：批准维持** + 两条硬性注意事项（判分隔离不变量：
+  capability_evidence 自报永不单独承重 ship；"评审自查"类提示预期设近零，
+  结构性 checkpoint 才是文献支持形态——L5 写通即结构形态，P-1 为提示级弱
+  形态服务 L0–L4 臂）+ 论文定位降级为"待验证假设"（~30 工作零消融）。
 
 ## 登记纪律
 
