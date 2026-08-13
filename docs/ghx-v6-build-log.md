@@ -1220,3 +1220,22 @@ R5/R4 双双出包络冲峰——跑步机审判段的数据比预期更戏剧�
 bg b6erh0nc3，同令 `--start-round 5`：`resume: loading … R4\applied\merged.yaml
 (curves has 5 rounds)`，config=f66cc904cbc3e48f 与首次续跑一致（播种确定性）。
 R5 从头重跑（此前两段被杀的 R5 半程为沉没成本）。哨兵继续双臂值守。
+
+## L0 官方早停实录 + 自动续跑（04:23 → 04:27，夜间授权首次动用）
+
+**EARLY STOP 现场（论文级标本）**：L0 R7 末两份 R8 判决全废于锚点格式
+（`harnessx/core/runloop.py#L…` 与 `step_countdown.py#L…` 行号锚点非法），
+noop_streak=2 → 官方早停。被杀的 **C-R8-02 正是给官方臂接
+StepCountdownProcessor**——官方 Evolver 自己发现了"预算可见性"杠杆
+（= P-2 提议的机制），capability_evidence 里 Level-2 往返全过
+（倒计时消息过 to_openai_content 原文存活），随后判决书死于锚点、臂死于
+早停。**格式彩票杀死了官方臂自愈的那只手**——P-2/P-3 的终极标本。
+另：该候选 evidence 显示 L0 配置里已有 StepBudgetExtension(floor_steps=40)
+——官方臂在 R5/R6 也独立找到了步预算杠杆（与 L2 R2 殊途同归，晚 3-4 轮）。
+
+**续跑**（bg bl2x7ues8）：`--start-round 8`，04:27:39 复飞，播种
+R7/config.yaml（noop 轮无 merged），curves 8 轮历史完整。R8/R9 收尾。
+
+**曲线现状**：L0 62.1/62.1/59.2/60.2/63.1/71.8/**73.8**/71.8（峰 R6）；
+L2 …/70.9/**74.8**（R5，无新 ship 轮）——两臂均在峰区，均已超原论文
+Global 峰（73.8%）。
