@@ -186,6 +186,31 @@ def test_pooled_noise_is_empty_without_replicates(tmp_path):
     assert pooled_noise([], 103) == {}
 
 
+def test_cross_arm_compares_finals_and_verifies_the_shared_baseline(tmp_path):
+    """Net-gain-vs-net-gain rewards whichever arm drew a low baseline, so the
+    comparison is final vs final — licensed only if R0's config really matches."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    _mk_curves(a, [(0, 64, "baseline"), (1, 73, "ok")])
+    _mk_curves(b, [(0, 61, "baseline"), (1, 77, "ok")])
+    for run, suffix in ((a, ""), (b, "-baseline")):
+        _mk_round(run, 0, suffix=suffix)  # same stack, different checkout
+        _mk_round(run, 1, cap=99, suffix=suffix)
+    x = build({"L0": a, "L2": b}, {})["cross_arm"]
+    assert x["baseline_config_shared"] is True
+    assert x["baseline_passed"] == [64, 61]
+    assert x["final_difference_tasks"] == -4  # 73 - 77, not (+9) - (+16)
+    assert x["both_complete"] is True
+
+
+def test_cross_arm_flags_a_baseline_that_is_not_actually_shared(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    _mk_curves(a, [(0, 64, "baseline")])
+    _mk_curves(b, [(0, 61, "baseline")])
+    _mk_round(a, 0)
+    _mk_round(b, 0, cap=99)  # genuinely different starting configuration
+    assert build({"L0": a, "L2": b}, {})["cross_arm"]["baseline_config_shared"] is False
+
+
 def test_envelope_is_the_worst_spread_across_arms(tmp_path):
     small, big = tmp_path / "small", tmp_path / "big"
     _mk_curves(small, [(0, 60, "baseline"), (1, 61, "noop")])

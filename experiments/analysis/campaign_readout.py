@@ -337,7 +337,44 @@ def build(arms: dict[str, Path], logs: dict[str, Path]) -> dict:
                 "campaign, not assumed from a prior run."
             ),
         }
+    report["cross_arm"] = cross_arm(report)
     return report
+
+
+def cross_arm(report: dict) -> dict:
+    """Final-vs-final between two arms, with the shared-baseline check.
+
+    Comparing each arm's *net gain* is the tempting move and the wrong one: when
+    both arms start from the same configuration, their R0 scores are two draws of
+    one quantity, so an arm that happened to draw low books its recovery as
+    progress.  Final score against final score is the comparison that survives —
+    and it is only licensed when the baseline configs really do match, which is
+    checked here rather than assumed.
+    """
+    arms = report["arms"]
+    if len(arms) != 2:
+        return {}
+    (na, a), (nb, b) = arms.items()
+    fa = [r for r in a["rounds"] if r["scored"]]
+    fb = [r for r in b["rounds"] if r["scored"]]
+    if not fa or not fb:
+        return {}
+    base_a = next((r for r in fa if r["round"] == 0), None)
+    base_b = next((r for r in fb if r["round"] == 0), None)
+    shared = bool(base_a and base_b and base_a["config_group"] == base_b["config_group"])
+    diff = fa[-1]["passed"] - fb[-1]["passed"]
+    mdd = report.get("envelope", {}).get("min_detectable_difference_tasks")
+    return {
+        "arms": [na, nb],
+        "baseline_config_shared": shared,
+        "baseline_passed": [base_a["passed"] if base_a else None, base_b["passed"] if base_b else None],
+        "final_round": [fa[-1]["round"], fb[-1]["round"]],
+        "final_passed": [fa[-1]["passed"], fb[-1]["passed"]],
+        "final_difference_tasks": diff,
+        "final_difference_pp": round(diff / fa[-1]["total"] * 100, 1),
+        "separable": None if mdd is None else abs(diff) >= mdd,
+        "both_complete": len(fa) == len(fb),
+    }
 
 
 def render(report: dict) -> str:
@@ -419,6 +456,24 @@ def render(report: dict) -> str:
                 f"({env['min_detectable_difference_pp']}pp)"
             )
         w(f"   {env['note']}")
+    x = report.get("cross_arm")
+    if x:
+        a, b = x["arms"]
+        w("")
+        w(
+            f"== {a} vs {b}: final R{x['final_round'][0]}={x['final_passed'][0]} vs "
+            f"R{x['final_round'][1]}={x['final_passed'][1]} -> "
+            f"{x['final_difference_tasks']:+d} tasks ({x['final_difference_pp']:+}pp)"
+        )
+        w(
+            f"   baseline config shared: {x['baseline_config_shared']} "
+            f"(R0 {x['baseline_passed'][0]} vs {x['baseline_passed'][1]} = two draws of one config)"
+        )
+        if x["separable"] is not None:
+            w(
+                f"   separable at this design's resolution: {x['separable']}"
+                + ("" if x["both_complete"] else "   [WARNING: arms differ in rounds completed]")
+            )
     return "\n".join(out)
 
 
