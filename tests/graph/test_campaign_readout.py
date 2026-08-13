@@ -134,6 +134,37 @@ def test_replicate_groups_and_endpoint_flag_a_noise_side_peak(tmp_path):
     assert e["peak_carried_new_ship"] is False
 
 
+def test_peak_inside_a_replicate_group_is_debiased_to_the_group_mean(tmp_path):
+    """Taking the best of k draws of one configuration inflates the peak, so the
+    drop measured from it overstates. The group mean is what gets quoted."""
+    run = tmp_path / "run"
+    _mk_curves(run, [(0, 76, "ok"), (1, 74, "noop"), (2, 80, "noop"), (3, 73, "ok")])
+    for n in (0, 1, 2):
+        _mk_round(run, n)  # one config across R0-R2
+    _mk_round(run, 3, cap=99)  # R3 is a genuinely different config
+    arm = read_arm(run)
+    e = endpoint(arm["rounds"], replicate_groups(arm["rounds"]))
+    assert e["peak_round"] == 2 and e["peak_passed"] == 80
+    assert e["drop_tasks"] == 7  # the naive reading
+    assert e["peak_is_max_of_k_draws"] == 3
+    assert e["peak_group_mean"] == 76.67
+    assert e["drop_vs_group_mean_tasks"] == 3.67  # what is actually defensible
+    assert e["net_tasks_vs_first"] == -3
+
+
+def test_endpoint_omits_debiasing_when_the_peak_stands_alone(tmp_path):
+    run = tmp_path / "run"
+    _mk_curves(run, [(0, 60, "ok"), (1, 80, "ok"), (2, 70, "ok")])
+    _mk_round(run, 0)
+    _mk_round(run, 1, cap=50)
+    _mk_round(run, 2, cap=99)
+    arm = read_arm(run)
+    e = endpoint(arm["rounds"], replicate_groups(arm["rounds"]))
+    assert e["peak_inside_replicate_group"] is None
+    assert "peak_group_mean" not in e
+    assert e["net_tasks_vs_first"] == 10
+
+
 def test_pooled_noise_uses_within_group_deviations_only(tmp_path):
     """Between-group differences are configuration effects and must not inflate
     the noise estimate — only deviation from each group's own mean counts."""

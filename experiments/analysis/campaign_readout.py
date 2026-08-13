@@ -193,8 +193,9 @@ def endpoint(rounds: list[dict], groups: list[dict]) -> dict:
         return {}
     peak = max(scored, key=lambda r: r["passed"])
     final = scored[-1]
+    first = scored[0]
     in_group = next((g for g in groups if peak["round"] in g["rounds"]), None)
-    return {
+    out = {
         "peak_round": peak["round"],
         "peak_passed": peak["passed"],
         "final_round": final["round"],
@@ -203,8 +204,22 @@ def endpoint(rounds: list[dict], groups: list[dict]) -> dict:
         "drop_pp": round((peak["passed"] - final["passed"]) / peak["total"] * 100, 1),
         "peak_carried_new_ship": bool(peak["ships"]),
         "peak_inside_replicate_group": None if in_group is None else in_group["rounds"],
+        "net_tasks_vs_first": final["passed"] - first["passed"],
+        "net_pp_vs_first": round((final["passed"] - first["passed"]) / first["total"] * 100, 1),
         "rounds_complete": len(scored),
     }
+    # A peak that is the max of k repeat draws of one configuration is biased
+    # upward by construction -- the more times a configuration is measured, the
+    # higher its best round. When that is the case the group's mean is the
+    # unbiased estimate of what the configuration scores, and the drop measured
+    # against it is the one worth quoting.
+    if in_group is not None and len(in_group["passed"]) > 1:
+        mean = sum(in_group["passed"]) / len(in_group["passed"])
+        out["peak_group_mean"] = round(mean, 2)
+        out["peak_is_max_of_k_draws"] = len(in_group["passed"])
+        out["drop_vs_group_mean_tasks"] = round(mean - final["passed"], 2)
+        out["drop_vs_group_mean_pp"] = round((mean - final["passed"]) / peak["total"] * 100, 1)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +373,16 @@ def render(report: dict) -> str:
                 f"drop={e['drop_tasks']} tasks ({e['drop_pp']}pp) "
                 f"peak_new_ship={e['peak_carried_new_ship']} "
                 f"peak_in_replicate_group={e['peak_inside_replicate_group']}"
+            )
+            if "peak_group_mean" in e:
+                w(
+                    f"            peak is max of {e['peak_is_max_of_k_draws']} draws of one config "
+                    f"(mean {e['peak_group_mean']}) -> debiased drop = "
+                    f"{e['drop_vs_group_mean_tasks']} tasks ({e['drop_vs_group_mean_pp']}pp)"
+                )
+            w(
+                f"            net vs first round: {e['net_tasks_vs_first']:+d} tasks "
+                f"({e['net_pp_vs_first']:+}pp)"
             )
         c = arm["cone_audit"]
         if c["cones_total"]:
