@@ -134,6 +134,27 @@ def test_replicate_groups_and_endpoint_flag_a_noise_side_peak(tmp_path):
     assert e["peak_carried_new_ship"] is False
 
 
+def test_pooled_noise_uses_within_group_deviations_only(tmp_path):
+    """Between-group differences are configuration effects and must not inflate
+    the noise estimate — only deviation from each group's own mean counts."""
+    from experiments.analysis.campaign_readout import pooled_noise
+
+    # Two groups, each deviating +-1 from its own mean, but means 30 apart.
+    # Pooled variance = (2 + 2) / 2 = 2, so SD = sqrt(2) -- the 30-task gap
+    # between groups must not enter at all.
+    groups = [{"passed": [60, 62]}, {"passed": [90, 92]}]
+    n = pooled_noise(groups, 103)
+    assert n["degrees_of_freedom"] == 2
+    assert n["single_round_sd_tasks"] == round(2**0.5, 2)
+    assert n["round_difference_sd_tasks"] == 2.0
+
+
+def test_pooled_noise_is_empty_without_replicates(tmp_path):
+    from experiments.analysis.campaign_readout import pooled_noise
+
+    assert pooled_noise([], 103) == {}
+
+
 def test_envelope_is_the_worst_spread_across_arms(tmp_path):
     small, big = tmp_path / "small", tmp_path / "big"
     _mk_curves(small, [(0, 60, "baseline"), (1, 61, "noop")])

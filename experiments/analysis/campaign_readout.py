@@ -153,6 +153,39 @@ def replicate_groups(rounds: list[dict]) -> list[dict]:
     return sorted(groups, key=lambda x: -x["spread_tasks"])
 
 
+def pooled_noise(all_groups: list[dict], total_tasks: int) -> dict:
+    """Within-group pooled SD of the per-round score, in tasks.
+
+    Every replicate group is a set of repeat measurements of one configuration,
+    so the deviation of its members from the group mean is pure round-to-round
+    noise.  Pooling across groups gives a single-round SD; the difference of two
+    independent rounds carries ``sqrt(2)`` times that.  Reported with its degrees
+    of freedom because with a handful of groups the estimate is itself loose.
+    """
+    ss = 0.0
+    df = 0
+    for g in all_groups:
+        vals = g["passed"]
+        mean = sum(vals) / len(vals)
+        ss += sum((v - mean) ** 2 for v in vals)
+        df += len(vals) - 1
+    if df == 0:
+        return {}
+    var = ss / df
+    sd = var**0.5
+    diff_sd = sd * 2**0.5
+    return {
+        "single_round_sd_tasks": round(sd, 2),
+        "single_round_sd_pp": round(sd / total_tasks * 100, 2),
+        "degrees_of_freedom": df,
+        "round_difference_sd_tasks": round(diff_sd, 2),
+        # Two-sided alpha=0.05, ~80% power for a two-round comparison: the
+        # smallest arm difference this design could reliably call.
+        "min_detectable_difference_tasks": round(2.8 * diff_sd, 1),
+        "min_detectable_difference_pp": round(2.8 * diff_sd / total_tasks * 100, 1),
+    }
+
+
 def endpoint(rounds: list[dict], groups: list[dict]) -> dict:
     """peak - final, plus whether the peak is a draw inside a replicate group."""
     scored = [r for r in rounds if r["scored"]]
@@ -274,11 +307,15 @@ def build(arms: dict[str, Path], logs: dict[str, Path]) -> dict:
         report["arms"][name] = arm
     if all_spreads:
         worst_name, worst = max(all_spreads, key=lambda x: x[1]["spread_tasks"])
+        total_tasks = next(
+            (r["total"] for a in report["arms"].values() for r in a["rounds"] if r["total"]), 103
+        )
         report["envelope"] = {
             "max_same_config_spread_tasks": worst["spread_tasks"],
             "max_same_config_spread_pp": worst["spread_pp"],
             "measured_on": {"arm": worst_name, "rounds": worst["rounds"], "passed": worst["passed"]},
             "replicate_group_count": len(all_spreads),
+            **pooled_noise([g for _, g in all_spreads], total_tasks),
             "note": (
                 "peak-minus-final below this envelope is not evidence of degradation; "
                 "the envelope is measured from behaviourally identical rounds in this "
@@ -345,6 +382,17 @@ def render(report: dict) -> str:
             f"R{'/R'.join(map(str, env['measured_on']['rounds']))} "
             f"across {env['replicate_group_count']} replicate groups"
         )
+        if "single_round_sd_tasks" in env:
+            w(
+                f"   pooled single-round SD = {env['single_round_sd_tasks']} tasks "
+                f"({env['single_round_sd_pp']}pp, df={env['degrees_of_freedom']}); "
+                f"two-round difference SD = {env['round_difference_sd_tasks']} tasks"
+            )
+            w(
+                f"   smallest arm difference this design could call: "
+                f"{env['min_detectable_difference_tasks']} tasks "
+                f"({env['min_detectable_difference_pp']}pp)"
+            )
         w(f"   {env['note']}")
     return "\n".join(out)
 
