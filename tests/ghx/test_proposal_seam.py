@@ -134,6 +134,8 @@ async def test_flag_on_normal_mode_registers_tools_and_appends_prompt(tmp_path, 
     assert "trajectories/, sessions/, and digests/" in injected  # anchor contract
     assert "_hook_/_order_/_singleton_group_/" in injected  # metadata materialization trap
     assert "IV-9" in injected  # F3: bucket/extension gate warning
+    assert "Bucket is DERIVED" in injected  # 08-13: bucket comes from the diff, not the model
+    assert "never looks at graph edges" in injected  # 08-13: landability rule
     assert "REPLACES the entire" in injected  # failure_evidence full-replace warning
 
 

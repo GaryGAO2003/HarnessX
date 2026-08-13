@@ -127,20 +127,45 @@ _INCREMENTAL_DISCIPLINE = (
     "no closing ceremony required."
 )
 
-# F3: IV-9 (harnessx/aegis/gates/structure.py) rejects a candidate whose file_changes
-# include an extension outside its declared bucket's whitelist -- and file_changes is
-# assembled by scanning what the model actually wrote (see _file_changes_for), not by
-# trusting the bucket field, so a mismatched bucket is unrecoverable after the fact.
+# F3 + 08-13 autopsy: the manifest's bucket is now DERIVED from the realised diff
+# (graph_proposals.derive_landing_buckets), so the model no longer chooses it. But
+# IV-9 (harnessx/aegis/gates/structure.py:140) still checks written extensions
+# against that derived bucket, which makes "what edit you make" and "what asset you
+# write" two halves of one decision the model does still control.
 _BUCKET_EXTENSION_WARNING = (
-    "Bucket/extension gate (IV-9): bucket=config allows only .yaml/.yml; "
-    "bucket=prompt allows .md/.yaml/.yml; bucket=processor and bucket=tools each "
-    "allow .py/.yaml/.yml. file_changes is assembled by scanning every file you "
-    "actually wrote in this candidate's scratch directory -- you cannot hide a .py "
-    "asset under bucket=config, IV-9 checks by extension against what is really on "
-    "disk. If a candidate legitimately touches more than one bucket's file types, "
-    "pass bucket as a LIST (e.g. [\"prompt\", \"processor\"]) instead of a single "
-    "string. Before finishing, call GraphProposalStatus to run the real structure "
-    "gate against your candidate and catch a bucket/extension mismatch yourself."
+    "Bucket is DERIVED, not declared. The bucket written into your manifest comes "
+    "from the diff your edits actually produce; the value you pass to "
+    "GraphProposalOpen is recorded as intent only and does not decide anything. "
+    "Adding or removing a processor node derives processor; changing kwargs on a "
+    "node that already exists derives config; repointing the system prompt's "
+    "template_path derives prompt; changing tool_registry derives tools. A "
+    "candidate doing several of these derives a list of them.\n"
+    "This still constrains you, because IV-9 checks the extension of every file "
+    "you write against the DERIVED bucket's whitelist (config -> .yaml/.yml; "
+    "prompt -> .md/.yaml/.yml; processor and tools -> .py/.yaml/.yml; a derived "
+    "list allows the union), and file_changes is assembled by scanning your "
+    "scratch directory rather than trusting any declared field. So the asset and "
+    "the edit have to agree: a .md prompt file is legal only if one of your edits "
+    "repoints template_path at it, and a .py helper is legal only if one of your "
+    "edits adds or removes a processor node. Writing an asset your edits do not "
+    "account for is an IV-9 rejection you cannot repair afterwards."
+)
+
+# 08-13 autopsy (runs/L5_holdout6x3 R1): AEGIS installs a ship by dispatching on
+# bucket over the processor list and tool_registry -- compose never reads edges. An
+# edit leaving no trace there passes all five gates and lands nothing, and the flat
+# round then reads as "the intervention didn't help" rather than "it never ran".
+_LANDABILITY_RULE = (
+    "Only node-level changes can land. AEGIS installs a shipped candidate by "
+    "overlaying its processor list and tool_registry onto the round's config; it "
+    "never looks at graph edges. A change_dependency edit, however correct, "
+    "therefore leaves nothing behind -- the next round would silently re-run the "
+    "parent config while your candidate showed five green gates and a clean "
+    "verdict. GraphProposalManifest refuses to finalize a candidate whose edits "
+    "produce no carryable change; if you hit that refusal, re-express the intent "
+    "as insert_node / remove_node / replace_same_group. Call GraphProposalStatus "
+    "at any point to see declared_bucket, landing_buckets, and the real structure "
+    "gate's verdict on what you have so far."
 )
 
 
@@ -179,6 +204,8 @@ def _render_prompt_section(session: ProposalSession) -> str:
         "actually inactive despite its name.",
         "",
         _METADATA_TRAP_WARNING,
+        "",
+        _LANDABILITY_RULE,
         "",
         _BUCKET_EXTENSION_WARNING,
         "",
