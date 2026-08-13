@@ -1,5 +1,21 @@
 # 103x10 双臂复活手册（2026-08-13 夜）
 
+## 发车前必查两条（2026-08-13 加，两条都会静默毁实验）
+
+1. **目标轮的 `R<N>/sessions/` 是否已有内容？**
+   有 → **先归档**（`mv R<N>/sessions R<N>/trajectories R<N>/_partial_killed/`，
+   meta 产物 candidates/verdicts/decision/applied/digests 一律保留），否则这些题会走
+   `HarnessJournal.wake()`，拿到 `state.max_steps = state.step + task.max_steps`
+   **双倍步预算 + 上一次的全部对话**。L2 的 R5 就是这样中的：全臂唯一一轮有 14 题
+   突破名义上限（40→60）。
+   无 → 直接跑。
+
+2. **`R<N-1>/applied/merged.yaml` 存在吗，且是你要的那份配置？**
+   续跑只认这个路径，缺失就**静默回退**到 `R<N-1>/config.yaml`。若 R<N-1> 自己
+   是续跑进来的（没有产生它的 meta），这个文件不存在，于是**刚上车的候选会被丢掉**。
+   处置：把 `R<N>/applied/merged.yaml` 复制成 `R<N-1>/applied/merged.yaml`。
+   发车后用 `grep "resume: loading current_config from" <log> | tail -1` 复核读的是哪一份。
+
 任一臂死亡（进程消失/早停/重启）后的续跑命令。原则：`--start-round N`，
 N = curves.json 里最后一个已记分轮 + 1。新进程 noop_streak 归零；播种自
 R(N-1)/applied/merged.yaml（无则 R(N-1)/config.yaml），曲线历史自动恢复。
