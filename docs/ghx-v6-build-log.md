@@ -726,6 +726,80 @@ C-R1-02 做了三个 `insert_node`，却声明 `bucket: config` → `_apply_conf
 prompt+config 共存不再互相回滚。套件：ghx+recipe 113（原 107）、vendored aegis 274 不变、
 完整性钉绿。**零 vendored 字节改动**——修的全在 GHX overlay。
 
+### 三个候选全部贴错标签（全账）
+
+| 候选 | 自贴 | 实际做的 | 旧代码 | 新推导 |
+|---|---|---|---|---|
+| C-R1-01 | `prompt` | 换 `template_path` | 落了，被 02 回滚 | `prompt` |
+| C-R1-02 | `config` | 加 3 个处理器 | 静默丢弃 | `processor` |
+| C-R2-01 | `tools` | 加 1 个 `BashShieldProcessor`（`tool_registry` 与父**逐字节相同**） | 丢弃 → 守卫拦住 → R2 crashed | `processor` |
+
+三分之三。不是偶发，是"开候选时就要求声明改动类型"这个接口必然的产出——
+声明点在**做出改动之前**，模型没有可据以判断的信息。
+
+### 提示词侧同步（`e9b57cb`）
+
+`abef7c1` 把决定权从模型手里拿走了，但注进去的 `_BUCKET_EXTENSION_WARNING`
+还在说反话——它教的正是"按你要写的扩展名选桶"，**C-R1-02 恰恰是正确执行了这条
+才走到零落地**（它只写 `config.yaml`，按这条规则 `config` 就是对的答案）。
+改写为"桶是派生的，但 IV-9 按派生值查扩展名，所以资产和编辑必须自洽"，
+另加 `_LANDABILITY_RULE`（compose 不读边 → `change_dependency` 五门全绿零落地 →
+Manifest 硬拒）。
+
+---
+
+## L5 6×3 v2：落地成功，随即毒死父配置（08-13 09:47→10:42）
+
+`L5_holdout6x3_v2`，同床同模型，带上述两个修复。
+
+| 轮 | pass | 配置 | evolve |
+|---|---|---|---|
+| R0 | 50.0% | 基线 | ok（产出 C-R1-01） |
+| R1 | **33.3%** | 基线 **+ BashShieldProcessor** | **crashed（preflight）** |
+| R2 | 50.0% | 同 R1 | crashed |
+
+### 落地实锤
+
+`shipped_by_bucket: {"processor": "C-R1-01"}`——模型开候选时贴的不是这个，派生纠正后
+一路走到 commit，五门全绿。`diff R0/config.yaml R1/config.yaml` 除 `base_dir` 外
+**多出 16 行完整处理器节点**。**项目首次：Evolver 的图编辑真正进入了下一轮执行的配置。**
+
+### 6 题床的噪声，被同一次 run 自证
+
+R1 与 R2 跑的是**同一份配置**，读出 33.3% 与 50.0%——±1 题。所以这张床只能验
+"机制通不通"，验不了增益；任何基于它的方向性结论（含"BashShield 让读数掉了"）都不成立。
+103 床才是读数床。
+
+### 新洞：写入侧与读取侧不是同一把尺子（已修 `d1f51af`）
+
+模型自撰的 `bash_shield.py` 里：
+
+```python
+class BashShieldProcessor(MultiHookProcessor):
+    _writes_event_fields = ("tool_input", "approved", "synthetic_result")   # 裸字段名
+```
+
+它给 `GraphProposalEdit` 的 `node_spec` **没有这个键**（只有 `_target_`/`enabled`/
+`max_rewrite_chars`/`_hook_`/`_order_`/`_singleton_group_`）。于是：
+
+1. 编辑时 S3——键不存在，**无从检查**，放行；
+2. canonicalize——从**类属性**捞出来写进持久化 YAML；
+3. 写通复核——只比 genotype 哈希，**哈希不覆盖 event fields**，放行；
+4. 上船、R1 整轮执行，全程无阻；
+5. R1 evolve 建 `ProposalSession` → preflight 读回这份配置 →
+   `[S3:bad_event_field] ... is not 'EventClass.field'` → `ProposalPreflightError`
+   → **整个进化阶段崩掉**，R1 与 R2 各损失一次进化。
+
+**每一层都放行了一个没有任何一层在其持久化形态下校验过的东西。**
+
+修法：`_write_config_verified` 重载后追加
+`transactional_apply(to_graph(reloaded), [], materialize=True)`——即
+`ProposalSession.__init__` 对父配置跑的同一道 S0–S4——不过则回滚。
+原则一句话：**凡是我写出去的，必须过我读进来时的同一道关。**
+
+补丁承重性已验：拒绝来自 `layer: write`，编辑时 S3 单独抓不住这个形状
+（探针实测，非推断）。套件 ghx+recipe 114、aegis 274、钉绿、零 vendored 字节。
+
 **取全锥（控制+数据），不取纯数据锥——理由来自 prompt 不是尺寸。** Digester 要把失败归因到**组件**，分类里包含 `tool_output_dropped` 这种——而「工具结果被丢弃」**恰恰是一条数据边的缺席**（工具结果进 `raw_messages` 不进槽位）。纯数据锥会**系统性抹掉这整类失败**。全锥保留了组件归因需要的控制骨架。
 
 **加法接入，走哪条路要记账不要推断。** 没有 U 时今天的路径原样跑，且**默认如此**。这个仓已经被「从配置推导而非从执行推导的审计字段」咬过一次（`4e0810f`），不重蹈。
