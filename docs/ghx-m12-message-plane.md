@@ -146,3 +146,59 @@ M11 那个 **A=0.418** 是**用坏了的度量算出来的**——按 `#` 切 id
 **仍未验**：15 配对的均值是否稳定低于 1.000 且低到有用；`facts.md` 的共有节点表在
 有了 `tool:` / `model:` 词汇后是否让 evolver 不再造 `dangling_endpoint` 端点。
 后者是 L5 的事，本轮不测。
+
+## 8. L2 6×3 收口（`L2_msgplane6x3`，$65，53 分钟）
+
+分数 3/6 → 4/6 → 4/6，**不读**（±2 题 = ±33.3pp 就是全部量程）。三轮都 ship：
+R1 两个候选（processor + prompt，Critic 明确查过桶不冲突），R2 一个。
+
+### 锥区分度：三轮稳定
+
+15 配对 × 3 轮，同一批锥换投影重算（对照系 A = 1.000，锥是常函数）：
+
+| 投影 | R0 | R1 | R2 | 均值 |
+|---|---|---|---|---|
+| 静态节点（`facts.md` 现用） | 0.851 | 0.892 | 0.846 | **0.863** |
+| 静态节点 + hook | 0.933 | 0.952 | 0.932 | 0.939 |
+| 只看工具 | 0.513 | 0.626 | 0.473 | 0.537 |
+| 数据边签名（写者→读者） | 0.612 | 0.700 | 0.577 | 0.630 |
+| **数据边 + 跨步距离** | 0.331 | 0.364 | 0.288 | **0.328** |
+
+**不是单轮偶然**：两端在三轮里各自稳在 0.85±0.02 和 0.33±0.04。结论照旧——
+信息在锥里，是投影扔的。
+
+### 一条干预证据：改进流水线会反过来劣化证据通道
+
+**R1 每一个投影都比 R0 和 R2 更不区分**（0.851→0.892，0.331→0.364，五行同向）。
+原因是 R1 ship 了一个新处理器 `ToolResultClarityGuard`，节点集从 11–13 涨到 12–14。
+**多一个处理器 = 多一个恒亮的名字**，静态投影只会更饱和。
+
+这是饱和诊断的干预验证，不只是观察：**evolver 每改进一次流水线，指导它的那条证据
+通道就更钝一分**。这条反馈病理必须写进威胁节。
+
+### 消费情况：只有 Planner 读，而且读得对
+
+| 角色 | R1 | R2 |
+|---|---|---|
+| Planner (`landscape.md`) | 2 处引用 | 2 处引用 |
+| Digester | **0 / 6** | **0 / 6** |
+| Critic (`decision.md`) | 0 | 0 |
+
+Planner 的原文值得抄下来——它**独立复现了本记录 §7–8 的两条结论**：
+
+> *"the **same static cone nodes appear in all three failing tasks**: `model:...` and
+> every processor... The tool set differs — `0b26` and `851e` share `tool:Bash`;
+> `0b26` and `48eb` share `WebFetch`/`WebSearch` — matching that these are genuinely
+> different tool modalities... pointing at the **same silent-output-drop fault**,
+> which is upstream of the tool layer."*
+
+它**主动跳过了饱和的那部分，只拿工具集差异当信号**，并据此推出"故障在工具层上游"——
+正是唯一带信息的那个维度。同一段里它还说：
+
+> *"The cones' 'trajectory steps that causally mattered' are essentially the whole
+> run (steps 0–20)"*
+
+——**步指针饱和这件事，是消费者自己说出来的**，不是我从外面测的。
+
+Digester 三轮零引用，与既有 L2 审计一致（806 份里 75 份引用、31 份只是复述）。
+锥文件 523–915 行、32 倍重复，逐任务读的角色读不动它，是可以预期的。
