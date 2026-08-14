@@ -2452,3 +2452,80 @@ Jaccard = **0.846**，低于 A、与 C 同量级；但 n=2 单配对，区分度
 
 **同一个坑第三次**：上次教训写的是"没验证度量本身"，这次我差点直接把那个已被作废的
 0.418 当验收线写进 commit message。度量作废了要连引用它的地方一起改。
+
+---
+
+## 2026-08-14 · L0 十六轮收官：踏车在编辑面成立，在分数面被回滚闸压住
+
+`--num-rounds 16 --no-early-stop`，R0–R15 全部记分，任务侧 $1395.39（均 $87.21/轮）。
+
+```
+R0..R15  64 64 61 62 65 74 76 74 | 80 73 71 80 73 74 71 75
+```
+
+R0 = 64 (62.1%)，峰值 = **80 (77.7%) @ R8 与 R11**，R15 = 75 (72.8%)。
+R0→峰值 **+15.5pp**，峰值→R15 **−4.9pp**。
+
+### 地平线检验：原文 Fig.4 的崩塌没有复现
+
+原文峰值 R4 73.8% → R15 49.5%，**−24.3pp**，且形态是持续下滑。这里峰后窗口
+R8–R15（n=8）回归斜率 **−0.512 题/轮，SE 0.559，t = −0.92**（df=6，|t| < 2.45）：
+**峰后无可检出趋势**。八轮总漂移 −3.6 题 = −3.5pp，小于同配置噪声包络（±5 题）。
+
+结论按这条床只能写到这一步：**分数面上没有踏车**。但——
+
+### 编辑面上踏车是成立的，而且是标准的 fix-one-break-one 二循环
+
+逐轮解出"演化处理器"的成员变化（八个官方处理器恒定，只看 Evolver 造的）：
+
+| 轮 | 变化 | 分 |
+|---|---|---|
+| R11 | −EmptyRetrievalGuard\<R9\> **+ContentRefSurfacer\<R11\>** | **80** |
+| R12 | **−ContentRefSurfacer** +EmptyRetrievalGuard\<R9\> | 73 |
+| R13 | −EmptyRetrievalGuard **+ContentRefSurfacer** | 74 |
+| R14 | （无变化，R13 的真重复） | 71 |
+| R15 | −ContentRefSurfacer **+ContentRefSurfacerV2\<R15\>** | 75 |
+
+R11 上车的候选，被 R11 自己的 evolve 在下一轮**拆掉换回 R9 的旧件**（C-R12-01/02，
+status=ok，是 Evolver 主动决定，不是回滚）。R12 掉到 73 后：
+
+```
+21:00:53 [R12] ROLLBACK — post-ship regression Δ=-7 tasks (-6.8pp vs
+         last_validated=80); reverting ships: ['C-R12-01', 'C-R12-02']
+```
+
+**全程唯一一次回滚**，把 R11 的件装回去。所以 ship → 自己拆 → 回滚装回，
+三轮走完一个二循环。原文描述的机制在这里逐字出现，**只是 ship-aware rollback
+在一轮之内就把代价收了回来**，never 累积成 Fig.4 的那条下滑线。
+
+这是本轮最该写进论文的一句：**踏车不是没发生，是被官方底盘自带的回滚闸截断了。**
+判据 `pass_count_noise_threshold=5` 与实测同配置包络（±5 题）同量级，Δ=−7 只是
+勉强出界——闸门的灵敏度正压在噪声边缘上。
+
+### 顺带查出：`noop_streak` 用错了基线，官方早停会在配置仍在动时触发
+
+`run_meta_aegis.py:925` 的判据是
+
+```python
+if round_config_path.read_bytes() == new_yaml_path.read_bytes():
+    next_evolve_status = "noop"; noop_streak += 1
+```
+
+比的是"本轮跑的配置" vs "evolve 的输出"。但**回滚改的是 `current_config`，发生在
+这次比较之外**：R12 回滚后 `current_config` 换了一个处理器，evolve 相对
+R12 原配置没吐新东西 → 记 noop，`noop_streak=1`。于是
+
+- 日志断言"2 consecutive **unchanged** configs"，而 R12→R13 配置**确实变了**（语义
+  diff：−EmptyRetrievalGuard +ContentRefSurfacer）；
+- R13→R14 才是真 noop，`noop_streak=2` → **原样协议在 R13 就停**，终点 = 74 (71.8%)，
+  峰值→官方终点 −5.8pp。
+
+即：**收敛判据会在系统正在 ship→revert→rollback churn 的时候宣布收敛。**这条直接
+喂 #38（回归账加配置身份前置判据），并且把判据从"Evolver 是否吐出新编辑"改成
+"下一轮实际要跑的配置是否变了"就能修。本轮不改 vendored 字节，只记账。
+
+### 事故与处置回执
+
+R11 的杀→续跑（前一条记录）事后可验：R11 banner 哈希 `bce1612f93e75ce4`
+在杀前杀后逐字一致，`R10/applied/merged.yaml` 复制生效，C-R11-01 没被丢。
+R15 目录只有一次任务相，无超上限任务。
