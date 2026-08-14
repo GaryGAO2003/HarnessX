@@ -134,6 +134,25 @@ def _get_event_messages(event: "Event | None") -> "tuple | None":
     return tuple(msgs) if msgs is not None else None
 
 
+def _record_message_accesses(recorder, inv_id, step: int, before_msgs, after_msgs) -> None:
+    """Log one invocation's message-plane writes and reads (v6 M12).
+
+    Identity, not equality.  A message the processor passed through is the same object
+    on both sides, so it is neither read nor written by it.  What it added is a write.
+    What it dropped — a truncation, a compaction, the superseded half of a rewrite — it
+    had to consume in order to produce its output, so that is a read.  A rewrite shows
+    up as both, which is what a rewrite is.
+    """
+    before_ids = {id(m) for m in before_msgs}
+    after_ids = {id(m) for m in after_msgs}
+    for m in after_msgs:
+        if id(m) not in before_ids:
+            recorder.log_message_access(m, "write", inv_id, step)
+    for m in before_msgs:
+        if id(m) not in after_ids:
+            recorder.log_message_access(m, "read", inv_id, step)
+
+
 def _validate_messages_contract(
     hook: str,
     before_msgs: "tuple",
@@ -462,10 +481,16 @@ class ProcessorChain:
         _firing_step = getattr(event, "step_id", -1)
         _prev_inv = None
 
+        # v6 M12: the same pre/post message tuples the contract validator diffs are
+        # the message plane's observation point — so they are also computed when U is
+        # being recorded, and the invocation that owns them logs what it added
+        # (a write) and what it consumed (a read).
+        _do_msg_plane = _unfold_rec is not None
+
         for processor in self.processors:
             prev = events[:]
             prev_primary = next((e for e in reversed(prev) if isinstance(e, event_type)), None)
-            prev_msgs = _get_event_messages(prev_primary) if _do_validate else None
+            prev_msgs = _get_event_messages(prev_primary) if (_do_validate or _do_msg_plane) else None
 
             next_events: list[Event] = []
             # Establish the current-actor context around this processor's
@@ -474,10 +499,11 @@ class ProcessorChain:
             # must not leak its identity onto the next one.
             _actor_token = enter_actor(processor)
             _inv_token = None
+            _cur_inv = None
             if _unfold_rec is not None:
-                _inv_id, _inv_token = enter_invocation(processor, hook, _firing_step, _prev_inv)
-                if _inv_id is not None:
-                    _prev_inv = _inv_id
+                _cur_inv, _inv_token = enter_invocation(processor, hook, _firing_step, _prev_inv)
+                if _cur_inv is not None:
+                    _prev_inv = _cur_inv
             try:
                 for ev in events:
                     async for out in processor.process(ev):
@@ -489,19 +515,24 @@ class ProcessorChain:
             if not events:
                 return
 
-            # Per-processor contract validation
-            if _do_validate and prev_msgs is not None:
+            curr_msgs = None
+            if prev_msgs is not None:
                 curr_primary = next((e for e in reversed(events) if isinstance(e, event_type)), None)
                 curr_msgs = _get_event_messages(curr_primary)
-                if curr_msgs is not None:
-                    chain_user_additions = _validate_messages_contract(
-                        hook,
-                        prev_msgs,
-                        curr_msgs,
-                        processor_name=type(processor).__name__,
-                        step_id=getattr(event, "step_id", -1),
-                        chain_user_additions=chain_user_additions,
-                    )
+
+            if _do_msg_plane and _cur_inv is not None and prev_msgs is not None and curr_msgs is not None:
+                _record_message_accesses(_unfold_rec, _cur_inv, _firing_step, prev_msgs, curr_msgs)
+
+            # Per-processor contract validation
+            if _do_validate and prev_msgs is not None and curr_msgs is not None:
+                chain_user_additions = _validate_messages_contract(
+                    hook,
+                    prev_msgs,
+                    curr_msgs,
+                    processor_name=type(processor).__name__,
+                    step_id=getattr(event, "step_id", -1),
+                    chain_user_additions=chain_user_additions,
+                )
 
             if tracer is not None:
                 action = _diff_primary(prev, events, event_type)

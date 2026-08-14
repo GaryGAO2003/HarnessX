@@ -31,7 +31,12 @@ from .events import (
     make_run_id,
     rough_token_count,
 )
-from .attribution import current_unfold_recorder, enter_tool_invocation, exit_invocation
+from .attribution import (
+    current_unfold_recorder,
+    enter_model_invocation,
+    enter_tool_invocation,
+    exit_invocation,
+)
 from .processor import ContractViolationError, Processor, pipe_all
 
 _contract_logger = logging.getLogger("harnessx.contract")
@@ -407,6 +412,11 @@ async def run_loop(
                 tools=step_start_event.tools,
                 cumulative_cost_usd=state.cumulative_cost_usd,
             )
+            # v6 M12: snapshot the U node count before this firing, so the model node
+            # minted below links to the LAST before_model invocation rather than to a
+            # node from an earlier firing.  One context-var read when U is off.
+            _unfold_rec_m = current_unfold_recorder()
+            _bm_node_start = _unfold_rec_m.node_count() if _unfold_rec_m is not None else 0
             _bm_events = await pipe_all(
                 before_event,
                 get_procs("before_model"),
@@ -420,6 +430,10 @@ async def run_loop(
             await tracer.on_event(before_event)
 
             # ── 3. Call model ────────────────────────────────────────────────
+            # v6 M12: the provider call is its own U node (``model:<name>``) — the one
+            # site where the whole assembled message list is consumed, and the producer
+            # of the assistant reply.  ``None`` while U is off or the model is skipped.
+            _model_inv_id = None
             if before_event.skip_model:
                 model_event = ModelResponseEvent(
                     run_id=state.run_id,
@@ -435,11 +449,38 @@ async def run_loop(
                 # - Ensure messages don't end with assistant role (would be interpreted as prefill)
                 _before_msg_list = list(before_event.messages)
                 final_messages = _validate_messages(_before_msg_list)
-                model_response = await active_model_provider.complete(
-                    messages=final_messages,
-                    tools=list(before_event.tools),
-                    stream_callback=stream_callback,
+                # v6 M12: mint the model node and log its reads over
+                # ``_before_msg_list`` — the list the PIPELINE assembled for this call,
+                # not ``final_messages``.  ``_validate_messages`` is a runloop-internal
+                # normaliser: it merges consecutive user messages into a fresh object,
+                # so reading identity off its output would silently drop the authorship
+                # edge for every message it touched (on this stack that is the common
+                # case — an injected user note merged into the turn's user message).
+                # The narrow cost is that a message the normaliser DROPPED (an orphaned
+                # tool result) is still recorded as consumed.  Its control predecessor
+                # is the last before_model invocation, or None when no before_model
+                # processor ran (then no incoming edge is invented).
+                _bm_prev = (
+                    _unfold_rec_m.node_id_at(_unfold_rec_m.node_count() - 1)
+                    if _unfold_rec_m is not None and _unfold_rec_m.node_count() > _bm_node_start
+                    else None
                 )
+                _model_inv_id, _model_inv_token = enter_model_invocation(
+                    getattr(active_model_provider, "model", "") or type(active_model_provider).__name__,
+                    step_id,
+                    _bm_prev,
+                )
+                try:
+                    if _unfold_rec_m is not None and _model_inv_id is not None:
+                        for _sent in _before_msg_list:
+                            _unfold_rec_m.log_message_access(_sent, "read", _model_inv_id, step_id)
+                    model_response = await active_model_provider.complete(
+                        messages=final_messages,
+                        tools=list(before_event.tools),
+                        stream_callback=stream_callback,
+                    )
+                finally:
+                    exit_invocation(_model_inv_token)
                 model_event = ModelResponseEvent(
                     run_id=state.run_id,
                     step_id=step_id,
@@ -452,7 +493,15 @@ async def run_loop(
                     model=model_response.model,
                 )
                 # after_model uses pipe_all: processors may yield SpawnSubAgentEvents
+                _am_node_start = _unfold_rec_m.node_count() if _unfold_rec_m is not None else 0
                 after_events = await pipe_all(model_event, get_procs("after_model"), tracer=tracer, hook="after_model")
+                # model → first after_model: the observed order of one model call.
+                if (
+                    _unfold_rec_m is not None
+                    and _model_inv_id is not None
+                    and _unfold_rec_m.node_count() > _am_node_start
+                ):
+                    _unfold_rec_m.link_control(_model_inv_id, _unfold_rec_m.node_id_at(_am_node_start), "after_model")
                 spawn_events = [e for e in after_events if isinstance(e, SpawnSubAgentEvent)]
                 model_event = next(
                     (e for e in reversed(after_events) if isinstance(e, ModelResponseEvent)),
@@ -491,15 +540,19 @@ async def run_loop(
                 )
 
             if not before_event.skip_model:
-                state.add_raw_message(
-                    Message(
-                        role="assistant",
-                        content=model_event.content,
-                        tool_calls=model_event.tool_calls,
-                        thinking=model_event.thinking,
-                        thinking_blocks=model_event.thinking_blocks,
-                    )
+                _assistant_msg = Message(
+                    role="assistant",
+                    content=model_event.content,
+                    tool_calls=model_event.tool_calls,
+                    thinking=model_event.thinking,
+                    thinking_blocks=model_event.thinking_blocks,
                 )
+                state.add_raw_message(_assistant_msg)
+                # v6 M12: the model node wrote this reply.  Logged explicitly rather
+                # than through the current-invocation context var, because the append
+                # happens after the model's invocation scope has closed.
+                if _unfold_rec_m is not None and _model_inv_id is not None:
+                    _unfold_rec_m.log_message_access(_assistant_msg, "write", _model_inv_id, step_id)
 
             if model_event.content:
                 final_output = model_event.content
@@ -639,14 +692,17 @@ async def run_loop(
                             ]
                         else:
                             result_content = result_text
-                        state.add_raw_message(
-                            Message(
-                                role="tool",
-                                content=result_content,
-                                tool_call_id=tc_event.tool_call_id,
-                                name=tc_event.tool_name,
-                            )
+                        _tool_msg = Message(
+                            role="tool",
+                            content=result_content,
+                            tool_call_id=tc_event.tool_call_id,
+                            name=tc_event.tool_name,
                         )
+                        state.add_raw_message(_tool_msg)
+                        # v6 M12: the tool node produced this message — the edge that
+                        # carries a retrieval failure forward to the model that read it.
+                        if _unfold_rec is not None and _tool_inv_id is not None:
+                            _unfold_rec.log_message_access(_tool_msg, "write", _tool_inv_id, step_id)
                     elif tc_event.synthetic_result is not None:
                         tr_event = ToolResultEvent(
                             run_id=state.run_id,

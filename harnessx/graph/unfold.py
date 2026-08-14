@@ -47,6 +47,30 @@ higher.  ``spawn_subagent`` additionally carries an inter-layer ``INVOKES`` edge
 from its tool node to the child run id (:class:`UnfoldedInvokes`), kept in a
 separate collection because its target is a child run, not a node in this U.
 
+v6 M12.  The message plane.  ``OBSERVED_DATA`` originally derived only from
+``State.slot_provenance``.  On a stack that carries everything through the message
+list that channel is empty, so U had a control plane and no data plane at all —
+and because control edges never cross a hook firing, every causal cone collapsed
+to the firing holding its anchor.  Messages are now a **second access plane in the
+same reaching-definitions log**:
+
+  * a processor invocation that adds a message to the event's tuple *writes* it,
+    and one that drops a message *reads* it (a rewrite is both);
+  * the model invocation *reads* the exact list handed to the provider and
+    *writes* the assistant reply;
+  * a tool invocation *writes* its result message.
+
+Message identity is the message object's own identity: pass-through preserves it,
+a rewrite allocates a new object — which is exactly a new definition. The recorder
+pins every message it has keyed so an ``id`` can never be recycled onto a different
+object.  Message accesses skip the ``slot_provenance`` cross-check (a message has
+no provenance record); slot accesses keep it.
+
+v6 M12 also mints one node per model call (``model:<name>``, hook ``"model"``) from
+the same global ordinal, for the same reason tools got one in M5: the model is a
+real consumer and producer on the data plane, and it belongs to none of the
+processors around it.
+
 Recording is free when nothing consumes it: the recorder is installed per run
 only when :func:`unfold_enabled` is true (env ``HARNESSX_GHX_UNFOLD``).  With it
 absent, ``ProcessorChain.process`` does a single context-var read and moves on.
@@ -194,10 +218,17 @@ class UnfoldRecorder:
         # inter-layer INVOKES edges (parent tool node → child run id), kept apart
         # from the observed control/data edges above.
         self._invokes: list = []
-        # access log entries: {"ordinal", "kind", "slot_key", "step", "inv_id"},
-        # appended in execution order (== ordinal order across invocations).
+        # access log entries: {"ordinal", "kind", "slot_key", "step", "inv_id",
+        # "plane"}, appended in execution order (== ordinal order across
+        # invocations).  Both planes share this log: ``_build_data_edges`` is
+        # reaching-definitions over ``slot_key`` and does not care what a key names.
         self._accesses: list = []
         self._base_by_ordinal: dict = {}
+        # v6 M12: message identity.  ``id(message) -> key``, with every keyed
+        # message pinned in ``_msg_pin`` so CPython can never recycle an id onto a
+        # different object and fabricate a data edge between unrelated messages.
+        self._msg_keys: dict = {}
+        self._msg_pin: list = []
 
     # -- recording (called around each processor invocation) -----------------
 
@@ -280,6 +311,45 @@ class UnfoldRecorder:
             )
         return uid
 
+    def record_model_invocation(self, model_name: str, step: int, prev_in_firing) -> str:
+        """Record one model-call node in U; link ``prev_in_firing`` with OBSERVED_CONTROL.
+
+        Exactly the shape of :meth:`record_tool_invocation`, for the same reason: the
+        provider call is not a processor dispatch, it sits between the ``before_model``
+        and ``after_model`` firings, and it is the one place the whole assembled message
+        list is consumed.  Node id is ``model:<name>``, hook ``"model"``, drawn from the
+        SAME global ordinal so it interleaves with the processors around it and every
+        edge still points forward.  ``prev_in_firing`` is the last ``before_model``
+        invocation's id (``None`` when none ran — then no incoming edge is invented);
+        the ``model → first after_model`` edge is added afterwards by :meth:`link_control`.
+        """
+        base = f"model:{model_name}" if model_name else "model:unknown"
+        ordinal = self._ordinal
+        self._ordinal += 1
+        uid = unfolded_id(base, ordinal)
+        self._nodes.append(
+            UnfoldedNode(
+                id=uid,
+                static_node_id=base,
+                graphed=True,
+                hook="model",
+                step=int(step),
+                ordinal=ordinal,
+                label=model_name or "unknown",
+            )
+        )
+        self._base_by_ordinal[ordinal] = base
+        if prev_in_firing is not None:
+            self._control_edges.append(
+                UnfoldedEdge(
+                    source=prev_in_firing,
+                    target=uid,
+                    edge_type=_OBSERVED_CONTROL,
+                    metadata={"hook": "before_model"},
+                )
+            )
+        return uid
+
     def link_control(self, source_id, target_id, hook: str) -> None:
         """Add an OBSERVED_CONTROL edge ``source_id → target_id`` between two nodes.
 
@@ -330,14 +400,58 @@ class UnfoldRecorder:
 
     def log_slot_access(self, slot_key: str, kind: str, invocation_id: str, step: int) -> None:
         """Log a slot access performed by the currently-executing invocation."""
+        self._log_access(slot_key, kind, invocation_id, step, "slot")
+
+    def message_key(self, message) -> str:
+        """Stable per-run key naming one message object (v6 M12).
+
+        Keyed on object identity, so a message passed through unchanged keeps its key
+        while a rewritten one gets a fresh key — the reaching-definitions engine then
+        reads a rewrite as a new definition, which is what it is.  The message is
+        pinned for the recorder's lifetime: an unpinned object could be collected and
+        its ``id`` handed to an unrelated message, silently welding two definitions
+        together.
+        """
+        mid = id(message)
+        key = self._msg_keys.get(mid)
+        if key is None:
+            key = f"msg:{len(self._msg_keys)}:{getattr(message, 'role', '?')}"
+            self._msg_keys[mid] = key
+            self._msg_pin.append(message)
+        return key
+
+    def log_message_access(self, message, kind: str, invocation_id, step: int) -> None:
+        """Log a message-plane access by ``invocation_id`` (v6 M12); no-op if it is ``None``.
+
+        Callers pass the invocation id explicitly rather than relying on the current-
+        invocation context var, because the two message producers outside the processor
+        dispatcher — the model call and the tool call — append their messages after their
+        own invocation scope has closed.
+
+        **A write is the FIRST sight of a message object, and only that.**  A context
+        assembler that pulls history out of ``State`` into an empty event tuple looks,
+        to the dispatcher's diff, exactly like a processor that produced all of it; were
+        that recorded, last-write-wins would hand the assembler authorship of every
+        message each step and erase the tool → model and model → model edges that are
+        the whole point.  Identity is the definition: an object is defined once, when it
+        first exists, and every later re-appearance is carriage, not authorship.
+        """
+        if invocation_id is None:
+            return
+        if kind == "write" and id(message) in self._msg_keys:
+            return
+        self._log_access(self.message_key(message), kind, invocation_id, step, "message")
+
+    def _log_access(self, key: str, kind: str, invocation_id: str, step: int, plane: str) -> None:
         _, ordinal = parse_unfolded_id(invocation_id)
         self._accesses.append(
             {
                 "ordinal": ordinal,
                 "kind": kind,
-                "slot_key": slot_key,
+                "slot_key": key,
                 "step": int(step),
                 "inv_id": invocation_id,
+                "plane": plane,
             }
         )
 
@@ -392,7 +506,12 @@ class UnfoldRecorder:
                     edge_key = (last_write["inv_id"], a["inv_id"], key)
                     if edge_key in seen:
                         continue
-                    if state is not None and not self._provenance_supports(prov, key, last_write, a):
+                    # The slot_provenance cross-check applies to the slot plane only:
+                    # a message has no provenance record to be corroborated against,
+                    # and the dispatcher/runloop sites that log message accesses are
+                    # themselves the primary observation (v6 M12).
+                    plane = a.get("plane", "slot")
+                    if plane == "slot" and state is not None and not self._provenance_supports(prov, key, last_write, a):
                         continue
                     seen.add(edge_key)
                     edges.append(
@@ -401,6 +520,7 @@ class UnfoldRecorder:
                             target=a["inv_id"],
                             edge_type=_OBSERVED_DATA,
                             metadata={
+                                "plane": plane,
                                 "slot_key": key,
                                 "writer": {
                                     "static_node_id": self._base_by_ordinal[last_write["ordinal"]],

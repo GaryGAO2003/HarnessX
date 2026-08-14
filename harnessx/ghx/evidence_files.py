@@ -12,11 +12,14 @@ transcript.
 Two kinds of file are written under ``<run_dir>/R{n}/graph_evidence/``:
 
 1. **Cone maps**, one per *failing* task, at ``cones/<task_id>.md``.  Each renders
-   the causal cone (:func:`harnessx.graph.causal.causal_cone`) anchored at the
-   run's terminal invocation (:func:`~harnessx.graph.causal.terminal_node`):
-   the cone's invocations in ordinal order (``t{ordinal}: hook label [step N]``),
-   the slot data-flow section (``slot: t{writer} -> t{reader}`` over the cone's
-   ``OBSERVED_DATA`` edges), the ``INVOKES`` frontier when the cone reached a
+   the causal cone (:func:`harnessx.graph.causal.causal_cone`) anchored by
+   :func:`_cone_anchors` — the run's terminal invocation
+   (:func:`~harnessx.graph.causal.terminal_node`) together with its last model call
+   (v6 M12), because ``TaskEndEvent`` carries no messages and the terminal anchor
+   alone cannot reach the message plane.  The file holds the cone's invocations in
+   ordinal order (``t{ordinal}: hook label [step N]``), the data-flow section
+   (``key: t{writer} -> t{reader}`` over the cone's ``OBSERVED_DATA`` edges, both
+   the slot and the message plane), the ``INVOKES`` frontier when the cone reached a
    subagent boundary, and the set of trajectory step numbers the cone touched —
    the pointers the reader opens.
 
@@ -38,7 +41,7 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
-from ..graph.causal import DATA, causal_cone, invokes_frontier, terminal_node
+from ..graph.causal import DATA, causal_cone, invokes_frontier, select_nodes, terminal_node
 from ..graph.unfold import UnfoldedGraph, load_unfolded, unfolded_path
 
 # A static node counts as "shared" only when it appears in the cone of at least
@@ -93,20 +96,45 @@ def _load_u(resolved) -> UnfoldedGraph | None:
 # ── rendering ────────────────────────────────────────────────────────────────
 
 
-def _render_cone(task_id: str, u: UnfoldedGraph, anchor: str, cone: set) -> str:
+def _cone_anchors(u: UnfoldedGraph) -> list:
+    """The anchors a failure cone is rooted at: the terminal invocation, plus the run's
+    LAST model call when there was one (v6 M12).
+
+    The terminal invocation is the run's final state, but ``TaskEndEvent`` carries no
+    ``messages`` field, so a ``task_end`` processor can never touch the message plane and
+    its cone reaches nothing the run actually did.  The last model call is the invocation
+    that emitted the final answer and read the whole history that produced it — on the
+    message plane that is where the run's causal chain is anchored.  Both are kept: the
+    union only ever adds to what the terminal anchor already gave.
+    """
+    anchors: list = []
+    term = terminal_node(u)
+    if term is not None:
+        anchors.append(term)
+    model_nodes = select_nodes(u, lambda n: n.hook == "model")
+    if model_nodes and model_nodes[-1] not in anchors:
+        anchors.append(model_nodes[-1])
+    return anchors
+
+
+def _render_cone(task_id: str, u: UnfoldedGraph, anchors: list, cone: set) -> str:
     node_by_id = {n.id: n for n in u.nodes}
     cone_nodes = sorted(
         (node_by_id[nid] for nid in cone if nid in node_by_id),
         key=lambda n: n.ordinal,
     )
-    anchor_node = node_by_id.get(anchor)
-    anchor_desc = f"t{anchor_node.ordinal}: {anchor_node.hook} {anchor_node.label}" if anchor_node else anchor
+
+    def _desc(nid: str) -> str:
+        n = node_by_id.get(nid)
+        return f"t{n.ordinal}: {n.hook} {n.label}" if n else nid
+
+    anchor_desc = "; ".join(_desc(a) for a in anchors)
 
     lines: list[str] = [
         f"# Causal cone — {task_id}",
         "",
         (
-            f"Anchored at the run's terminal invocation ({anchor_desc}). The invocations "
+            f"Anchored at {anchor_desc}. The invocations "
             "below are the causal cone — every invocation that could have contributed to "
             "how this run ended — in ordinal order. This file is a MAP, not a payload: each "
             "`[step N]` points into this task's trajectory; read those steps yourself, no "
@@ -131,7 +159,7 @@ def _render_cone(task_id: str, u: UnfoldedGraph, anchor: str, cone: set) -> str:
         slot = (e.metadata or {}).get("slot_key", "?")
         data_rows.append((w.ordinal, r.ordinal, slot))
     if data_rows:
-        lines.append("## Slot data-flow (writer -> reader)")
+        lines.append("## Data-flow (writer -> reader)")
         for w_ord, r_ord, slot in sorted(data_rows):
             lines.append(f"- {slot}: t{w_ord} -> t{r_ord}")
         lines.append("")
@@ -227,13 +255,13 @@ def materialize_graph_evidence(
         if u is None or not u.nodes:
             missing_u.append(task_id)
             continue
-        anchor = terminal_node(u)
-        if anchor is None:
+        anchors = _cone_anchors(u)
+        if not anchors:
             missing_u.append(task_id)
             continue
-        cone = causal_cone(u, anchor, include_anchors=True)
+        cone = causal_cone(u, anchors, include_anchors=True)
         cones_dir.mkdir(parents=True, exist_ok=True)
-        (cones_dir / f"{task_id}.md").write_text(_render_cone(task_id, u, anchor, cone), encoding="utf-8")
+        (cones_dir / f"{task_id}.md").write_text(_render_cone(task_id, u, anchors, cone), encoding="utf-8")
         cones_written.append(task_id)
         node_by_id = {n.id: n for n in u.nodes}
         per_task_static_nodes[task_id] = {node_by_id[nid].static_node_id for nid in cone if nid in node_by_id}

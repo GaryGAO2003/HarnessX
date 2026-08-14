@@ -80,8 +80,8 @@ def test_cone_file_content(tmp_path: Path):
     assert "- t2: tool tool:Bash [step 1]" in body
     assert "- t4: task_end End [step 2]" in body
 
-    # Slot data-flow section.
-    assert "## Slot data-flow (writer -> reader)" in body
+    # Data-flow section (slot and message planes share it).
+    assert "## Data-flow (writer -> reader)" in body
     assert "- plan: t2 -> t3" in body
 
     # INVOKES frontier (cone reached a subagent boundary).

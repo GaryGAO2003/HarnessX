@@ -165,6 +165,21 @@ def enter_tool_invocation(tool_name: str, step: int, prev_in_firing):
     return inv_id, token
 
 
+def enter_model_invocation(model_name: str, step: int, prev_in_firing):
+    """Record a model-call invocation and mark it current; returns ``(id, token)``.
+
+    Symmetric with :func:`enter_tool_invocation` (v6 M12): the provider call is not a
+    processor dispatch, so there is no actor to resolve — the recorder mints the node
+    from ``model_name``.  ``(None, None)`` comes back when no recorder is active.
+    """
+    recorder = _unfold_recorder.get()
+    if recorder is None:
+        return None, None
+    inv_id = recorder.record_model_invocation(model_name, step, prev_in_firing)
+    token = _current_invocation.set(inv_id)
+    return inv_id, token
+
+
 def note_slot_access(slot_key: str, kind: str, step: int) -> None:
     """Report a slot access (from ``State``) to the active recorder, if any."""
     recorder = _unfold_recorder.get()

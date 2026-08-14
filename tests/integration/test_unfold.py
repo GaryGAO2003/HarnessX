@@ -289,10 +289,12 @@ async def test_node_count_matches_invocations(tmp_path, monkeypatch):
         tools=[add_tool],
     )
     assert counter[0] > 0
-    # v6 M5: U now also carries a node per TOOL execution (hook == "tool"); the spy
-    # counts only PROCESSOR invocations, so split the two before comparing.
-    proc_nodes = [n for n in graph.nodes if n.hook != "tool"]
+    # v6 M5 / M12: U also carries a node per TOOL execution (hook == "tool") and per
+    # MODEL call (hook == "model"); the spy counts only PROCESSOR invocations, so
+    # split the three before comparing.
+    proc_nodes = [n for n in graph.nodes if n.hook not in ("tool", "model")]
     tool_nodes = [n for n in graph.nodes if n.hook == "tool"]
+    model_nodes = [n for n in graph.nodes if n.hook == "model"]
     # Two independent facts, both keyed to the same spy-measured invocation count:
     #  - processor node RECORDS == invocations  → no invocation was dropped;
     #  - distinct node IDS == records (over ALL nodes, tools included) → no two
@@ -302,6 +304,7 @@ async def test_node_count_matches_invocations(tmp_path, monkeypatch):
     assert len(proc_nodes) == counter[0], f"U has {len(proc_nodes)} processor node records but {counter[0]} invocations"
     # _TWO_TOOLS_THEN_DONE is one step with two add calls → two tool nodes.
     assert len(tool_nodes) == 2, f"expected 2 tool nodes, got {len(tool_nodes)}"
+    assert len(model_nodes) == 2, f"expected 2 model nodes (one per step), got {len(model_nodes)}"
     assert len(graph.node_ids()) == len(graph.nodes), (
         f"U has {len(graph.node_ids())} distinct ids for {len(graph.nodes)} records — invocations collapsed"
     )
@@ -322,8 +325,16 @@ async def test_data_edges_match_provenance(tmp_path, monkeypatch):
         tools=[add_tool],
     )
     prov = result.resume_state.slot_provenance
-    data_edges = graph.edges_of_type(EdgeType.OBSERVED_DATA.value)
-    assert data_edges, "expected at least one OBSERVED_DATA edge"
+    all_data_edges = graph.edges_of_type(EdgeType.OBSERVED_DATA.value)
+    assert all_data_edges, "expected at least one OBSERVED_DATA edge"
+    # v6 M12: the provenance cross-check is the SLOT plane's invariant.  Message-plane
+    # edges are deliberately exempt — a message has no slot_provenance record, and the
+    # dispatcher/runloop sites that log them are themselves the primary observation.
+    data_edges = [e for e in all_data_edges if (e.metadata or {}).get("plane", "slot") == "slot"]
+    assert data_edges, "expected at least one slot-plane OBSERVED_DATA edge"
+    assert all(
+        not (e.metadata or {}).get("slot_key", "").startswith("msg:") for e in data_edges
+    ), "a message key leaked into the slot plane"
 
     node_by_id = {n.id: n for n in graph.nodes}
 
